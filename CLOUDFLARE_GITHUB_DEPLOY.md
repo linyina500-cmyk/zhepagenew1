@@ -5,6 +5,7 @@
 1. 解压本发布包。
 2. 把解压后的所有文件上传到 GitHub 仓库根目录。
 3. 确认仓库根目录能直接看到 `package.json`、`package-lock.json`、`app/`、`functions/` 和 `public/`，不要在外面再套一层 `zhepage` 文件夹。
+4. 必须同时覆盖 `package.json` 和 `package-lock.json`。本包的锁文件已经使用 Cloudflare 日志中的 npm 10.9.2 重建并通过 `npm ci` 验证，不能继续保留旧锁文件。
 
 ## Cloudflare Pages 构建设置
 
