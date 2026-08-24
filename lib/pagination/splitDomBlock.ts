@@ -54,6 +54,8 @@ export function articleBlocks(html: string) {
     [...root.querySelectorAll("section,div,article,main,aside")].reverse().forEach((element) => {
       if (element === root || element.hasAttribute("data-pagination-shell")) return;
       if (element.closest(ATOMIC_SELECTOR)) return;
+      const richLayoutAncestor = element.parentElement?.closest(`.${RICH_LAYOUT_CLASS}`);
+      if (richLayoutAncestor && isRichLayoutGroup(richLayoutAncestor)) return;
       if (element.classList.contains("manual-page-break") || hasVisualContainerStyle(element)) return;
       const nodes = [...element.childNodes].filter(meaningfulNode);
       if (!nodes.length) {

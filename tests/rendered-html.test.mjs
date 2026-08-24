@@ -200,6 +200,8 @@ test("ships DOM-safe smart pagination and local-only beautification regressions"
   assert.match(splitter, /data-pagination-fragment/);
   assert.match(splitter, /isAtomicInner/);
   assert.match(splitter, /inner\.classList\.contains\(RICH_LAYOUT_CLASS\)/);
+  assert.match(splitter, /richLayoutAncestor/);
+  assert.match(splitter, /element\.parentElement\?\.closest\(`\.\$\{RICH_LAYOUT_CLASS\}`\)/);
   assert.doesNotMatch(splitter, /range\.cloneContents\(\)/);
   assert.match(splitter, /semanticCut/);
   assert.doesNotMatch(splitter, /shell\.textContent\s*=/);
