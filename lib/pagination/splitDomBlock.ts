@@ -1,4 +1,5 @@
 import { measureHtml } from "./measureBlock";
+import { RICH_LAYOUT_CLASS, isRichLayoutGroup } from "../richText/normalizeRichHtml";
 
 const ATOMIC_SELECTOR = ".lead-magnet-card,.risk-note,.first-page-lede,.manual-empty-line";
 const STRUCTURAL_TAGS = new Set(["SECTION", "DIV", "ARTICLE", "MAIN", "ASIDE"]);
@@ -20,28 +21,9 @@ function hasVisiblePaint(style: string, property: string) {
   return !/^(?:none|transparent|initial|inherit|unset|0(?:px)?)\s*$/i.test(match[1].trim());
 }
 
-export function isCompositeVisualContainer(element: Element) {
-  if (!element.matches("section,div")) return false;
-  const style = element.getAttribute("style") || "";
-  const visibleChildren = [...element.children].filter((child) => meaningfulNode(child));
-  const textLength = element.textContent?.trim().length || 0;
-  if (visibleChildren.length < 6 || visibleChildren.length > 30 || textLength > 1200) return false;
-  const hasPanelShell = hasVisiblePaint(style, "background(?:-color)?")
-    || hasVisiblePaint(style, "border")
-    || hasVisiblePaint(style, "box-shadow")
-    || hasVisiblePaint(style, "border-radius");
-  if (!hasPanelShell) return false;
-  const repeatedVisualRows = visibleChildren.filter((child) => {
-    const childStyle = child.getAttribute("style") || "";
-    return /display\s*:\s*(?:flex|grid)/i.test(childStyle) && child.children.length >= 2;
-  }).length;
-  const headingCount = element.querySelectorAll("h1,h2,h3,h4,h5,h6").length;
-  return repeatedVisualRows >= 5 && headingCount <= 2;
-}
-
 export function hasVisualContainerStyle(element: Element) {
   if (element.matches(ATOMIC_SELECTOR)) return true;
-  if (element.classList.contains("imported-composite-visual")) return isCompositeVisualContainer(element);
+  if (element.classList.contains(RICH_LAYOUT_CLASS)) return isRichLayoutGroup(element);
   if (!STRUCTURAL_TAGS.has(element.tagName)) return false;
 
   const style = element.getAttribute("style") || "";
@@ -263,8 +245,8 @@ export function splitOversizedBlock(
   if (!element) return [html];
 
   const splitElement = (source: Element): Element[] => {
-    const isVerifiedComposite = source.classList.contains("imported-composite-visual") && isCompositeVisualContainer(source);
-    if (source.classList.contains("imported-composite-visual") && !isVerifiedComposite) source.classList.remove("imported-composite-visual");
+    const isVerifiedComposite = source.classList.contains(RICH_LAYOUT_CLASS) && isRichLayoutGroup(source);
+    if (source.classList.contains(RICH_LAYOUT_CLASS) && !isVerifiedComposite) source.classList.remove(RICH_LAYOUT_CLASS);
     if (source.matches(`${ATOMIC_SELECTOR},h1,h2,h3`) || isVerifiedComposite) return [source.cloneNode(true) as Element];
 
     if (source.matches("img,hr") || !GROUP_TAGS.has(source.tagName) && source.querySelector(VISUAL_CONTENT_SELECTOR)) {
@@ -287,7 +269,11 @@ export function splitOversizedBlock(
       });
     }
     if (GROUP_TAGS.has(source.tagName) && nodes.length === 1 && nodes[0].nodeType === Node.ELEMENT_NODE) {
-      const innerPieces = splitElement(nodes[0] as Element);
+      const inner = nodes[0] as Element;
+      const isAtomicInner = inner.matches(`${ATOMIC_SELECTOR},h1,h2,h3,img,hr`)
+        || inner.classList.contains(RICH_LAYOUT_CLASS) && isRichLayoutGroup(inner);
+      if (isAtomicInner) return [source.cloneNode(true) as Element];
+      const innerPieces = splitElement(inner);
       if (innerPieces.length > 1) return innerPieces.map((piece) => {
         const shell = source.cloneNode(false) as Element;
         shell.append(piece);

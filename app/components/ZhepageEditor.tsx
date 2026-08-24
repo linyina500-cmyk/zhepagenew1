@@ -9,32 +9,9 @@ import TextAlign from "@tiptap/extension-text-align";
 import { Color, TextStyle } from "@tiptap/extension-text-style";
 import { TableKit } from "@tiptap/extension-table";
 import { Extension, Mark, Node, getStyleProperty, mergeAttributes } from "@tiptap/core";
+import { NodeSelection } from "@tiptap/pm/state";
 import UnifiedColorPopover from "./UnifiedColorPopover";
-
-function normalizePastedTables(pastedHtml: string) {
-  const parsed = new DOMParser().parseFromString(pastedHtml, "text/html");
-  parsed.body.querySelectorAll("table").forEach((table) => {
-    const directRows = [...table.children].filter((child) => child.tagName === "TR");
-    if (directRows.length) {
-      const body = parsed.createElement("tbody");
-      directRows.forEach((row) => body.append(row));
-      table.append(body);
-    }
-    table.querySelectorAll("tr").forEach((row) => {
-      const cells = [...row.children].filter((child) => child.matches("td,th"));
-      cells.forEach((cell) => {
-        if (!cell.childNodes.length) cell.append(parsed.createElement("p"));
-        [...cell.childNodes].forEach((node) => {
-          if (node.nodeType !== window.Node.TEXT_NODE || !node.textContent?.trim()) return;
-          const paragraph = parsed.createElement("p");
-          paragraph.textContent = node.textContent;
-          node.replaceWith(paragraph);
-        });
-      });
-    });
-  });
-  return parsed;
-}
+import { RICH_TEXT_LIMITS, normalizeRichHtmlDocument, richTextLimitMessage } from "../../lib/richText/normalizeRichHtml";
 
 type ZhepageEditorProps = {
   html: string;
@@ -42,8 +19,10 @@ type ZhepageEditorProps = {
   accentColor: string;
   highlightColor: string;
   onChange: (html: string) => void;
-  onNotice: (text: string) => void;
-  onAutoTypeset?: (html: string) => void;
+  onNotice: (text: string, tone?: "success" | "error") => void;
+  onAutoTypeset?: (html: string, numberedDotStyle: boolean) => void;
+  numberedDotStyle?: boolean;
+  onNumberedDotStyleChange?: (enabled: boolean) => void;
   compact?: boolean;
   insertLeadCardRequest?: number;
 };
@@ -196,12 +175,35 @@ function AlignmentControl({ value, onChange }: { value: TextAlignment; onChange:
   </div>;
 }
 
-export default function ZhepageEditor({ html, revision, accentColor, highlightColor, onChange, onNotice, onAutoTypeset, compact = false, insertLeadCardRequest = 0 }: ZhepageEditorProps) {
+function BlankLineControl({ onInsert }: { onInsert: (position: "before" | "after") => void }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (event.target instanceof window.Node && !rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  return <div className="blank-line-control" ref={rootRef}>
+    <button type="button" className={open ? "active" : ""} aria-expanded={open} aria-haspopup="menu" data-tooltip="空行：选择插在当前段落或图片的前面/后面" onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen((current) => !current)}>＋空行 <span aria-hidden="true">▾</span></button>
+    {open && <div className="blank-line-popover" role="menu" aria-label="插入空行位置">
+      <button type="button" role="menuitem" onMouseDown={(event) => event.preventDefault()} onClick={() => { onInsert("before"); setOpen(false); }}>段前空行</button>
+      <button type="button" role="menuitem" onMouseDown={(event) => event.preventDefault()} onClick={() => { onInsert("after"); setOpen(false); }}>段后空行</button>
+    </div>}
+  </div>;
+}
+
+export default function ZhepageEditor({ html, revision, accentColor, highlightColor, onChange, onNotice, onAutoTypeset, numberedDotStyle = true, onNumberedDotStyleChange, compact = false, insertLeadCardRequest = 0 }: ZhepageEditorProps) {
   const imageCaptionRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const applyingExternalContent = useRef(false);
   const lastRevision = useRef(revision);
   const updateTimer = useRef<number | null>(null);
+  const selectedImagePosition = useRef(-1);
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -220,8 +222,22 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     content: html,
     editorProps: {
       attributes: { class: "tiptap-surface", spellcheck: "false" },
+      handlePaste: (_view, event) => {
+        const pastedHtml = event.clipboardData?.getData("text/html") || "";
+        const pastedText = event.clipboardData?.getData("text/plain") || "";
+        const parsed = pastedHtml ? new DOMParser().parseFromString(pastedHtml, "text/html") : null;
+        const limitMessage = parsed
+          ? richTextLimitMessage(pastedHtml, parsed.body)
+          : Array.from(pastedText).length > RICH_TEXT_LIMITS.textLength
+            ? "正文超过 3 万字，请拆分文章后再导入"
+            : "";
+        if (!limitMessage) return false;
+        event.preventDefault();
+        onNotice(`未粘贴：${limitMessage}`, "error");
+        return true;
+      },
       transformPastedHTML: (pastedHtml) => {
-        const parsed = normalizePastedTables(pastedHtml);
+        const parsed = new DOMParser().parseFromString(pastedHtml, "text/html");
         parsed.body.querySelectorAll<HTMLElement>("*").forEach((element) => {
           if (!element.hasAttribute("style")) return;
           element.style.removeProperty("font-size");
@@ -230,18 +246,24 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
           element.style.removeProperty("letter-spacing");
           if (!element.getAttribute("style")?.trim()) element.removeAttribute("style");
         });
+        normalizeRichHtmlDocument(parsed);
+        const limitMessage = richTextLimitMessage(pastedHtml, parsed.body);
+        if (limitMessage) {
+          onNotice(`未粘贴：${limitMessage}`, "error");
+          return "";
+        }
         return parsed.body.innerHTML;
       },
     },
     onUpdate: ({ editor: currentEditor }) => {
       if (applyingExternalContent.current) return;
-      const nextHtml = currentEditor.getHTML();
       if (compact) {
-        onChange(nextHtml);
+        onChange(currentEditor.getHTML());
         return;
       }
       if (updateTimer.current) window.clearTimeout(updateTimer.current);
-      updateTimer.current = window.setTimeout(() => onChange(nextHtml), 140);
+      const delay = currentEditor.state.doc.content.size > 60_000 ? 320 : 180;
+      updateTimer.current = window.setTimeout(() => onChange(currentEditor.getHTML()), delay);
     },
   });
 
@@ -275,8 +297,19 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
   });
 
   useEffect(() => {
+    if (!editor) return;
+    const rememberImageSelection = () => {
+      selectedImagePosition.current = editor.isActive("image") ? editor.state.selection.from : -1;
+    };
+    rememberImageSelection();
+    editor.on("selectionUpdate", rememberImageSelection);
+    return () => editor.off("selectionUpdate", rememberImageSelection);
+  }, [editor]);
+
+  useEffect(() => {
     if (!editor || revision === lastRevision.current) return;
     lastRevision.current = revision;
+    if (updateTimer.current) window.clearTimeout(updateTimer.current);
     applyingExternalContent.current = true;
     editor.commands.setContent(html, { emitUpdate: false, contentType: "html" });
     applyingExternalContent.current = false;
@@ -311,6 +344,59 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     ranges.reverse().forEach(({ from, to }) => transaction.delete(from, to));
     if (ranges.length) editor!.view.dispatch(transaction);
     onNotice(ranges.length ? `已清除 ${ranges.length} 处手动分页` : "当前没有手动分页");
+  }
+
+  function insertBlankLine(position: "before" | "after") {
+    const currentEditor = editor!;
+    const { selection, schema, doc } = currentEditor.state;
+    const rememberedImage = doc.nodeAt(selectedImagePosition.current);
+    const imagePosition = rememberedImage?.type.name === "image" ? selectedImagePosition.current : -1;
+    const boundary = imagePosition >= 0
+      ? position === "before" ? imagePosition : imagePosition + rememberedImage!.nodeSize
+      : position === "before"
+        ? selection.$from.depth > 0 ? selection.$from.before(1) : selection.from
+        : selection.$to.depth > 0 ? selection.$to.after(1) : selection.to;
+    const resolved = doc.resolve(boundary);
+    const neighbor = position === "before" ? resolved.nodeBefore : resolved.nodeAfter;
+    if (String(neighbor?.attrs.class || "").split(/\s+/).includes("manual-empty-line")) {
+      onNotice(position === "before" ? "当前内容前已有空行" : "当前内容后已有空行");
+      return;
+    }
+    const blank = schema.nodes.paragraph.create({ class: "manual-empty-line" });
+    const transaction = currentEditor.state.tr.insert(boundary, blank);
+    if (imagePosition >= 0) {
+      const nextImagePosition = position === "before" ? imagePosition + blank.nodeSize : imagePosition;
+      transaction.setSelection(NodeSelection.create(transaction.doc, nextImagePosition));
+      selectedImagePosition.current = nextImagePosition;
+    }
+    currentEditor.view.dispatch(transaction);
+    currentEditor.view.focus();
+    onNotice(position === "before" ? "已插入段前空行" : "已插入段后空行");
+  }
+
+  function clearFormatting() {
+    editor!.chain().focus().unsetAllMarks().clearNodes().command(({ tr }) => {
+      const positions: number[] = [];
+      if (tr.selection.empty && tr.selection.$from.depth > 0) {
+        positions.push(tr.selection.$from.before(1));
+      } else {
+        tr.doc.nodesBetween(tr.selection.from, tr.selection.to, (node, position) => {
+          if (node.isTextblock) positions.push(position);
+        });
+      }
+      positions.reverse().forEach((position) => {
+        const node = tr.doc.nodeAt(position);
+        if (!node) return;
+        const attributes = { ...node.attrs };
+        if ("class" in attributes) attributes.class = null;
+        if ("style" in attributes) attributes.style = null;
+        if ("autoIndex" in attributes) attributes.autoIndex = null;
+        if ("autoLabel" in attributes) attributes.autoLabel = null;
+        tr.setNodeMarkup(position, undefined, attributes, node.marks);
+      });
+      return true;
+    }).run();
+    onNotice("已清除所选内容的格式和自动排版装饰");
   }
 
   function imageStyle(overrides: Record<string, string>) {
@@ -400,10 +486,14 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     <>
       <input ref={imageInputRef} className="editor-image-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageUpload} />
       {!compact && onAutoTypeset && <div className="auto-typeset-bar" aria-label="自动排版">
-        <button type="button" className="editor-auto-typeset" onClick={() => onAutoTypeset(editor.getHTML())}>
+        <button type="button" className="editor-auto-typeset" onClick={() => onAutoTypeset(editor.getHTML(), numberedDotStyle)}>
           <span><b>一键自动排版</b><small>整理导语、章节标题、重点段落和图表</small></span>
           <em>本地规则 · 不使用 AI</em>
         </button>
+        {onNumberedDotStyleChange && <label className="numbered-style-choice" htmlFor="numbered-dot-style">序号点线标题
+          <input id="numbered-dot-style" type="checkbox" checked={numberedDotStyle} onChange={(event) => onNumberedDotStyleChange(event.target.checked)} />
+          <span aria-hidden="true"><b>序号点线标题</b><small>关闭后仍识别标题，但不添加点线装饰</small></span>
+        </label>}
       </div>}
       <div className="editor-toolbar" aria-label="富文本排版工具" role="toolbar">
         <span id={TOOLTIP_ID} className="sr-only">鼠标悬停按钮可查看功能说明</span>
@@ -441,12 +531,12 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
         <ToolButton label="• 列表" tip="无序列表：再次点击取消" active={editorState.bulletList} onClick={() => editor.chain().focus().toggleBulletList().run()} />
         <ToolButton label="1. 列表" tip="有序列表：再次点击取消" active={editorState.orderedList} onClick={() => editor.chain().focus().toggleOrderedList().run()} />
         <AlignmentControl value={editorState.right ? "right" : editorState.center ? "center" : "left"} onChange={(alignment) => editor.chain().focus().setTextAlign(alignment).run()} />
-        {!compact && <ToolButton label="＋前空行" tip="在当前段落前插入一个可保留的空行" onClick={() => editor.chain().focus().insertContent({ type: "paragraph", attrs: { class: "manual-empty-line" } }).run()} />}
+        {!compact && <BlankLineControl onInsert={insertBlankLine} />}
         {!compact && <ToolButton label="＋分页" tip="从光标位置开始新的一张贴图" onClick={() => insertGenericBlock("manual-page-break", "— 手动分页 —")} />}
         {!compact && <ToolButton label="＋领取卡" tip="在光标位置插入 PDF 刊物领取卡" onClick={() => insertGenericBlock("lead-card-placeholder", "— PDF 刊物领取卡 —")} />}
         <ToolButton label="＋图片" tip="插入 PNG、JPG 或 WebP 图片；插入后可调整尺寸、对齐、圆角和图注" onClick={() => imageInputRef.current?.click()} />
         <ToolButton label="横线" tip="插入分隔线；选中后可删除" onClick={() => editor.chain().focus().setHorizontalRule().run()} />
-        <ToolButton label="清除格式" tip="清除选中文字的样式并恢复正文段落" onClick={() => editor.chain().focus().unsetAllMarks().clearNodes().run()} />
+        <ToolButton label="清除格式" tip="清除选中文字的样式、自动装饰并恢复正文段落" onClick={clearFormatting} />
         {!compact && <ToolButton label="清分页" tip="清除文中所有手动分页标记，恢复自动分页" onClick={() => removeGenericBlocks("manual-page-break")} />}
         <ToolButton label="↶" tip="撤销上一步，也可按 Ctrl/Command + Z" disabled={!editorState.canUndo} onClick={() => editor.chain().focus().undo().run()} />
         <ToolButton label="↷" tip="重做，也可按 Ctrl/Command + Shift + Z" disabled={!editorState.canRedo} onClick={() => editor.chain().focus().redo().run()} />

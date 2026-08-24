@@ -1,9 +1,10 @@
-const NUMBERED_HEADING = /^(?:第[一二三四五六七八九十百\d]+[章节部分]?|[一二三四五六七八九十]+[、.．]|0?\d{1,2}[、.．\s])/;
+import { RICH_LAYOUT_CLASS } from "../richText/normalizeRichHtml";
+
+const NUMBERED_HEADING = /^(?:第[一二三四五六七八九十百\d]+(?:[章节部分句点条项问](?=[:：、.．\s]|$)|(?=[:：、.．\s]))|[一二三四五六七八九十]+[、.．]|0?\d{1,2}[、.．\s])/;
 const SECTION_HEADING = /^(?:实话|真相|观点|理由|问题|提醒|要点|关键)[一二三四五六七八九十\d]+[:：、]/;
 const CONCLUSION_HEADING = /^(?:写在最后|写到最后|最后说几句|结语|结论|总结|风险提示)$/;
 const KEY_POINT_PREFIX = /^(?:翻译一下|一句话总结|换句话说|核心是|关键是|需要注意的是|更重要的是)[:：]/;
 const STRUCTURED_PREFIX = /^(?:第一|第二|第三|第四|第五|先看[AB]面|再看[AB]面)[，。:：]/i;
-const GENERIC_HEADING_EXCLUSION = /^(?:求点赞|求转发|求推荐|求评论|免责声明|版权与免责声明)/;
 
 export type AutoTypesetResult = {
   html: string;
@@ -11,6 +12,10 @@ export type AutoTypesetResult = {
   promotedHeadings: number;
   formattedParagraphs: number;
   removedEmptyParagraphs: number;
+};
+
+export type AutoTypesetOptions = {
+  numberedDotStyle?: boolean;
 };
 
 function mergeStyle(element: HTMLElement, declarations: Record<string, string>) {
@@ -31,6 +36,16 @@ function setAttribute(element: HTMLElement, name: string, value: string) {
   return 1;
 }
 
+function removeClass(element: HTMLElement, className: string) {
+  if (!element.classList.contains(className)) return 0;
+  element.classList.remove(className);
+  return 1;
+}
+
+function isInsideImportedLayout(element: Element) {
+  return Boolean(element.closest(`.${RICH_LAYOUT_CLASS}`));
+}
+
 function promoteParagraph(parsed: Document, paragraph: HTMLParagraphElement, tagName: "h2" | "h3") {
   const heading = parsed.createElement(tagName);
   [...paragraph.attributes].forEach((attribute) => heading.setAttribute(attribute.name, attribute.value));
@@ -39,20 +54,31 @@ function promoteParagraph(parsed: Document, paragraph: HTMLParagraphElement, tag
   return heading;
 }
 
+function restoreAutoHeadingToParagraph(parsed: Document, heading: HTMLHeadingElement) {
+  const paragraph = parsed.createElement("p");
+  [...heading.attributes].forEach((attribute) => paragraph.setAttribute(attribute.name, attribute.value));
+  ["auto-beautified-heading", "auto-inferred-heading", "auto-numbered-dotline"].forEach((className) => paragraph.classList.remove(className));
+  paragraph.removeAttribute("data-auto-index");
+  while (heading.firstChild) paragraph.append(heading.firstChild);
+  heading.replaceWith(paragraph);
+}
+
 function emphasisRatio(paragraph: HTMLParagraphElement, textLength: number) {
   const emphasizedLength = [...paragraph.querySelectorAll("strong,b,mark")]
     .reduce((total, emphasis) => total + (emphasis.textContent?.trim().length || 0), 0);
   return emphasizedLength / Math.max(1, textLength);
 }
 
-export function beautifyArticle(html: string): AutoTypesetResult {
+export function beautifyArticle(html: string, options: AutoTypesetOptions = {}): AutoTypesetResult {
   const parsed = new DOMParser().parseFromString(html, "text/html");
+  const numberedDotStyle = options.numberedDotStyle !== false;
   let changes = 0;
   let promotedHeadings = 0;
   let formattedParagraphs = 0;
   let removedEmptyParagraphs = 0;
 
   parsed.body.querySelectorAll<HTMLParagraphElement>("p").forEach((paragraph) => {
+    if (isInsideImportedLayout(paragraph)) return;
     const text = paragraph.textContent?.trim() || "";
     const hasMedia = Boolean(paragraph.querySelector("img,video,iframe,table"));
     if (!text && !hasMedia && !paragraph.classList.contains("manual-empty-line")) {
@@ -63,31 +89,43 @@ export function beautifyArticle(html: string): AutoTypesetResult {
     }
     if (text.length > 52) return;
     const isConclusion = CONCLUSION_HEADING.test(text);
-    const isEmphasizedHeading = text.length >= 8
-      && text.length <= 36
-      && emphasisRatio(paragraph, text.length) >= 0.88
-      && !/[。！？!?]$/.test(text)
-      && !GENERIC_HEADING_EXCLUSION.test(text);
-    if (!isConclusion && !NUMBERED_HEADING.test(text) && !SECTION_HEADING.test(text) && !isEmphasizedHeading) return;
+    if (!isConclusion && !NUMBERED_HEADING.test(text) && !SECTION_HEADING.test(text)) return;
     const heading = promoteParagraph(parsed, paragraph, isConclusion ? "h2" : "h3");
     heading.classList.add("auto-beautified-heading", isConclusion ? "auto-conclusion-heading" : "auto-inferred-heading");
     changes += 1;
     promotedHeadings += 1;
   });
 
+  parsed.body.querySelectorAll<HTMLHeadingElement>("h3.auto-inferred-heading").forEach((heading) => {
+    if (isInsideImportedLayout(heading)) return;
+    const text = heading.textContent?.trim() || "";
+    if (NUMBERED_HEADING.test(text) || SECTION_HEADING.test(text)) return;
+    restoreAutoHeadingToParagraph(parsed, heading);
+    changes += 1;
+  });
+
   let sectionIndex = 0;
   parsed.body.querySelectorAll<HTMLElement>("h1,h2,h3").forEach((heading) => {
+    if (isInsideImportedLayout(heading)) return;
     const text = heading.textContent?.trim() || "";
     changes += addClass(heading, "auto-beautified-heading");
     if (CONCLUSION_HEADING.test(text)) {
       changes += addClass(heading, "auto-conclusion-heading");
+      changes += removeClass(heading, "auto-numbered-dotline");
       heading.removeAttribute("data-auto-index");
       return;
     }
-    if (heading.classList.contains("auto-inferred-heading") || NUMBERED_HEADING.test(text) || SECTION_HEADING.test(text)) {
+    const numberedHeading = NUMBERED_HEADING.test(text) || SECTION_HEADING.test(text);
+    if (numberedHeading) {
       changes += addClass(heading, "auto-inferred-heading");
       sectionIndex += 1;
-      changes += setAttribute(heading, "data-auto-index", String(sectionIndex).padStart(2, "0"));
+      if (numberedDotStyle) {
+        changes += addClass(heading, "auto-numbered-dotline");
+        changes += setAttribute(heading, "data-auto-index", String(sectionIndex).padStart(2, "0"));
+      } else {
+        changes += removeClass(heading, "auto-numbered-dotline");
+        heading.removeAttribute("data-auto-index");
+      }
     }
   });
 
@@ -100,6 +138,7 @@ export function beautifyArticle(html: string): AutoTypesetResult {
   }
 
   parsed.body.querySelectorAll<HTMLParagraphElement>("p").forEach((paragraph) => {
+    if (isInsideImportedLayout(paragraph)) return;
     const text = paragraph.textContent?.trim() || "";
     if (!text || paragraph === firstTopLevelParagraph || paragraph.classList.contains("image-caption")) return;
     const ratio = emphasisRatio(paragraph, text.length);
@@ -124,6 +163,7 @@ export function beautifyArticle(html: string): AutoTypesetResult {
   });
 
   parsed.body.querySelectorAll<HTMLElement>(".auto-conclusion-heading").forEach((heading) => {
+    if (isInsideImportedLayout(heading)) return;
     const follower = heading.nextElementSibling;
     if (!(follower instanceof HTMLParagraphElement)) return;
     const added = addClass(follower, "auto-closing-lead");
@@ -132,15 +172,19 @@ export function beautifyArticle(html: string): AutoTypesetResult {
   });
 
   parsed.body.querySelectorAll<HTMLElement>("blockquote").forEach((quote) => {
+    if (isInsideImportedLayout(quote)) return;
     changes += addClass(quote, "auto-beautified-callout");
   });
   parsed.body.querySelectorAll<HTMLElement>("ul,ol").forEach((list) => {
+    if (isInsideImportedLayout(list)) return;
     changes += addClass(list, "auto-beautified-list");
   });
   parsed.body.querySelectorAll<HTMLElement>("strong,b,mark").forEach((emphasis) => {
+    if (isInsideImportedLayout(emphasis)) return;
     if (/\d/.test(emphasis.textContent || "")) changes += addClass(emphasis, "auto-data-emphasis");
   });
   parsed.body.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
+    if (isInsideImportedLayout(image)) return;
     changes += addClass(image, "auto-beautified-image");
     mergeStyle(image, {
       display: "block",
@@ -151,6 +195,7 @@ export function beautifyArticle(html: string): AutoTypesetResult {
     });
   });
   parsed.body.querySelectorAll<HTMLElement>("table").forEach((table) => {
+    if (isInsideImportedLayout(table)) return;
     changes += addClass(table, "auto-beautified-table");
     table.querySelectorAll<HTMLElement>("th,td").forEach((cell) => {
       const value = cell.textContent?.trim() || "";

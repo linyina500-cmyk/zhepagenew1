@@ -125,7 +125,7 @@ test("keeps the requested production defaults", async () => {
   assert.match(page, /首行标题会自动识别/);
   assert.match(page, /applySource\(sourceEditorHtml, "fragment", true\)/);
   assert.match(page, /setNotice\(\{[\s\S]*?item === "url"[\s\S]*?item === "editor"/);
-  assert.match(editor, /if \(compact\) \{\s*onChange\(nextHtml\);\s*return;/);
+  assert.match(editor, /if \(compact\) \{\s*onChange\(currentEditor\.getHTML\(\)\);\s*return;/);
 
   assert.match(css, /--poster-paper:\s*#ffffff/);
   assert.match(css, /--poster-accent:\s*#d7352f/);
@@ -181,13 +181,14 @@ test("ships self-hosted Source Han fonts for stable cross-platform pagination", 
 });
 
 test("ships DOM-safe smart pagination and local-only beautification regressions", async () => {
-  const [page, css, editor, splitter, paginator, beautifier] = await Promise.all([
+  const [page, css, editor, splitter, paginator, beautifier, normalizer] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ZhepageEditor.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/pagination/splitDomBlock.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/pagination/paginateArticle.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/beautify/beautifyArticle.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/richText/normalizeRichHtml.ts", import.meta.url), "utf8"),
   ]);
 
   // Long paragraphs are deep-cloned before text trimming. Unlike
@@ -197,6 +198,8 @@ test("ships DOM-safe smart pagination and local-only beautification regressions"
   assert.match(splitter, /source\.cloneNode\(true\)/);
   assert.match(splitter, /node\.data = node\.data\.slice\(localStart, localEnd\)/);
   assert.match(splitter, /data-pagination-fragment/);
+  assert.match(splitter, /isAtomicInner/);
+  assert.match(splitter, /inner\.classList\.contains\(RICH_LAYOUT_CLASS\)/);
   assert.doesNotMatch(splitter, /range\.cloneContents\(\)/);
   assert.match(splitter, /semanticCut/);
   assert.doesNotMatch(splitter, /shell\.textContent\s*=/);
@@ -237,6 +240,16 @@ test("ships DOM-safe smart pagination and local-only beautification regressions"
   assert.match(page, /DENSITY_PRESETS/);
   assert.match(editor, /一键自动排版/);
   assert.match(editor, /本地规则 · 不使用 AI/);
+  assert.match(editor, /序号点线标题/);
+  assert.match(editor, /段前空行/);
+  assert.match(editor, /段后空行/);
+  assert.match(editor, /selectedImagePosition/);
+  assert.match(editor, /NodeSelection\.create/);
+  assert.match(editor, /currentEditor\.getHTML\(\)/);
+  assert.match(editor, /normalizeRichHtmlDocument\(parsed\)/);
+  assert.match(editor, /richTextLimitMessage/);
+  assert.match(editor, /handlePaste/);
+  assert.match(editor, /event\.preventDefault\(\)/);
   assert.match(editor, /data-auto-index/);
   assert.match(editor, /data-auto-label/);
   assert.doesNotMatch(editor, /快速样式/);
@@ -253,10 +266,36 @@ test("ships DOM-safe smart pagination and local-only beautification regressions"
   assert.match(beautifier, /querySelectorAll<HTMLElement>\("h1,h2,h3"\)/);
   assert.match(beautifier, /auto-beautified-callout/);
   assert.match(beautifier, /auto-numeric-cell/);
+  assert.match(beautifier, /auto-numbered-dotline/);
+  assert.match(beautifier, /numberedDotStyle/);
+  assert.match(beautifier, /isInsideImportedLayout/);
+  assert.match(beautifier, /RICH_LAYOUT_CLASS/);
+  assert.doesNotMatch(beautifier, /isEmphasizedHeading/);
+  const numberedHeadingPattern = beautifier.match(/const NUMBERED_HEADING = \/(.+)\//)?.[1];
+  assert.ok(numberedHeadingPattern);
+  const numberedHeading = new RegExp(numberedHeadingPattern);
+  assert.equal(numberedHeading.test("一、第一项逻辑"), true);
+  assert.equal(numberedHeading.test("2. 第二项逻辑"), true);
+  assert.equal(numberedHeading.test("第一句：收益测算"), true);
+  assert.equal(numberedHeading.test("第一项正文内容保持普通段落。"), false);
+  assert.equal(numberedHeading.test("H1预计净利 2.70亿元"), false);
+  assert.match(normalizer, /isRichLayoutGroup/);
+  assert.match(normalizer, /children\.length < 2/);
+  assert.match(normalizer, /own\.border \|\| own\.shadow/);
+  assert.match(normalizer, /wrapDirectInlineRuns/);
+  assert.match(normalizer, /imported-inline-run/);
+  assert.match(normalizer, /textLength: 30_000/);
+  assert.match(paginator, /isRichLayoutGroup/);
   assert.match(css, /\.article-flow \.auto-inferred-heading::before/);
+  assert.match(css, /\.article-flow \.auto-inferred-heading\.auto-numbered-dotline::before/);
   assert.match(css, /\.article-flow \.auto-conclusion-heading/);
   assert.match(css, /关键数据 · 续/);
   assert.doesNotMatch(beautifier, /fetch\(|OpenAI|DeepSeek|Claude/);
+
+  const applySource = page.match(/const applySource = useCallback[\s\S]*?\n {2}}?, \[preserveStyles\]\);/)?.[0] || "";
+  assert.match(applySource, /setArticleHtml\(result\.html\)/);
+  assert.match(applySource, /按原富文本格式读取/);
+  assert.doesNotMatch(applySource, /beautifyArticle/);
 });
 
 test("ships five independent V4 layouts with compatible theme and workspace state", async () => {
@@ -277,7 +316,8 @@ test("ships five independent V4 layouts with compatible theme and workspace stat
   assert.match(page, /LAYOUT_STYLE_KEYS\.map/);
   assert.match(page, /layoutClassName\(layoutStyle\)/);
   assert.match(page, /useState<LayoutStyleKey>\("xiaohongshu"\)/);
-  assert.match(page, /useState\(true\);\s*\n\s*const \[previewPresentation/);
+  assert.match(page, /const \[numberedDotStyle, setNumberedDotStyle\] = useState\(true\)/);
+  assert.match(page, /numberedDotStyle, previewPresentation/);
   assert.match(page, /version: 2/);
   assert.match(page, /saved\.version === 1 \? "已兼容恢复旧版工作区"/);
   assert.match(page, /saved\.version === 2 && saved\.layoutStyle/);

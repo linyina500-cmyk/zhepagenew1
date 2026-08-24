@@ -9,7 +9,7 @@ import { LAYOUT_PRESETS, LAYOUT_STYLE_KEYS } from "../lib/layouts/layoutPresets"
 import { resolveThemeTokens } from "../lib/layouts/resolveThemeTokens";
 import type { LayoutStyleKey, PreviewPresentation } from "../lib/layouts/layoutTypes";
 import { paginateArticle } from "../lib/pagination/paginateArticle";
-import { isCompositeVisualContainer } from "../lib/pagination/splitDomBlock";
+import { INLINE_RUN_CLASS, RICH_LAYOUT_CLASS, normalizeRichHtmlDocument, richTextLimitMessage } from "../lib/richText/normalizeRichHtml";
 
 const ZhepageEditor = lazy(() => import("./components/ZhepageEditor"));
 
@@ -48,6 +48,7 @@ type SavedWorkspace = {
   footerText: string;
   layoutStyle: LayoutStyleKey;
   autoStructure: boolean;
+  numberedDotStyle: boolean;
   previewPresentation: PreviewPresentation;
   articleHtml: string;
   firstPageContent: boolean;
@@ -109,6 +110,18 @@ const DENSITY_PRESETS: Record<DensityKey, { label: string; typeScale: number; li
   standard: { label: "标准", typeScale: 1, lineHeight: 1.72, bottomReserve: 0 },
   spacious: { label: "舒展", typeScale: 1.08, lineHeight: 1.86, bottomReserve: 20 },
 };
+
+const MAX_TITLE_LENGTH = 80;
+const MAX_TITLE_LINES = 4;
+
+function normalizePosterTitle(value: string) {
+  let remaining = MAX_TITLE_LENGTH;
+  return value.replace(/\r/g, "").split("\n").slice(0, MAX_TITLE_LINES).map((line) => {
+    const kept = Array.from(line).slice(0, remaining).join("");
+    remaining -= Array.from(kept).length;
+    return kept;
+  }).join("\n");
+}
 
 const DEFAULT_ARTICLE_URL = "https://mp.weixin.qq.com/s/aGVYCtoaJWxN_R2VBSd-_g";
 const DEFAULT_TITLE = "长鑫科技来了！\n全网都在算中一签赚多少钱，\n我想聊五句实话";
@@ -270,7 +283,9 @@ function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
     const lazyImageSource = element instanceof HTMLImageElement
       ? element.getAttribute("src") || element.getAttribute("data-src") || ""
       : "";
-    const internalClasses = [...element.classList].filter((className) => ["image-caption", "manual-empty-line", "manual-page-break", "lead-card-placeholder"].includes(className));
+    const internalClasses = [...element.classList].filter((className) => [
+      "image-caption", "manual-empty-line", "manual-page-break", "lead-card-placeholder", RICH_LAYOUT_CLASS, INLINE_RUN_CLASS,
+    ].includes(className));
     [...element.attributes].forEach((attribute) => {
       const name = attribute.name.toLowerCase();
       if (name.startsWith("on") || ["srcdoc", "id", "class"].includes(name) || name.startsWith("data-") || name.startsWith("aria-")) {
@@ -305,9 +320,9 @@ function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
   documentNode.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((heading) => {
     if (!heading.textContent?.trim() && !heading.querySelector("img")) heading.remove();
   });
-  documentNode.querySelectorAll("section,div").forEach((element) => {
-    if (isCompositeVisualContainer(element)) element.classList.add("imported-composite-visual");
-  });
+  normalizeRichHtmlDocument(documentNode);
+  const limitMessage = richTextLimitMessage(rawHtml, documentNode.body);
+  if (limitMessage) throw new Error(limitMessage);
   return documentNode.body.innerHTML.trim();
 }
 
@@ -419,6 +434,7 @@ export default function Home() {
   const [footerText, setFooterText] = useState("A股研报局");
   const [layoutStyle, setLayoutStyle] = useState<LayoutStyleKey>("xiaohongshu");
   const [autoStructure, setAutoStructure] = useState(true);
+  const [numberedDotStyle, setNumberedDotStyle] = useState(true);
   const [previewPresentation, setPreviewPresentation] = useState<PreviewPresentation>("beautified");
   const [manualTypesetPreview, setManualTypesetPreview] = useState(false);
   const [articleHtml, setArticleHtml] = useState(DEFAULT_HTML);
@@ -491,8 +507,8 @@ export default function Home() {
   const presentationArticleHtml = useMemo(() => {
     const shouldBeautify = layoutStyle === "xiaohongshu" ? manualTypesetPreview : autoStructure;
     if (!shouldBeautify || previewPresentation === "base" || typeof DOMParser === "undefined") return articleHtml;
-    return beautifyArticle(articleHtml).html;
-  }, [articleHtml, autoStructure, layoutStyle, manualTypesetPreview, previewPresentation]);
+    return beautifyArticle(articleHtml, { numberedDotStyle }).html;
+  }, [articleHtml, autoStructure, layoutStyle, manualTypesetPreview, numberedDotStyle, previewPresentation]);
   const paginationHtml = `${firstPageHtml}${replaceLeadCardPlaceholders(presentationArticleHtml, leadCardHtml)}${riskNoteHtml}`;
   const leadCardCount = (articleHtml.match(/lead-card-placeholder/g) || []).length;
   const selectedCustomTheme = customThemePresets.find((preset) => themeKey === null
@@ -531,6 +547,7 @@ export default function Home() {
     if (!measure || !posterFontsReady) return;
     let cancelled = false;
     let updateTimer: number | null = null;
+    const updateDelay = paginationHtml.length > 120_000 ? 320 : 160;
     const update = () => {
       if (cancelled) return;
       try {
@@ -565,9 +582,9 @@ export default function Home() {
     };
     const scheduleUpdate = () => {
       if (updateTimer) window.clearTimeout(updateTimer);
-      updateTimer = window.setTimeout(update, 80);
+      updateTimer = window.setTimeout(update, updateDelay);
     };
-    const timer = window.setTimeout(update, 80);
+    const timer = window.setTimeout(update, updateDelay);
     document.fonts?.ready.then(scheduleUpdate);
     const parsed = new DOMParser().parseFromString(paginationHtml, "text/html");
     [...parsed.images].slice(0, 80).forEach((source) => {
@@ -597,7 +614,7 @@ export default function Home() {
       if (typeof saved.url === "string") setUrl(saved.url);
       if (typeof saved.rawHtml === "string") setRawHtml(saved.rawHtml);
       if (typeof saved.markdownInput === "string") setMarkdownInput(saved.markdownInput);
-      if (typeof saved.title === "string") setTitle(saved.title);
+      if (typeof saved.title === "string") setTitle(normalizePosterTitle(saved.title));
       if (typeof saved.subtitle === "string") setSubtitle(saved.subtitle);
       if (typeof saved.labName === "string") setLabName(saved.labName);
       if (typeof saved.coverCredit === "string") setCoverCredit(saved.coverCredit);
@@ -605,6 +622,7 @@ export default function Home() {
       if (typeof saved.footerText === "string") setFooterText(saved.footerText);
       if (saved.version === 2 && saved.layoutStyle && saved.layoutStyle in LAYOUT_PRESETS) setLayoutStyle(saved.layoutStyle);
       if (saved.version === 2 && typeof saved.autoStructure === "boolean") setAutoStructure(saved.autoStructure);
+      if (typeof saved.numberedDotStyle === "boolean") setNumberedDotStyle(saved.numberedDotStyle);
       if (saved.version === 2 && (saved.previewPresentation === "beautified" || saved.previewPresentation === "base")) setPreviewPresentation(saved.previewPresentation);
       if (typeof saved.articleHtml === "string") {
         setArticleHtml(saved.articleHtml);
@@ -645,7 +663,7 @@ export default function Home() {
     const timer = window.setTimeout(() => {
       const workspace: SavedWorkspace = {
         version: 2, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText,
-        layoutStyle, autoStructure, previewPresentation, articleHtml,
+        layoutStyle, autoStructure, numberedDotStyle, previewPresentation, articleHtml,
         firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor,
         textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, leadGuide, qrDataUrl,
         customThemePresets, riskPresets,
@@ -662,7 +680,7 @@ export default function Home() {
       }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [workspaceReady, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText, layoutStyle, autoStructure, previewPresentation, articleHtml, firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor, textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, leadGuide, qrDataUrl, customThemePresets, riskPresets]);
+  }, [workspaceReady, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText, layoutStyle, autoStructure, numberedDotStyle, previewPresentation, articleHtml, firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor, textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, leadGuide, qrDataUrl, customThemePresets, riskPresets]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setEditorModuleReady(true), 900);
@@ -713,22 +731,21 @@ export default function Home() {
       : extractRichTextFragment(source, preserveStyles, inferTitle);
     if (!result.html.replace(/<[^>]+>/g, "").trim() && !result.html.includes("<img")) throw new Error("没有识别到可排版的正文内容");
     if (sourceKind === "document" || result.inferredTitle) {
-      setTitle(result.title);
+      setTitle(normalizePosterTitle(result.title));
       // Metadata descriptions on WeChat are often clipped previews, not the article lede.
       // Leave the optional subtitle blank so the actual first paragraph starts the body.
       setSubtitle("");
     }
-    const structured = beautifyArticle(result.html);
-    setArticleHtml(structured.html);
-    setSourceEditorHtml(structured.html);
+    setArticleHtml(result.html);
+    setSourceEditorHtml(result.html);
     setEditorRevision((revision) => revision + 1);
-    setAutoStructure(true);
+    setAutoStructure(false);
     setManualTypesetPreview(true);
     setPreviewPresentation("beautified");
     importPendingRef.current = true;
     setNotice({
       tone: "neutral",
-      text: `内容已读取，识别到 ${structured.promotedHeadings} 个章节标题，正在计算完整分页…`,
+      text: "内容已按原富文本格式读取，正在计算完整分页…",
     });
   }, [preserveStyles]);
 
@@ -769,8 +786,8 @@ export default function Home() {
     setNotice({ tone: "neutral", text: sparsePageIndex >= 0 ? `正在优化第 ${sparsePageIndex + 1} 页附近的留白…` : "正在重新检查标题与分页平衡…" });
   }
 
-  function applyAutomaticTypeset(currentHtml = articleHtml) {
-    const result = beautifyArticle(currentHtml);
+  function applyAutomaticTypeset(currentHtml = articleHtml, useNumberedDotStyle = numberedDotStyle) {
+    const result = beautifyArticle(currentHtml, { numberedDotStyle: useNumberedDotStyle });
     if (result.changes) {
       setArticleHtml(result.html);
       setSourceEditorHtml(result.html);
@@ -1060,7 +1077,11 @@ export default function Home() {
 
           <section className="control-section">
             <span className="eyebrow">01 · 封面文案</span>
-            <div className="field-stack"><label htmlFor="poster-title">醒目标题</label><textarea id="poster-title" className="title-input" value={title} onChange={(event) => setTitle(event.target.value)} /></div>
+            <div className="field-stack"><label htmlFor="poster-title">醒目标题</label><textarea id="poster-title" className="title-input" value={title} maxLength={MAX_TITLE_LENGTH + MAX_TITLE_LINES - 1} onChange={(event) => {
+              const normalized = normalizePosterTitle(event.target.value);
+              setTitle(normalized);
+              if (normalized !== event.target.value) setNotice({ tone: "error", text: `标题最多 ${MAX_TITLE_LENGTH} 字、${MAX_TITLE_LINES} 行` });
+            }} /><small>{Array.from(title.replace(/\n/g, "")).length} / {MAX_TITLE_LENGTH} 字 · 最多 {MAX_TITLE_LINES} 行</small></div>
             <div className="field-stack"><label htmlFor="poster-subtitle">导语 / 副标题（可留空）</label><input id="poster-subtitle" value={subtitle} onChange={(event) => setSubtitle(event.target.value)} placeholder="留空时，标题后直接展示正文" /></div>
             <div className="microcopy-grid">
               <div className="field-stack"><label htmlFor="lab-name">底部栏目名</label><input id="lab-name" value={labName} onChange={(event) => setLabName(event.target.value)} /></div>
@@ -1097,13 +1118,15 @@ export default function Home() {
               accentColor={accentColor}
               highlightColor={highlightColor}
               insertLeadCardRequest={leadCardInsertRequest}
+              numberedDotStyle={numberedDotStyle}
+              onNumberedDotStyleChange={setNumberedDotStyle}
               onChange={(nextHtml) => {
                 const cleaned = removeEmptyHeadings(nextHtml);
                 setArticleHtml(cleaned);
                 setSourceEditorHtml(cleaned);
               }}
               onAutoTypeset={applyAutomaticTypeset}
-              onNotice={(text) => setNotice({ tone: "success", text })}
+              onNotice={(text, tone = "success") => setNotice({ tone, text })}
             /></Suspense> : <EditorFallback />}
             <div className="editor-note"><span>格式按钮具有激活态，再次点击即可取消；鼠标悬停按钮可查看说明。</span></div>
 
@@ -1390,7 +1413,7 @@ export default function Home() {
               accentColor={accentColor}
               highlightColor={highlightColor}
               onChange={setSourceEditorHtml}
-              onNotice={(text) => setNotice({ tone: "success", text })}
+              onNotice={(text, tone = "success") => setNotice({ tone, text })}
             /></Suspense> : <EditorFallback />}</div>}
             {mode === "markdown" && <div className="field-stack">
               <label htmlFor="article-markdown">Markdown 内容</label>

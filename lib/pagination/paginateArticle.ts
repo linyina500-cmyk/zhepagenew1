@@ -1,5 +1,6 @@
 import { measureParts } from "./measureBlock";
-import { articleBlocks, blockIsHeading, blockText, isCompositeVisualContainer, splitOversizedBlock } from "./splitDomBlock";
+import { RICH_LAYOUT_CLASS, isRichLayoutGroup } from "../richText/normalizeRichHtml";
+import { articleBlocks, blockIsHeading, blockText, splitOversizedBlock } from "./splitDomBlock";
 import type { PaginationResult } from "./paginationTypes";
 
 const FIT_TOLERANCE = 2;
@@ -105,10 +106,10 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
     current = [];
   };
   const fitCompositeVisual = (block: string) => {
-    if (!/class=["'][^"']*imported-composite-visual/.test(block)) return block;
+    if (!new RegExp(`class=["'][^"']*${RICH_LAYOUT_CLASS}`).test(block)) return block;
     const parsed = new DOMParser().parseFromString(`<main>${block}</main>`, "text/html");
     const candidate = parsed.querySelector("main")?.firstElementChild;
-    if (!candidate || !isCompositeVisualContainer(candidate)) return block;
+    if (!candidate || !isRichLayoutGroup(candidate)) return block;
     const originalHeight = heightOf([block]);
     if (originalHeight <= maxHeight + FIT_TOLERANCE) return block;
     const scale = Math.min(0.98, (maxHeight - 8) / originalHeight);
