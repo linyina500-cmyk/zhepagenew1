@@ -1,12 +1,12 @@
 import { measureParts } from "./measureBlock";
 import { RICH_LAYOUT_CLASS, isRichLayoutGroup } from "../richText/normalizeRichHtml";
-import { articleBlocks, blockIsHeading, blockText, splitOversizedBlock } from "./splitDomBlock";
+import { TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE, articleBlocks, blockIsHeading, blockText, splitOversizedBlock, tableHeader } from "./splitDomBlock";
 import type { PaginationResult } from "./paginationTypes";
 
 const FIT_TOLERANCE = 2;
 const INLINE_SEMANTIC_SELECTORS = ["strong", "b", "em", "i", "u", "s", "strike", "span[style]", "mark"];
 const BLOCK_TEXT_TAGS = new Set([
-  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DIV", "DL", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER",
+  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "CAPTION", "COL", "COLGROUP", "DIV", "DL", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER",
   "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN", "NAV", "OL", "P", "PRE",
   "SECTION", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "UL",
 ]);
@@ -79,6 +79,23 @@ function semanticBuckets(parsed: Document, selector: string) {
 export function assertPaginationSemantics(sourceHtml: string, pages: string[]) {
   const source = semanticDocument(sourceHtml);
   const output = semanticDocument(pages.join(""));
+  const sourceTables = [...source.querySelectorAll("table")];
+  output.querySelectorAll(`[${TABLE_REPEAT_ATTRIBUTE}]`).forEach((element) => {
+    const table = element.parentElement;
+    const sourceIndex = table?.getAttribute(TABLE_SOURCE_ATTRIBUTE) || "";
+    const sourceTable = /^\d+$/.test(sourceIndex) ? sourceTables[Number(sourceIndex)] : undefined;
+    const original = sourceTable && (element.tagName === "THEAD"
+      ? tableHeader(sourceTable)
+      : element.tagName === "CAPTION" ? sourceTable.querySelector(":scope > caption") : null);
+    const clone = element.cloneNode(true) as Element;
+    clone.removeAttribute(TABLE_REPEAT_ATTRIBUTE);
+    // Only exact copies of this table's own header/caption may repeat. A
+    // marker on arbitrary content or on an altered header must still fail.
+    if (table?.tagName !== "TABLE" || !original || clone.outerHTML !== original.outerHTML) {
+      throw new Error("分页保真检查失败：续表表头或标题与原表不一致");
+    }
+    element.remove();
+  });
   const sourceText = semanticPlainText(source);
   if (!sourceText) return;
   const outputText = semanticPlainText(output);
@@ -142,13 +159,19 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
       // Measure the first fragment together with the content already on the
       // page. Measuring it alone loses collapsed margins and can incorrectly
       // move a splittable paragraph to the next page, leaving a large hole.
-      const pieces = splitOversizedBlock(
+      const { pieces, splitAtPageBoundary } = splitOversizedBlock(
         block,
         measure,
         maxHeight,
         availableHeight,
         (piece) => fits([...current, piece]),
       );
+      // Exposing child paragraphs is not a page break. Keep packing them in
+      // order instead of committing a mostly empty page after the first child.
+      if (pieces.length > 1 && !splitAtPageBoundary) {
+        queue.unshift(...pieces);
+        continue;
+      }
       const firstPieceFits = pieces.length > 1 && fits([...current, pieces[0]]);
       const splitFollowerIsUseful = !blockIsHeading(current[current.length - 1])
         || blockText(pieces[0]).trim().length >= 18;
@@ -159,9 +182,8 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
         continue;
       }
 
-      // A styled wrapper can contain several normal paragraphs. Expose those
-      // children to the queue before giving up on the remaining page space;
-      // each child can then be split without losing its wrapper styles.
+      // A measured fragment may be unsuitable after a heading or wrapper.
+      // Retry its smaller pieces in order before abandoning the page space.
       if (pieces.length > 1) {
         queue.unshift(...pieces);
         continue;
@@ -182,7 +204,7 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
       continue;
     }
 
-    const pieces = splitOversizedBlock(block, measure, maxHeight, maxHeight);
+    const { pieces } = splitOversizedBlock(block, measure, maxHeight, maxHeight);
     if (!pieces.length) continue;
     if (pieces.length > 1) {
       queue.unshift(...pieces);

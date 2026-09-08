@@ -495,8 +495,7 @@ export default function Home() {
   const layoutClass = layoutClassName(layoutStyle);
   const themeTokens = resolveThemeTokens({ paper: paperColor, accent: accentColor, text: textColor, highlight: highlightColor });
   const contentHeight = format.height - 300 - bottomReserve;
-  const paginationHeight = Math.max(280, contentHeight - 72);
-  const firstTitleHeight = Math.round(contentHeight * 0.48);
+  const paginationHeight = contentHeight;
   const pageOffset = firstPageContent ? 0 : 1;
   const contentPageCount = contentPages.length;
   const totalPages = contentPageCount + pageOffset;
@@ -1348,7 +1347,7 @@ export default function Home() {
                 <article className={`poster-page content-page ${layoutClass}`} data-layout-style={layoutStyle} ref={(node) => { pageRefs.current[pageIndex + pageOffset] = node; }} style={{ width: format.width, height: format.height }}>
                   <header><span>{pageBrand}</span><b>{String(pageIndex + 1).padStart(2, "0")}</b></header>
                   <div className="article-viewport" style={{ height: contentHeight }}>
-                    <div className={`article-flow ${layoutClass} ${preserveStyles ? "preserve" : "unified"}`} style={{ "--type-scale": typeScale, "--article-leading": lineHeight, "--first-title-height": `${firstTitleHeight}px` } as React.CSSProperties} dangerouslySetInnerHTML={{ __html: pageHtml }} />
+                    <div className={`article-flow ${layoutClass} ${preserveStyles ? "preserve" : "unified"}`} style={{ "--type-scale": typeScale, "--article-leading": lineHeight } as React.CSSProperties} dangerouslySetInnerHTML={{ __html: pageHtml }} />
                   </div>
                   <footer><span>{footerText.trim() || labName.trim()}</span><span>{pageIndex + 1} / {contentPageCount}</span></footer>
                   <button className="page-export" onClick={() => exportOne(pageIndex + pageOffset)} disabled={exporting || !posterFontsReady} aria-label={`导出第 ${pageIndex + pageOffset + 1} 页`}>↓</button>
@@ -1365,7 +1364,6 @@ export default function Home() {
             <div ref={measureRef} className={`article-flow article-measure ${layoutClass} ${preserveStyles ? "preserve" : "unified"}`} style={{
               "--type-scale": typeScale,
               "--article-leading": lineHeight,
-              "--first-title-height": `${firstTitleHeight}px`,
               "--poster-paper": paperColor,
               "--poster-accent": accentColor,
               "--poster-text": textColor,

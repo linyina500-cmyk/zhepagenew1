@@ -5,6 +5,8 @@ const ATOMIC_SELECTOR = ".lead-magnet-card,.risk-note,.first-page-lede,.manual-e
 const STRUCTURAL_TAGS = new Set(["SECTION", "DIV", "ARTICLE", "MAIN", "ASIDE"]);
 const GROUP_TAGS = new Set(["SECTION", "DIV", "ARTICLE", "MAIN", "ASIDE", "BLOCKQUOTE", "UL", "OL"]);
 const VISUAL_CONTENT_SELECTOR = "img,table,hr";
+export const TABLE_SOURCE_ATTRIBUTE = "data-pagination-table";
+export const TABLE_REPEAT_ATTRIBUTE = "data-pagination-table-repeat";
 
 function meaningfulNode(node: Node) {
   if (node.nodeType === Node.TEXT_NODE) return Boolean(node.textContent?.trim());
@@ -45,9 +47,35 @@ function preserveWrapperShell(element: Element) {
   return Boolean(element.getAttribute("style")?.trim() || element.getAttribute("class")?.trim());
 }
 
+type FragmentEdges = { start: boolean; end: boolean };
+
+function wrapperFragment(source: Element, child: Node, edges: FragmentEdges) {
+  const shell = source.cloneNode(false) as HTMLElement;
+  shell.append(child);
+  const previous = source.getAttribute("data-pagination-wrapper");
+  const start = edges.start && previous !== "middle" && previous !== "end";
+  const end = edges.end && previous !== "middle" && previous !== "start";
+  if (start && end) return shell;
+  shell.setAttribute("data-pagination-wrapper", start ? "start" : end ? "end" : "middle");
+  for (const side of ["top", "bottom"] as const) {
+    if (side === "top" ? start : end) continue;
+    // Keep horizontal spacing and paint, but do not duplicate the article's
+    // outer vertical padding/margins for every exposed child paragraph.
+    shell.style.setProperty(`margin-${side}`, "0", "important");
+    shell.style.setProperty(`padding-${side}`, "0", "important");
+    shell.style.setProperty(`border-${side}-width`, "0", "important");
+    shell.style.setProperty(`border-${side}-left-radius`, "0", "important");
+    shell.style.setProperty(`border-${side}-right-radius`, "0", "important");
+  }
+  return shell;
+}
+
 export function articleBlocks(html: string) {
   const parsed = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
   const root = parsed.querySelector("main")!;
+  // These identifiers belong to this pagination run, never to imported HTML.
+  root.querySelectorAll(`[${TABLE_REPEAT_ATTRIBUTE}]`).forEach((element) => element.removeAttribute(TABLE_REPEAT_ATTRIBUTE));
+  root.querySelectorAll("table").forEach((table, index) => table.setAttribute(TABLE_SOURCE_ATTRIBUTE, String(index)));
   let changed = true;
   while (changed) {
     changed = false;
@@ -63,11 +91,10 @@ export function articleBlocks(html: string) {
         changed = true;
         return;
       }
-      const replacements = nodes.map((node) => {
+      const replacements = nodes.map((node, index) => {
         if (!preserveWrapperShell(element)) return node.cloneNode(true);
-        const shell = element.cloneNode(false) as Element;
+        const shell = wrapperFragment(element, node.cloneNode(true), { start: index === 0, end: index === nodes.length - 1 });
         shell.setAttribute("data-pagination-shell", "true");
-        shell.append(node.cloneNode(true));
         return shell;
       });
       element.replaceWith(...replacements);
@@ -88,40 +115,93 @@ export function articleBlocks(html: string) {
     });
 }
 
-export function splitTableToPages(table: Element, parsed: Document, measure: HTMLDivElement, maxHeight: number) {
+export function tableHeader(table: Element) {
+  const explicitHead = table.querySelector(":scope > thead");
+  if (explicitHead) return explicitHead.cloneNode(true) as Element;
+  const firstRow = table.querySelector(":scope > tbody > tr, :scope > tr");
+  if (!firstRow?.children.length || ![...firstRow.children].every((cell) => cell.tagName === "TH")) return null;
+  const head = table.ownerDocument.createElement("thead");
+  head.append(firstRow.cloneNode(true));
+  return head;
+}
+
+export function splitTableToPages(
+  table: Element,
+  parsed: Document,
+  measure: HTMLDivElement,
+  maxHeight: number,
+  firstMaxHeight = maxHeight,
+  firstPieceFits?: (html: string) => boolean,
+  wrap: (element: Element, edges: FragmentEdges) => Element = (element) => element,
+) {
   let rows = [...table.querySelectorAll(":scope > tbody > tr, :scope > tr")];
-  if (rows.length <= 1) return [table.outerHTML];
   const caption = table.querySelector(":scope > caption")?.cloneNode(true) as Element | undefined;
   const colgroup = table.querySelector(":scope > colgroup")?.cloneNode(true) as Element | undefined;
-  let head = table.querySelector(":scope > thead")?.cloneNode(true) as Element | undefined;
+  const head = tableHeader(table);
   const foot = table.querySelector(":scope > tfoot")?.cloneNode(true) as Element | undefined;
-  if (!head && rows[0]?.children.length && [...rows[0].children].every((cell) => cell.tagName === "TH")) {
-    head = parsed.createElement("thead");
-    head.append(rows[0].cloneNode(true));
-    rows = rows.slice(1);
-  }
+  if (head && !table.querySelector(":scope > thead")) rows = rows.slice(1);
+  if (!rows.length || rows.length === 1 && !foot) return [table.outerHTML];
 
-  const buildTable = (bodyRows: Element[], includeFoot = false) => {
+  const buildTable = (bodyRows: Element[], includeFoot: boolean, continuation: boolean) => {
     const nextTable = table.cloneNode(false) as Element;
-    if (caption) nextTable.append(caption.cloneNode(true));
+    const appendHeading = (element: Element | null | undefined) => {
+      if (!element) return;
+      const clone = element.cloneNode(true) as Element;
+      if (continuation) clone.setAttribute(TABLE_REPEAT_ATTRIBUTE, "true");
+      nextTable.append(clone);
+    };
+    appendHeading(caption);
     if (colgroup) nextTable.append(colgroup.cloneNode(true));
-    if (head) nextTable.append(head.cloneNode(true));
+    appendHeading(head);
     const body = parsed.createElement("tbody");
     bodyRows.forEach((row) => body.append(row.cloneNode(true)));
     nextTable.append(body);
     if (includeFoot && foot) nextTable.append(foot.cloneNode(true));
-    return nextTable.outerHTML;
+    return nextTable;
   };
   const pieces: string[] = [];
   let chunkRows: Element[] = [];
-  rows.forEach((row, index) => {
-    const candidate = buildTable([...chunkRows, row], index === rows.length - 1);
-    if (chunkRows.length && measureHtml(measure, candidate) > maxHeight) {
-      pieces.push(buildTable(chunkRows));
-      chunkRows = [row];
-    } else chunkRows.push(row);
-  });
-  if (chunkRows.length) pieces.push(buildTable(chunkRows, true));
+  const fitsTable = (candidate: Element, end: boolean) => {
+    const wrapped = wrap(candidate, { start: pieces.length === 0, end });
+    return pieces.length === 0 && firstPieceFits
+      ? firstPieceFits(wrapped.outerHTML)
+      : measureHtml(measure, wrapped.outerHTML) <= (pieces.length ? maxHeight : firstMaxHeight) + 2;
+  };
+  let index = 0;
+  while (index < rows.length) {
+    const isLastRow = index === rows.length - 1;
+    const candidate = buildTable([...chunkRows, rows[index]], isLastRow, pieces.length > 0);
+    if (fitsTable(candidate, isLastRow)) {
+      chunkRows.push(rows[index]);
+      index += 1;
+      continue;
+    }
+    if (isLastRow && foot) {
+      const rowsWithoutFoot = buildTable([...chunkRows, rows[index]], false, pieces.length > 0);
+      if (fitsTable(rowsWithoutFoot, false)) {
+        // Keep all fitting body rows together before moving only the footer.
+        pieces.push(rowsWithoutFoot.outerHTML, buildTable([], true, true).outerHTML);
+        chunkRows = [];
+        index += 1;
+        continue;
+      }
+    }
+    if (chunkRows.length) {
+      pieces.push(buildTable(chunkRows, false, pieces.length > 0).outerHTML);
+      chunkRows = [];
+      // Retry this row on the next page, including its actual wrapper edges.
+    } else {
+      if (!pieces.length && firstPieceFits) {
+        // No complete row fits beside existing content. Let the paginator retry
+        // the original table on a fresh page without losing or duplicating rows.
+        return [table.outerHTML];
+      }
+      // A single row is indivisible. Preserve it when it exceeds an entire page.
+      pieces.push(candidate.outerHTML);
+      index += 1;
+    }
+  }
+  if (chunkRows.length) pieces.push(buildTable(chunkRows, true, pieces.length > 0).outerHTML);
   return pieces;
 }
 
@@ -172,7 +252,7 @@ function cloneTextRange(source: Element, start: number, end: number) {
 }
 
 function semanticCut(text: string, start: number, maximum: number) {
-  const minimum = Math.max(start + 12, maximum - 90);
+  const minimum = Math.max(start + 12, maximum - Math.min(24, Math.floor((maximum - start) * 0.15)));
   for (let index = maximum; index >= minimum; index -= 1) {
     if (/[。！？；.!?;：:\n]/.test(text[index - 1] || "")) return index;
   }
@@ -188,6 +268,7 @@ function splitTextPreservingDom(
   pageHeight: number,
   firstHeight: number,
   firstPieceFits?: (html: string) => boolean,
+  wrap: (element: Element, edges: FragmentEdges) => Element = (element) => element,
 ) {
   const text = collectTextNodes(source).map((node) => node.data).join("");
   if (text.length < 2) return [source.cloneNode(true) as Element];
@@ -198,10 +279,13 @@ function splitTextPreservingDom(
   while (start < text.length) {
     const remainder = cloneTextRange(source, start, text.length);
     if (!remainder) break;
-    const fitsCurrentLimit = (candidate: Element) => pieces.length === 0 && firstPieceFits
-      ? firstPieceFits(candidate.outerHTML)
-      : measureHtml(measure, candidate.outerHTML) <= limit + 2;
-    if (fitsCurrentLimit(remainder)) {
+    const fitsCurrentLimit = (candidate: Element, end: number) => {
+      const wrapped = wrap(candidate, { start: start === 0, end: end === text.length });
+      return pieces.length === 0 && firstPieceFits
+        ? firstPieceFits(wrapped.outerHTML)
+        : measureHtml(measure, wrapped.outerHTML) <= limit + 2;
+    };
+    if (fitsCurrentLimit(remainder, text.length)) {
       pieces.push(remainder);
       break;
     }
@@ -212,7 +296,7 @@ function splitTextPreservingDom(
     while (low <= high) {
       const middle = Math.floor((low + high) / 2);
       const candidate = cloneTextRange(source, start, middle);
-      if (candidate && fitsCurrentLimit(candidate)) {
+      if (candidate && fitsCurrentLimit(candidate, middle)) {
         best = middle;
         low = middle + 1;
       } else high = middle - 1;
@@ -239,67 +323,73 @@ function splitTextPreservingDom(
   return pieces.length ? pieces : [source.cloneNode(true) as Element];
 }
 
+export type BlockSplit = { pieces: string[]; splitAtPageBoundary: boolean };
+
 export function splitOversizedBlock(
   html: string,
   measure?: HTMLDivElement,
   maxHeight?: number,
   firstMaxHeight?: number,
   firstPieceFits?: (html: string) => boolean,
-): string[] {
+): BlockSplit {
   const parsed = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
   const element = parsed.querySelector("main")?.firstElementChild;
-  if (!element) return [html];
+  if (!element) return { pieces: [html], splitAtPageBoundary: false };
 
-  const splitElement = (source: Element): Element[] => {
+  type ElementSplit = { pieces: Element[]; splitAtPageBoundary: boolean };
+  const splitElement = (
+    source: Element,
+    wrap: (element: Element, edges: FragmentEdges) => Element = (element) => element,
+  ): ElementSplit => {
+    const unchanged = () => ({ pieces: [source.cloneNode(true) as Element], splitAtPageBoundary: false });
     const isVerifiedComposite = source.classList.contains(RICH_LAYOUT_CLASS) && isRichLayoutGroup(source);
     if (source.classList.contains(RICH_LAYOUT_CLASS) && !isVerifiedComposite) source.classList.remove(RICH_LAYOUT_CLASS);
-    if (source.matches(`${ATOMIC_SELECTOR},h1,h2,h3`) || isVerifiedComposite) return [source.cloneNode(true) as Element];
+    if (source.matches(`${ATOMIC_SELECTOR},h1,h2,h3`) || isVerifiedComposite) return unchanged();
 
-    if (source.matches("img,hr") || !GROUP_TAGS.has(source.tagName) && source.querySelector(VISUAL_CONTENT_SELECTOR)) {
-      return [source.cloneNode(true) as Element];
-    }
+    if (source.matches("img,hr") || !GROUP_TAGS.has(source.tagName) && source.querySelector(VISUAL_CONTENT_SELECTOR)) return unchanged();
 
     if (source.tagName === "TABLE" && measure && maxHeight) {
-      return splitTableToPages(source, parsed, measure, maxHeight).map((piece) => (
-        new DOMParser().parseFromString(`<main>${piece}</main>`, "text/html").querySelector("main")!.firstElementChild!
-      ));
+      return {
+        pieces: splitTableToPages(source, parsed, measure, maxHeight, Math.max(1, firstMaxHeight ?? maxHeight), firstPieceFits, wrap).map((piece) => (
+          new DOMParser().parseFromString(`<main>${piece}</main>`, "text/html").querySelector("main")!.firstElementChild!
+        )),
+        splitAtPageBoundary: true,
+      };
     }
 
     const nodes = [...source.childNodes].filter(meaningfulNode);
-    if (!nodes.length) return [];
+    if (!nodes.length) return { pieces: [], splitAtPageBoundary: false };
     if (GROUP_TAGS.has(source.tagName) && nodes.length > 1) {
-      return nodes.map((node) => {
-        const shell = source.cloneNode(false) as Element;
-        shell.append(node.cloneNode(true));
-        return shell;
-      });
+      return {
+        pieces: nodes.map((node, index) => wrapperFragment(source, node.cloneNode(true), { start: index === 0, end: index === nodes.length - 1 })),
+        splitAtPageBoundary: false,
+      };
     }
     if (GROUP_TAGS.has(source.tagName) && nodes.length === 1 && nodes[0].nodeType === Node.ELEMENT_NODE) {
       const inner = nodes[0] as Element;
       const isAtomicInner = inner.matches(`${ATOMIC_SELECTOR},h1,h2,h3,img,hr`)
         || inner.classList.contains(RICH_LAYOUT_CLASS) && isRichLayoutGroup(inner);
-      if (isAtomicInner) return [source.cloneNode(true) as Element];
-      const innerPieces = splitElement(inner);
-      if (innerPieces.length > 1) return innerPieces.map((piece) => {
-        const shell = source.cloneNode(false) as Element;
-        shell.append(piece);
-        return shell;
-      });
+      if (isAtomicInner) return unchanged();
+      // Every fit probe must include the complete ancestor chain: padding and
+      // narrowed line width can make a bare inner paragraph look much smaller.
+      const result = splitElement(inner, (piece, edges) => wrap(wrapperFragment(source, piece.cloneNode(true), edges), edges));
+      return {
+        pieces: result.pieces.map((piece, index) => wrapperFragment(source, piece, { start: index === 0, end: index === result.pieces.length - 1 })),
+        splitAtPageBoundary: result.splitAtPageBoundary,
+      };
     }
 
     if (measure && maxHeight) {
-      return splitTextPreservingDom(
-        source,
-        measure,
-        maxHeight,
-        Math.max(1, firstMaxHeight ?? maxHeight),
-        firstPieceFits,
-      );
+      return {
+        pieces: splitTextPreservingDom(source, measure, maxHeight, Math.max(1, firstMaxHeight ?? maxHeight), firstPieceFits, wrap),
+        splitAtPageBoundary: true,
+      };
     }
-    return [source.cloneNode(true) as Element];
+    return unchanged();
   };
 
-  return splitElement(element).map((piece) => piece.outerHTML);
+  const result = splitElement(element);
+  return { ...result, pieces: result.pieces.map((piece) => piece.outerHTML) };
 }
 
 export function blockIsHeading(html: string) {
