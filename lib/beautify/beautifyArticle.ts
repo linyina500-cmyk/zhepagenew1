@@ -1,4 +1,4 @@
-import { RICH_LAYOUT_CLASS } from "../richText/normalizeRichHtml";
+import { RICH_LAYOUT_CLASS, markRichLayoutGroups } from "../richText/normalizeRichHtml";
 
 const NUMBERED_HEADING = /^(?:第[一二三四五六七八九十百\d]+(?:[章节部分句点条项问](?=[:：、.．\s]|$)|(?=[:：、.．\s]))|[一二三四五六七八九十]+[、.．]|0?\d{1,2}[、.．\s])/;
 const SECTION_HEADING = /^(?:实话|真相|观点|理由|问题|提醒|要点|关键)[一二三四五六七八九十\d]+[:：、]/;
@@ -71,6 +71,7 @@ function emphasisRatio(paragraph: HTMLParagraphElement, textLength: number) {
 
 export function beautifyArticle(html: string, options: AutoTypesetOptions = {}): AutoTypesetResult {
   const parsed = new DOMParser().parseFromString(html, "text/html");
+  markRichLayoutGroups(parsed.body);
   const numberedDotStyle = options.numberedDotStyle !== false;
   let changes = 0;
   let promotedHeadings = 0;
@@ -129,10 +130,14 @@ export function beautifyArticle(html: string, options: AutoTypesetOptions = {}):
     }
   });
 
-  const firstTopLevelParagraph = [...parsed.body.children]
-    .find((element) => element.tagName === "P" && element.textContent?.trim()) as HTMLParagraphElement | undefined;
-  if (firstTopLevelParagraph) {
-    const added = addClass(firstTopLevelParagraph, "auto-lead-paragraph");
+  const firstArticleParagraph = [...parsed.body.querySelectorAll<HTMLParagraphElement>("p")]
+    .find((paragraph) => paragraph.textContent?.trim()
+      && !isInsideImportedLayout(paragraph)
+      && !paragraph.closest("table,li,blockquote,figcaption")
+      && !paragraph.classList.contains("image-caption")
+      && !/^图[:：]/.test(paragraph.textContent.trim()));
+  if (firstArticleParagraph) {
+    const added = addClass(firstArticleParagraph, "auto-lead-paragraph");
     changes += added;
     formattedParagraphs += added;
   }
@@ -140,7 +145,7 @@ export function beautifyArticle(html: string, options: AutoTypesetOptions = {}):
   parsed.body.querySelectorAll<HTMLParagraphElement>("p").forEach((paragraph) => {
     if (isInsideImportedLayout(paragraph)) return;
     const text = paragraph.textContent?.trim() || "";
-    if (!text || paragraph === firstTopLevelParagraph || paragraph.classList.contains("image-caption")) return;
+    if (!text || paragraph === firstArticleParagraph || paragraph.classList.contains("image-caption")) return;
     const ratio = emphasisRatio(paragraph, text.length);
     const numericSignals = text.match(/(?:\d[\d,.]*%?|\d+(?:\.\d+)?(?:万|亿|元|倍|股|户))/g)?.length || 0;
     let added = 0;

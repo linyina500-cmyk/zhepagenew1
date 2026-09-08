@@ -5,6 +5,7 @@ export const RICH_TEXT_LIMITS = {
   htmlLength: 1_000_000,
   textLength: 30_000,
   elementCount: 2_500,
+  depth: 64,
 } as const;
 
 const STRUCTURAL_SELECTOR = "section,div,article,aside";
@@ -56,17 +57,30 @@ export function isRichLayoutGroup(element: Element) {
   if (children.length < 2 || children.length > 24 || textLength > 1_800) return false;
 
   const own = visualSignals(element);
+  const style = element.getAttribute("style") || "";
+  const horizontalLayout = own.layout && !/flex-direction\s*:\s*column/i.test(style);
+  const paragraphs = [...element.querySelectorAll("p")].filter((paragraph) => (
+    !paragraph.closest("table,li,blockquote,figcaption") && Boolean(paragraph.textContent?.trim())
+  ));
+  const longParagraphs = paragraphs.filter((paragraph) => (paragraph.textContent?.trim().length || 0) >= 80);
+  // Backgrounds and borders also commonly surround an entire AI-formatted
+  // article. Keep its prose splittable, while retaining compact visual cards.
+  if (element.tagName === "ARTICLE" || element.querySelector("h1") || longParagraphs.length >= 2) return false;
+  if (!horizontalLayout && element.querySelectorAll("h2,h3,h4,h5,h6").length >= 2) return false;
+  if (paragraphs.length >= 4 && paragraphs.some((paragraph) => (paragraph.textContent?.trim().length || 0) >= 32)) return false;
+
   const childSignals = children.map(visualSignals);
   const paintedChildren = childSignals.filter((signal) => (
     signal.background || signal.border || signal.gradient || signal.layout || signal.radius || signal.shadow
   )).length;
-  const hasTableComposition = Boolean(element.querySelector("table")) && children.length >= 2;
+  const hasTableComposition = Boolean(element.querySelector("table")) && paragraphs.length <= 1 && children.length >= 2;
+  const hasCallToAction = textLength <= 400 && Boolean(element.querySelector("a,button,img"));
 
-  if (own.layout && children.length >= 2) return true;
+  if (horizontalLayout && children.length >= 2) return true;
   if ((own.border || own.shadow) && children.length >= 2) return true;
   if (own.gradient && children.length >= 2) return true;
   if (hasTableComposition) return true;
-  if (own.background && own.padding && children.length >= 2) return true;
+  if (own.background && own.padding && hasCallToAction) return true;
   return own.padding && paintedChildren >= 2;
 }
 
@@ -133,16 +147,32 @@ export function normalizeRichHtmlDocument(documentNode: Document) {
 }
 
 export function richTextStats(root: ParentNode) {
+  let elementCount = 0;
+  let depth = 0;
+  const stack = [...root.children].map((element) => ({ element, depth: 1 }));
+  while (stack.length) {
+    const current = stack.pop()!;
+    elementCount += 1;
+    depth = Math.max(depth, current.depth);
+    for (const element of current.element.children) stack.push({ element, depth: current.depth + 1 });
+  }
   return {
     textLength: Array.from(root.textContent || "").length,
-    elementCount: root.querySelectorAll("*").length,
+    elementCount,
+    depth,
   };
 }
 
+export function richTextHtmlLimitMessage(html: string) {
+  return html.length > RICH_TEXT_LIMITS.htmlLength ? "HTML 源码超过 100 万字符，请拆分文章后再导入" : "";
+}
+
 export function richTextLimitMessage(html: string, root: ParentNode) {
+  const htmlMessage = richTextHtmlLimitMessage(html);
+  if (htmlMessage) return htmlMessage;
   const stats = richTextStats(root);
-  if (html.length > RICH_TEXT_LIMITS.htmlLength) return "HTML 源码超过 100 万字符，请拆分文章后再导入";
   if (stats.textLength > RICH_TEXT_LIMITS.textLength) return "正文超过 3 万字，请拆分文章后再导入";
   if (stats.elementCount > RICH_TEXT_LIMITS.elementCount) return "富文本节点超过 2500 个，请简化装饰或拆分文章后再导入";
+  if (stats.depth > RICH_TEXT_LIMITS.depth) return "富文本嵌套超过 64 层，请简化装饰或改用纯文本粘贴";
   return "";
 }

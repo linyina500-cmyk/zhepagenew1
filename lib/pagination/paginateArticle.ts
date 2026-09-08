@@ -167,9 +167,10 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
         continue;
       }
 
-      // Keep H1/H2/H3 with the following paragraph. Rolling the heading back is
-      // a bounded one-block backtrack and never changes source order.
-      if (blockIsHeading(current[current.length - 1])) {
+      // Move a trailing heading only when it leaves content on the old page.
+      // A heading already alone on a fresh page cannot move any farther:
+      // retrying it with the same unsplittable follower would loop forever.
+      if (current.length > 1 && blockIsHeading(current[current.length - 1])) {
         const heading = current.pop()!;
         commit();
         queue.unshift(heading, block);

@@ -9,7 +9,7 @@ import { LAYOUT_PRESETS, LAYOUT_STYLE_KEYS } from "../lib/layouts/layoutPresets"
 import { resolveThemeTokens } from "../lib/layouts/resolveThemeTokens";
 import type { LayoutStyleKey, PreviewPresentation } from "../lib/layouts/layoutTypes";
 import { paginateArticle } from "../lib/pagination/paginateArticle";
-import { INLINE_RUN_CLASS, RICH_LAYOUT_CLASS, normalizeRichHtmlDocument, richTextLimitMessage } from "../lib/richText/normalizeRichHtml";
+import { INLINE_RUN_CLASS, RICH_LAYOUT_CLASS, normalizeRichHtmlDocument, richTextHtmlLimitMessage, richTextLimitMessage } from "../lib/richText/normalizeRichHtml";
 
 const ZhepageEditor = lazy(() => import("./components/ZhepageEditor"));
 
@@ -273,7 +273,11 @@ function scaleInlineTypography(style: string) {
 }
 
 function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
+  const sourceLimit = richTextHtmlLimitMessage(rawHtml);
+  if (sourceLimit) throw new Error(sourceLimit);
   const documentNode = new DOMParser().parseFromString(rawHtml, "text/html");
+  const inputLimit = richTextLimitMessage(rawHtml, documentNode.body);
+  if (inputLimit) throw new Error(inputLimit);
   documentNode.querySelectorAll(SAFE_ELEMENTS).forEach((element) => element.remove());
   documentNode.querySelectorAll("*").forEach((element) => {
     const originalStyle = element.getAttribute("style") || "";
@@ -321,12 +325,14 @@ function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
     if (!heading.textContent?.trim() && !heading.querySelector("img")) heading.remove();
   });
   normalizeRichHtmlDocument(documentNode);
-  const limitMessage = richTextLimitMessage(rawHtml, documentNode.body);
+  const limitMessage = richTextLimitMessage(documentNode.body.innerHTML, documentNode.body);
   if (limitMessage) throw new Error(limitMessage);
   return documentNode.body.innerHTML.trim();
 }
 
 function extractArticle(source: string, preserveStyles: boolean) {
+  const sourceLimit = richTextHtmlLimitMessage(source);
+  if (sourceLimit) throw new Error(sourceLimit);
   const parsed = new DOMParser().parseFromString(source, "text/html");
   const title =
     parsed.querySelector('meta[property="og:title"]')?.getAttribute("content") ||
@@ -581,10 +587,11 @@ export default function Home() {
       }
     };
     const scheduleUpdate = () => {
+      if (cancelled) return;
       if (updateTimer) window.clearTimeout(updateTimer);
       updateTimer = window.setTimeout(update, updateDelay);
     };
-    const timer = window.setTimeout(update, updateDelay);
+    scheduleUpdate();
     document.fonts?.ready.then(scheduleUpdate);
     const parsed = new DOMParser().parseFromString(paginationHtml, "text/html");
     [...parsed.images].slice(0, 80).forEach((source) => {
@@ -595,7 +602,6 @@ export default function Home() {
     });
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
       if (updateTimer) window.clearTimeout(updateTimer);
     };
   }, [paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, posterFontsReady, paginationRevision, pageOffset, layoutStyle]);
@@ -739,7 +745,7 @@ export default function Home() {
     setArticleHtml(result.html);
     setSourceEditorHtml(result.html);
     setEditorRevision((revision) => revision + 1);
-    setAutoStructure(false);
+    setAutoStructure(true);
     setManualTypesetPreview(true);
     setPreviewPresentation("beautified");
     importPendingRef.current = true;

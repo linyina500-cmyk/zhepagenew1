@@ -11,7 +11,7 @@ import { TableKit } from "@tiptap/extension-table";
 import { Extension, Mark, Node, getStyleProperty, mergeAttributes } from "@tiptap/core";
 import { NodeSelection } from "@tiptap/pm/state";
 import UnifiedColorPopover from "./UnifiedColorPopover";
-import { RICH_TEXT_LIMITS, normalizeRichHtmlDocument, richTextLimitMessage } from "../../lib/richText/normalizeRichHtml";
+import { createContentLimitExtension, createPasteHandlers } from "../../lib/richText/editorPaste";
 
 type ZhepageEditorProps = {
   html: string;
@@ -209,6 +209,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     immediatelyRender: false,
     extensions: [
       StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: false, code: false, codeBlock: false }),
+      createContentLimitExtension(onNotice),
       GenericBlock,
       SourceStyle,
       PreservedAttributes,
@@ -222,38 +223,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     content: html,
     editorProps: {
       attributes: { class: "tiptap-surface", spellcheck: "false" },
-      handlePaste: (_view, event) => {
-        const pastedHtml = event.clipboardData?.getData("text/html") || "";
-        const pastedText = event.clipboardData?.getData("text/plain") || "";
-        const parsed = pastedHtml ? new DOMParser().parseFromString(pastedHtml, "text/html") : null;
-        const limitMessage = parsed
-          ? richTextLimitMessage(pastedHtml, parsed.body)
-          : Array.from(pastedText).length > RICH_TEXT_LIMITS.textLength
-            ? "正文超过 3 万字，请拆分文章后再导入"
-            : "";
-        if (!limitMessage) return false;
-        event.preventDefault();
-        onNotice(`未粘贴：${limitMessage}`, "error");
-        return true;
-      },
-      transformPastedHTML: (pastedHtml) => {
-        const parsed = new DOMParser().parseFromString(pastedHtml, "text/html");
-        parsed.body.querySelectorAll<HTMLElement>("*").forEach((element) => {
-          if (!element.hasAttribute("style")) return;
-          element.style.removeProperty("font-size");
-          element.style.removeProperty("line-height");
-          element.style.removeProperty("font-family");
-          element.style.removeProperty("letter-spacing");
-          if (!element.getAttribute("style")?.trim()) element.removeAttribute("style");
-        });
-        normalizeRichHtmlDocument(parsed);
-        const limitMessage = richTextLimitMessage(pastedHtml, parsed.body);
-        if (limitMessage) {
-          onNotice(`未粘贴：${limitMessage}`, "error");
-          return "";
-        }
-        return parsed.body.innerHTML;
-      },
+      ...createPasteHandlers(onNotice),
     },
     onUpdate: ({ editor: currentEditor }) => {
       if (applyingExternalContent.current) return;
@@ -311,7 +281,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     lastRevision.current = revision;
     if (updateTimer.current) window.clearTimeout(updateTimer.current);
     applyingExternalContent.current = true;
-    editor.commands.setContent(html, { emitUpdate: false, contentType: "html" });
+    editor.chain().setMeta("richTextExternalContent", true).setContent(html, { emitUpdate: false }).run();
     applyingExternalContent.current = false;
   }, [editor, html, revision]);
 

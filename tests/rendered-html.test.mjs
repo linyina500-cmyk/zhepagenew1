@@ -181,7 +181,7 @@ test("ships self-hosted Source Han fonts for stable cross-platform pagination", 
 });
 
 test("ships DOM-safe smart pagination and local-only beautification regressions", async () => {
-  const [page, css, editor, splitter, paginator, beautifier, normalizer] = await Promise.all([
+  const [page, css, editor, splitter, paginator, beautifier, normalizer, pasteHandler] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ZhepageEditor.tsx", import.meta.url), "utf8"),
@@ -189,6 +189,7 @@ test("ships DOM-safe smart pagination and local-only beautification regressions"
     readFile(new URL("../lib/pagination/paginateArticle.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/beautify/beautifyArticle.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/richText/normalizeRichHtml.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/richText/editorPaste.ts", import.meta.url), "utf8"),
   ]);
 
   // Long paragraphs are deep-cloned before text trimming. Unlike
@@ -248,10 +249,10 @@ test("ships DOM-safe smart pagination and local-only beautification regressions"
   assert.match(editor, /selectedImagePosition/);
   assert.match(editor, /NodeSelection\.create/);
   assert.match(editor, /currentEditor\.getHTML\(\)/);
-  assert.match(editor, /normalizeRichHtmlDocument\(parsed\)/);
-  assert.match(editor, /richTextLimitMessage/);
-  assert.match(editor, /handlePaste/);
-  assert.match(editor, /event\.preventDefault\(\)/);
+  assert.match(pasteHandler, /normalizeRichHtmlDocument\(parsed\)/);
+  assert.match(pasteHandler, /richTextLimitMessage/);
+  assert.match(pasteHandler, /handlePaste/);
+  assert.match(pasteHandler, /event\.preventDefault\(\)/);
   assert.match(editor, /data-auto-index/);
   assert.match(editor, /data-auto-label/);
   assert.doesNotMatch(editor, /快速样式/);

@@ -77,7 +77,11 @@ export function articleBlocks(html: string) {
   return [...root.childNodes]
     .filter(meaningfulNode)
     .map((node) => {
-      if (node.nodeType === Node.TEXT_NODE) return `<p>${node.textContent || ""}</p>`;
+      if (node.nodeType === Node.TEXT_NODE) {
+        const paragraph = parsed.createElement("p");
+        paragraph.textContent = node.textContent;
+        return paragraph.outerHTML;
+      }
       const clone = node.cloneNode(true) as Element;
       clone.removeAttribute("data-pagination-shell");
       return clone.outerHTML;
