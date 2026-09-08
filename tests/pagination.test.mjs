@@ -249,3 +249,42 @@ test("repeat markers cannot hide changed body content or another table's header"
   missingBody[0].querySelector("tbody tr").remove();
   assert.throws(() => assertPaginationSemantics(source, missingBody.map((body) => body.innerHTML)), /正文/);
 });
+
+
+test("nested identical color spans remain equivalent when a page splits the inner span", () => {
+  const first = "甲".repeat(100);
+  const middle = "乙".repeat(100);
+  const last = "丙".repeat(100);
+  const source = `<p><span style="color:red">${first}<span style="color:red">${middle}</span>${last}</span></p>`;
+  const { pages } = paginateArticle(source, createMeasure(), 198);
+  assert.equal(pages.length, 2);
+  assert.equal(pageBody(pages.join("")).textContent, first + middle + last);
+  assert.doesNotThrow(() => assertPaginationSemantics(source, pages));
+});
+
+test("nested emphasis is compared by the text it covers across continuation fragments", () => {
+  const source = "<p><strong>甲<strong>乙丙</strong>丁</strong></p>";
+  const pages = ["<p><strong>甲<strong>乙</strong></strong></p>", "<p><strong><strong>丙</strong>丁</strong></p>"];
+  assert.doesNotThrow(() => assertPaginationSemantics(source, pages));
+});
+
+test("discarding empty inline spans does not report lost text color", () => {
+  const source = '<p><span style="color:red"></span><span style="color:blue">完整正文</span></p>';
+  assert.doesNotThrow(() => assertPaginationSemantics(source, ['<p><span style="color:blue">完整正文</span></p>']));
+});
+
+test("color and emphasis loss on visible text still fail the integrity check", () => {
+  const source = '<p><span style="color:red">甲<span style="color:blue">乙丙</span>丁</span><strong>重要内容</strong></p>';
+  assert.throws(() => assertPaginationSemantics(source, [source.replace('color:blue', 'color:green')]), /span\[style\]/);
+  assert.throws(() => assertPaginationSemantics(source, [source.replace('<span style="color:blue">乙丙</span>', '乙丙')]), /span\[style\]/);
+  assert.throws(() => assertPaginationSemantics(source, [source.replace('<strong>重要内容</strong>', '重要内容')]), /strong/);
+  assert.throws(() => assertPaginationSemantics(source, [source.replace('乙丙', '乙')]), /正文/);
+});
+
+
+test("stacked style effects cannot lose an ancestor while keeping the same visible text", () => {
+  const source = '<p><span style="opacity:0.5">甲<span style="opacity:0.5">乙丙</span>丁</span></p>';
+  const pages = ['<p><span style="opacity:0.5">甲<span style="opacity:0.5">乙</span></span></p>', '<p><span style="opacity:0.5"><span style="opacity:0.5">丙</span>丁</span></p>'];
+  assert.doesNotThrow(() => assertPaginationSemantics(source, pages));
+  assert.throws(() => assertPaginationSemantics(source, ['<p><span style="opacity:0.5">甲乙丙丁</span></p>']), /span\[style\]/);
+});

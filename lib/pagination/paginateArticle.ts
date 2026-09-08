@@ -67,10 +67,27 @@ function semanticAttributeKey(element: Element) {
 
 function semanticBuckets(parsed: Document, selector: string) {
   const buckets = new Map<string, string>();
-  parsed.querySelectorAll(selector).forEach((element) => {
-    const key = semanticAttributeKey(element);
-    buckets.set(key, `${buckets.get(key) || ""}${element.textContent || ""}`);
-  });
+  const walker = parsed.createTreeWalker(parsed.body, NodeFilter.SHOW_TEXT);
+  let textNode = walker.nextNode();
+  while (textNode) {
+    // Compare text runs in document order at each active style depth. Whole
+    // ancestor textContent duplicates nested spans and reorders that duplicate
+    // text across pages. Retain the nesting count: opacity/em sizes can stack.
+    const depths = new Map<string, number>();
+    let ancestor = textNode.parentElement;
+    while (ancestor) {
+      if (ancestor.matches(selector)) {
+        const key = semanticAttributeKey(ancestor);
+        depths.set(key, (depths.get(key) || 0) + 1);
+      }
+      ancestor = ancestor.parentElement;
+    }
+    for (const [style, depth] of depths) {
+      const key = JSON.stringify([style, depth]);
+      buckets.set(key, `${buckets.get(key) || ""}${textNode.textContent || ""}`);
+    }
+    textNode = walker.nextNode();
+  }
   return JSON.stringify([...buckets.entries()]
     .map(([key, value]) => [key, normalizeSemanticText(value)])
     .sort(([left], [right]) => left.localeCompare(right)));
