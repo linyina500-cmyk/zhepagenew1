@@ -36,13 +36,14 @@ test("server-renders the Zhepage application metadata", async () => {
 });
 
 test("keeps the requested production defaults", async () => {
-  const [page, css, editor, packageJson, readme, guide] = await Promise.all([
+  const [page, css, editor, packageJson, readme, guide, articleImporter] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/components/ZhepageEditor.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("../使用说明.md", import.meta.url), "utf8"),
+    readFile(new URL("../lib/richText/importArticle.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /aGVYCtoaJWxN_R2VBSd-_g/);
@@ -116,12 +117,12 @@ test("keeps the requested production defaults", async () => {
   assert.match(page, /gloryGold/);
   assert.match(page, /camelliaRed/);
   assert.match(page, /保存当前版本/);
-  assert.match(page, /element\.removeAttribute\("href"\)/);
-  assert.match(page, /replace\(\/line-height\\s\*:/);
+  assert.match(articleImporter, /element\.removeAttribute\("href"\)/);
+  assert.match(articleImporter, /replace\(\/line-height\\s\*:/);
   assert.match(page, /一键导入并替换正文/);
   assert.match(page, /把一篇长文，变成一组可以直接发布的贴图/);
   assert.match(page, /zhepage-guide-seen-v1/);
-  assert.match(page, /function extractRichTextFragment/);
+  assert.match(articleImporter, /function extractRichTextFragment/);
   assert.match(page, /首行标题会自动识别/);
   assert.match(page, /applySource\(sourceEditorHtml, "fragment", true\)/);
   assert.match(page, /setNotice\(\{[\s\S]*?item === "url"[\s\S]*?item === "editor"/);
