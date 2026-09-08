@@ -306,9 +306,22 @@ function splitTextPreservingDom(
   const pieces: Element[] = [];
   let start = 0;
   let limit = firstHeight;
+  const originalPosition = source.getAttribute("data-pagination-fragment");
+  const cloneFragment = (from: number, to: number) => {
+    const fragment = cloneTextRange(source, from, to);
+    if (!fragment) return null;
+    const startsOriginal = from === 0 && originalPosition !== "middle" && originalPosition !== "end";
+    const endsOriginal = to === text.length && originalPosition !== "middle" && originalPosition !== "start";
+    // Probe the same attributes that will be rendered. Continuation labels can
+    // change height, and a fragment of a continuation cannot become a new start.
+    if (!startsOriginal || !endsOriginal) {
+      fragment.setAttribute("data-pagination-fragment", startsOriginal ? "start" : endsOriginal ? "end" : "middle");
+    }
+    return fragment;
+  };
 
   while (start < text.length) {
-    const remainder = cloneTextRange(source, start, text.length);
+    const remainder = cloneFragment(start, text.length);
     if (!remainder) break;
     const fitsCurrentLimit = (candidate: Element, end: number) => {
       const wrapped = wrap(candidate, { start: start === 0, end: end === text.length });
@@ -326,7 +339,7 @@ function splitTextPreservingDom(
     let best = start;
     while (low <= high) {
       const middle = Math.floor((low + high) / 2);
-      const candidate = cloneTextRange(source, start, middle);
+      const candidate = cloneFragment(start, middle);
       if (candidate && fitsCurrentLimit(candidate, middle)) {
         best = middle;
         low = middle + 1;
@@ -339,17 +352,11 @@ function splitTextPreservingDom(
       break;
     }
     const cut = semanticCut(text, start, best);
-    const piece = cloneTextRange(source, start, cut) || cloneTextRange(source, start, best);
+    const piece = cloneFragment(start, cut) || cloneFragment(start, best);
     if (!piece) break;
     pieces.push(piece);
     start = cut > start ? cut : best;
     limit = pageHeight;
-  }
-  if (pieces.length > 1) {
-    pieces.forEach((piece, index) => {
-      const position = index === 0 ? "start" : index === pieces.length - 1 ? "end" : "middle";
-      piece.setAttribute("data-pagination-fragment", position);
-    });
   }
   return pieces.length ? pieces : [source.cloneNode(true) as Element];
 }

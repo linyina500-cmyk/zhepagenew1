@@ -4,7 +4,7 @@ import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const dom = installDom();
 const { paginateArticle, assertPaginationSemantics } = await loadDomModule("lib/pagination/paginateArticle.ts");
-const { articleBlocks, TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE } = await loadDomModule("lib/pagination/splitDomBlock.ts");
+const { articleBlocks, splitOversizedBlock, TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE } = await loadDomModule("lib/pagination/splitDomBlock.ts");
 const { connectAdjacentCallouts, connectCalloutsInHtml } = await loadDomModule("lib/beautify/connectCallouts.ts");
 
 test.after(() => dom.window.close());
@@ -423,4 +423,67 @@ test("pagination measures with the same joined callout edges that it returns", (
   assert.deepEqual(usage, [1]);
   assert.deepEqual(calloutEdges(pages[0]), [[false, true], [true, true], [true, false]]);
   assert.ok(measured.some((html) => html === pages[0]));
+});
+
+function createContinuationLabelMeasure() {
+  const measure = document.createElement("div");
+  const measured = [];
+  const heightOf = (root) => [...root.querySelectorAll("p")].reduce((height, paragraph) => {
+    const continuation = ["middle", "end"].includes(paragraph.getAttribute("data-pagination-fragment"));
+    const visibleLabel = !paragraph.classList.contains("auto-callout-joined-before");
+    // Model line-sized height steps and a continuation badge that needs 20px
+    // more than the first badge. Joined paragraphs share their visible label.
+    return height + Math.ceil(paragraph.textContent.length / 10) * 10 + (continuation && visibleLabel ? 20 : 0);
+  }, 0);
+  Object.defineProperty(measure, "scrollHeight", {
+    get() {
+      measured.push(measure.innerHTML);
+      return heightOf(measure);
+    },
+  });
+  return { measure, measured, heightOf };
+}
+
+test("continuation badge dimensions are present during splitting and every final page measurement", () => {
+  const text = "文".repeat(300);
+  const source = `<p class="auto-data-callout" data-auto-label="关键数据">${text}</p>`;
+  const { measure, measured, heightOf } = createContinuationLabelMeasure();
+  const { pieces } = splitOversizedBlock(source, measure, 100, 100);
+  assert.ok(pieces.length >= 3);
+  assert.ok(pieces.every((piece) => heightOf(pageBody(piece)) <= 100), "the splitter itself must return fragments that fit with their final labels");
+
+  const { pages, usage } = paginateArticle(source, measure, 100);
+  assert.ok(pages.length >= 3);
+  assert.equal(pageBody(pages.join("")).textContent, text);
+  assert.equal(pageBody(pages[0]).firstElementChild.getAttribute("data-pagination-fragment"), "start");
+  pages.forEach((page, index) => {
+    const body = pageBody(page);
+    assert.ok(heightOf(body) <= 100, `page ${index + 1} exceeds its height with the rendered continuation badge`);
+    assert.equal(usage[index], heightOf(body) / 100);
+    assert.ok(measured.includes(page), "each page must have been measured with its rendered classes and fragment attributes");
+    for (const paragraph of body.querySelectorAll("p")) {
+      assert.ok(paragraph.classList.contains("auto-data-callout"));
+      if (index > 0) assert.ok(["middle", "end"].includes(paragraph.getAttribute("data-pagination-fragment")), "a continuation page must not restart its label");
+    }
+  });
+  assert.equal(pageBody(pages.at(-1)).lastElementChild.getAttribute("data-pagination-fragment"), "end");
+});
+
+test("resplitting a text fragment preserves its original article boundaries", () => {
+  const { measure, heightOf } = createContinuationLabelMeasure();
+  const short = '<p class="auto-data-callout" data-auto-label="关键数据">未拆分段落</p>';
+  assert.deepEqual(splitOversizedBlock(short, measure, 100, 100).pieces, [short]);
+  for (const position of ["start", "middle", "end"]) {
+    const text = "续".repeat(260);
+    const source = `<p class="auto-data-callout" data-auto-label="关键数据" data-pagination-fragment="${position}">${text}</p>`;
+    const { pieces } = splitOversizedBlock(source, measure, 100, 100);
+    assert.ok(pieces.length >= 3);
+    assert.equal(pageBody(pieces.join("")).textContent, text);
+    pieces.forEach((piece, index) => {
+      const expected = position === "start" && index === 0 ? "start"
+        : position === "end" && index === pieces.length - 1 ? "end" : "middle";
+      assert.equal(pageBody(piece).firstElementChild.getAttribute("data-pagination-fragment"), expected);
+      assert.ok(heightOf(pageBody(piece)) <= 100);
+    });
+  }
 });
