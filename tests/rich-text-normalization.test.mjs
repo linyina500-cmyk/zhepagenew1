@@ -71,6 +71,49 @@ test("inline wrapper runs are normalized without losing source text", () => {
   assert.equal(result.querySelector("h3")?.textContent, "一、需求变化");
 });
 
+test("edited callouts are reclassified without retaining old labels or changing source styling", () => {
+  const source = `<p>文章导语。</p><p id="target" class="source-paragraph" style="color:orange"><strong>今年收入增长20%，利润增长30%，这些数据仍需结合行业环境与公司的实际经营情况进一步分析。</strong></p>`;
+  let formatted = parse(beautifyArticle(source).html);
+  assert.ok(formatted.querySelector("#target.auto-data-callout"));
+  formatted.querySelector("#target").textContent = "核心是：先判断业务的实际变化，再考虑市场价格的短期波动。";
+  formatted = parse(beautifyArticle(formatted.body.innerHTML).html);
+  assert.ok(formatted.querySelector("#target.auto-key-point"));
+  assert.equal(formatted.querySelector("#target.auto-data-callout,[data-auto-label]"), null);
+  formatted.querySelector("#target").textContent = "这一段现在是普通正文，用来继续介绍事件的背景与具体经过。";
+  const result = beautifyArticle(formatted.body.innerHTML);
+  formatted = parse(result.html);
+  assert.equal(formatted.querySelector("#target").className, "source-paragraph");
+  assert.equal(formatted.querySelector("#target").style.color, "orange");
+  assert.equal(beautifyArticle(result.html).changes, 0);
+});
+
+test("promoting a former callout to a heading clears paragraph decoration", () => {
+  const result = parse(beautifyArticle(`<p>文章导语。</p><p class="source-heading auto-key-point auto-data-callout auto-closing-lead" data-auto-label="关键数据" style="color:orange">写在最后</p><p>这是结尾正文。</p>`).html);
+  const heading = result.querySelector("h2");
+  assert.ok(heading.classList.contains("source-heading"));
+  assert.ok(heading.classList.contains("auto-conclusion-heading"));
+  assert.equal(heading.matches(".auto-key-point,.auto-data-callout,.auto-closing-lead,[data-auto-label]"), false);
+  assert.equal(heading.style.color, "orange");
+  assert.ok(result.querySelector("h2 + p.auto-closing-lead"));
+});
+
+test("moving the lead and conclusion paragraph removes their previous decoration", () => {
+  let result = parse(beautifyArticle(`<p id="old-lead">原来的导语。</p><h2>写在最后</h2><p id="old-closing">原来的结语正文。</p>`).html);
+  result.body.insertAdjacentHTML("afterbegin", "<p id='new-lead'>新增的导语。</p>");
+  result.querySelector("h2").insertAdjacentHTML("afterend", "<p id='new-closing'>新的结语正文。</p>");
+  result = parse(beautifyArticle(result.body.innerHTML).html);
+  assert.equal(result.querySelector(".auto-lead-paragraph").id, "new-lead");
+  assert.equal(result.querySelectorAll(".auto-lead-paragraph").length, 1);
+  assert.equal(result.querySelector(".auto-closing-lead").id, "new-closing");
+  assert.equal(result.querySelectorAll(".auto-closing-lead").length, 1);
+});
+
+test("nested bold and highlight count each emphasized character once", () => {
+  const result = parse(beautifyArticle(`<p>导语。</p><p><strong><mark>重点只有这几个字</mark></strong>，其余部分仍是普通正文，并不应该将整段变成强调卡片。</p>`).html);
+  assert.equal(result.querySelector(".auto-key-point,.auto-data-callout"), null);
+  assert.equal(result.querySelector("strong mark").textContent, "重点只有这几个字");
+});
+
 test("HTML length is rejected before DOM statistics are accessed", () => {
   assert.equal(richTextHtmlLimitMessage("x".repeat(RICH_TEXT_LIMITS.htmlLength)), "");
   const html = "x".repeat(RICH_TEXT_LIMITS.htmlLength + 1);

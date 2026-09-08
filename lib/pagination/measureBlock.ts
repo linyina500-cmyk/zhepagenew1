@@ -1,5 +1,8 @@
+import { connectAdjacentCallouts } from "../beautify/connectCallouts";
+
 export function measureHtml(measure: HTMLDivElement, html: string) {
   measure.innerHTML = html;
+  connectAdjacentCallouts(measure);
   return measure.scrollHeight;
 }
 

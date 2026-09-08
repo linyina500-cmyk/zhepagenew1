@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
-test("failed pagination clears stale previews, recovers, and prevents downloads after edits", { timeout: 20_000 }, async (context) => {
+test("preview updates retain the current page, clear failed results, and prevent outdated downloads", { timeout: 20_000 }, async (context) => {
   const dom = installDom();
   const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -21,7 +21,8 @@ test("failed pagination clears stale previews, recovers, and prevents downloads 
     configurable: true,
     value: { load: async () => [], check: () => true, ready: Promise.resolve() },
   });
-  dom.window.HTMLElement.prototype.scrollIntoView = () => {};
+  const scrollTargets = [];
+  dom.window.HTMLElement.prototype.scrollIntoView = function () { scrollTargets.push(this); };
   window.localStorage.setItem("zhepage-guide-seen-v1", "1");
   let failPagination = false;
   let editorProps;
@@ -106,11 +107,42 @@ test("failed pagination clears stale previews, recovers, and prevents downloads 
     assert.match(bulkExport().textContent, /批量导出 7 张/);
     assert.equal(document.querySelectorAll(".content-page").length, 4);
 
+    // Explicit navigation can expand the preview; subsequent ordinary edits
+    // must retain its nodes and fixed-height page boxes instead of collapsing
+    // the document and implicitly moving the reader back toward the top.
+    await click(document.querySelectorAll(".preview-page-jump button")[5]);
+    await waitFor(() => scrollTargets.length === 1, "explicit navigation scrolls to the selected page");
+    const previousPages = [...document.querySelectorAll(".content-page")];
+    const previousGrid = document.querySelector(".poster-grid");
+    const previousPageHeight = previousGrid.style.getPropertyValue("--page-height");
+    assert.equal(previousPages.length, 7);
+    assert.equal(document.querySelector(".preview-pager b").textContent, "6 / 7");
+    assert.equal(scrollTargets[0], previousPages[5].closest(".poster-wrap"));
+
+    await changeArticle("<p>普通编辑正文。</p>");
+    assert.equal(bulkExport().disabled, true);
+    assert.equal(document.querySelector(".poster-grid"), previousGrid);
+    assert.equal(previousGrid.getAttribute("aria-busy"), "true");
+    assert.equal(previousGrid.style.getPropertyValue("--page-height"), previousPageHeight);
+    assert.equal(document.querySelectorAll(".content-page").length, previousPages.length);
+    previousPages.forEach((page, index) => assert.equal(document.querySelectorAll(".content-page")[index], page));
+    assert.ok([...document.querySelectorAll(".content-page .page-export")].every((button) => button.disabled));
+    assert.equal(document.querySelector(".preview-pager b").textContent, "6 / 7");
+    assert.match(document.querySelector(".workspace-heading").textContent, /预览更新中/);
+    assert.equal(document.querySelector(".preview-workspace .poster-font-loading"), null, "updates must not insert a tall loading panel above retained pages");
+    await waitFor(() => !bulkExport().disabled, "ordinary editing refreshes the retained preview");
+    assert.equal(document.querySelectorAll(".content-page").length, 7);
+    assert.equal(document.querySelector(".preview-pager b").textContent, "6 / 7");
+    assert.equal(document.querySelectorAll(".content-page")[5], previousPages[5]);
+    assert.match(previousPages[5].textContent, /普通编辑正文/);
+    assert.equal(scrollTargets.length, 1, "ordinary editing must not request a scroll");
+
     failPagination = true;
     await changeArticle("<p>最新编辑正文。</p>");
     assert.equal(bulkExport().disabled, true);
     assert.match(bulkExport().textContent, /正在排版/);
-    assert.equal(document.querySelectorAll(".content-page").length, 0);
+    assert.equal(document.querySelectorAll(".content-page").length, 7);
+    assert.equal(document.querySelectorAll(".content-page")[5], previousPages[5]);
     await waitFor(() => document.querySelector(".preview-workspace").textContent.includes("当前内容排版失败"), "the pagination failure is shown");
     assert.equal(document.querySelectorAll(".content-page").length, 0);
     assert.match(document.querySelector("[data-test-editor]").textContent, /最新编辑正文/);

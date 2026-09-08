@@ -5,6 +5,7 @@ const SECTION_HEADING = /^(?:实话|真相|观点|理由|问题|提醒|要点|�
 const CONCLUSION_HEADING = /^(?:写在最后|写到最后|最后说几句|结语|结论|总结|风险提示)$/;
 const KEY_POINT_PREFIX = /^(?:翻译一下|一句话总结|换句话说|核心是|关键是|需要注意的是|更重要的是)[:：]/;
 const STRUCTURED_PREFIX = /^(?:第一|第二|第三|第四|第五|先看[AB]面|再看[AB]面)[，。:：]/i;
+const PARAGRAPH_CLASSES = ["auto-lead-paragraph", "auto-data-callout", "auto-key-point", "auto-structured-paragraph", "auto-image-caption", "auto-closing-lead"];
 
 export type AutoTypesetResult = {
   html: string;
@@ -49,6 +50,8 @@ function isInsideImportedLayout(element: Element) {
 function promoteParagraph(parsed: Document, paragraph: HTMLParagraphElement, tagName: "h2" | "h3") {
   const heading = parsed.createElement(tagName);
   [...paragraph.attributes].forEach((attribute) => heading.setAttribute(attribute.name, attribute.value));
+  PARAGRAPH_CLASSES.forEach((className) => heading.classList.remove(className));
+  heading.removeAttribute("data-auto-label");
   while (paragraph.firstChild) heading.append(paragraph.firstChild);
   paragraph.replaceWith(heading);
   return heading;
@@ -65,6 +68,7 @@ function restoreAutoHeadingToParagraph(parsed: Document, heading: HTMLHeadingEle
 
 function emphasisRatio(paragraph: HTMLParagraphElement, textLength: number) {
   const emphasizedLength = [...paragraph.querySelectorAll("strong,b,mark")]
+    .filter((emphasis) => !emphasis.parentElement?.closest("strong,b,mark"))
     .reduce((total, emphasis) => total + (emphasis.textContent?.trim().length || 0), 0);
   return emphasizedLength / Math.max(1, textLength);
 }
@@ -110,12 +114,18 @@ export function beautifyArticle(html: string, options: AutoTypesetOptions = {}):
     if (isInsideImportedLayout(heading)) return;
     const text = heading.textContent?.trim() || "";
     changes += addClass(heading, "auto-beautified-heading");
+    PARAGRAPH_CLASSES.forEach((className) => { changes += removeClass(heading, className); });
+    if (heading.hasAttribute("data-auto-label")) {
+      heading.removeAttribute("data-auto-label");
+      changes += 1;
+    }
     if (CONCLUSION_HEADING.test(text)) {
       changes += addClass(heading, "auto-conclusion-heading");
       changes += removeClass(heading, "auto-numbered-dotline");
       heading.removeAttribute("data-auto-index");
       return;
     }
+    changes += removeClass(heading, "auto-conclusion-heading");
     const numberedHeading = NUMBERED_HEADING.test(text) || SECTION_HEADING.test(text);
     if (numberedHeading) {
       changes += addClass(heading, "auto-inferred-heading");
@@ -136,44 +146,37 @@ export function beautifyArticle(html: string, options: AutoTypesetOptions = {}):
       && !paragraph.closest("table,li,blockquote,figcaption")
       && !paragraph.classList.contains("image-caption")
       && !/^图[:：]/.test(paragraph.textContent.trim()));
-  if (firstArticleParagraph) {
-    const added = addClass(firstArticleParagraph, "auto-lead-paragraph");
-    changes += added;
-    formattedParagraphs += added;
-  }
-
   parsed.body.querySelectorAll<HTMLParagraphElement>("p").forEach((paragraph) => {
     if (isInsideImportedLayout(paragraph)) return;
     const text = paragraph.textContent?.trim() || "";
-    if (!text || paragraph === firstArticleParagraph || paragraph.classList.contains("image-caption")) return;
+    const desiredClasses = new Set<string>();
+    if (paragraph === firstArticleParagraph) desiredClasses.add("auto-lead-paragraph");
+    const isCaption = paragraph.classList.contains("image-caption") || /^图[:：]/.test(text) && text.length <= 140;
+    if (/^图[:：]/.test(text) && text.length <= 140) desiredClasses.add("auto-image-caption");
     const ratio = emphasisRatio(paragraph, text.length);
     const numericSignals = text.match(/(?:\d[\d,.]*%?|\d+(?:\.\d+)?(?:万|亿|元|倍|股|户))/g)?.length || 0;
-    let added = 0;
-    if (text.length >= 32 && text.length <= 190 && numericSignals >= 2 && ratio >= 0.38) {
-      added += addClass(paragraph, "auto-data-callout");
+    if (text && paragraph !== firstArticleParagraph && !isCaption) {
+      if (text.length >= 32 && text.length <= 190 && numericSignals >= 2 && ratio >= 0.38) {
+        desiredClasses.add("auto-data-callout");
+      } else if (text.length >= 18 && text.length <= 170 && (KEY_POINT_PREFIX.test(text) || ratio >= 0.62)) {
+        desiredClasses.add("auto-key-point");
+      } else if (text.length <= 190 && STRUCTURED_PREFIX.test(text)) {
+        desiredClasses.add("auto-structured-paragraph");
+      }
+    }
+    if (paragraph.previousElementSibling?.classList.contains("auto-conclusion-heading")) desiredClasses.add("auto-closing-lead");
+    let paragraphChanges = 0;
+    PARAGRAPH_CLASSES.forEach((className) => {
+      paragraphChanges += desiredClasses.has(className) ? addClass(paragraph, className) : removeClass(paragraph, className);
+    });
+    changes += paragraphChanges;
+    if (paragraphChanges) formattedParagraphs += 1;
+    if (desiredClasses.has("auto-data-callout")) {
       changes += setAttribute(paragraph, "data-auto-label", "关键数据");
-    } else if (text.length >= 18 && text.length <= 170 && (KEY_POINT_PREFIX.test(text) || ratio >= 0.62)) {
-      added += addClass(paragraph, "auto-key-point");
-    } else if (text.length <= 190 && STRUCTURED_PREFIX.test(text)) {
-      added += addClass(paragraph, "auto-structured-paragraph");
+    } else if (paragraph.hasAttribute("data-auto-label")) {
+      paragraph.removeAttribute("data-auto-label");
+      changes += 1;
     }
-    changes += added;
-    formattedParagraphs += added;
-
-    if (/^图[:：]/.test(text) && text.length <= 140) {
-      const captionAdded = addClass(paragraph, "auto-image-caption");
-      changes += captionAdded;
-      formattedParagraphs += captionAdded;
-    }
-  });
-
-  parsed.body.querySelectorAll<HTMLElement>(".auto-conclusion-heading").forEach((heading) => {
-    if (isInsideImportedLayout(heading)) return;
-    const follower = heading.nextElementSibling;
-    if (!(follower instanceof HTMLParagraphElement)) return;
-    const added = addClass(follower, "auto-closing-lead");
-    changes += added;
-    formattedParagraphs += added;
   });
 
   parsed.body.querySelectorAll<HTMLElement>("blockquote").forEach((quote) => {

@@ -377,7 +377,10 @@ export default function Home() {
   ]), [paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, layoutStyle, pageOffset, paginationRevision]);
   const paginationError = paginationState.inputKey === paginationInputKey && paginationState.status === "error" ? paginationState.error : "";
   const paginationReady = posterFontsReady && paginationState.inputKey === paginationInputKey && paginationState.status === "ready";
-  const contentPageCount = paginationReady ? contentPages.length : 0;
+  // Keep the last preview mounted while its replacement is being measured.
+  // Removing its fixed-height pages would shrink the document and move the
+  // user's scroll position; export readiness is checked separately.
+  const contentPageCount = contentPages.length;
   const totalPages = contentPageCount ? contentPageCount + pageOffset : 0;
   const visiblePageCount = showAllPreviewPages ? totalPages : Math.min(4, totalPages);
   const sparsePageIndex = paginationReady ? pageUsage.findIndex((usage, index) => index < pageUsage.length - 1 && usage < 0.88) : -1;
@@ -1190,12 +1193,12 @@ export default function Home() {
 
         <section className="preview-workspace">
           <div className="workspace-heading">
-            <div><span className="eyebrow">实时预览</span><h2>{paginationReady ? `${totalPages} 张贴图` : paginationError ? "排版失败" : "正在排版"} · {format.label}</h2></div>
+            <div><span className="eyebrow" aria-live="polite">{!paginationReady && contentPageCount > 0 ? "预览更新中 · 暂示上次排版" : "实时预览"}</span><h2>{contentPageCount ? `${totalPages} 张贴图` : paginationError ? "排版失败" : "正在排版"} · {format.label}</h2></div>
             <div className="preview-toolbar" aria-label="预览导航">
               <div className="preview-pager">
-                <button type="button" onClick={() => goToPreviewPage(activePreviewPage - 1)} disabled={!paginationReady || activePreviewPage === 0} aria-label="上一页">‹</button>
-                <b>{paginationReady ? `${activePreviewPage + 1} / ${totalPages}` : "— / —"}</b>
-                <button type="button" onClick={() => goToPreviewPage(activePreviewPage + 1)} disabled={!paginationReady || activePreviewPage >= totalPages - 1} aria-label="下一页">›</button>
+                <button type="button" onClick={() => goToPreviewPage(activePreviewPage - 1)} disabled={!totalPages || activePreviewPage === 0} aria-label="上一页">‹</button>
+                <b>{totalPages ? `${activePreviewPage + 1} / ${totalPages}` : "— / —"}</b>
+                <button type="button" onClick={() => goToPreviewPage(activePreviewPage + 1)} disabled={!totalPages || activePreviewPage >= totalPages - 1} aria-label="下一页">›</button>
               </div>
               {(layoutStyle !== "xiaohongshu" || manualTypesetPreview) && <div className="presentation-toggle" aria-label="预览展示方式">
                 <button type="button" className={previewPresentation === "beautified" ? "active" : ""} onClick={() => setPreviewPresentation("beautified")}>美化后</button>
@@ -1210,15 +1213,15 @@ export default function Home() {
             {Array.from({ length: totalPages }, (_, index) => <button key={index} type="button" className={activePreviewPage === index ? "active" : ""} onClick={() => goToPreviewPage(index)}>{index + 1}</button>)}
           </div>
 
-          {!posterFontsReady && <div className="poster-font-loading" role="status"><div><i aria-hidden="true" /><b>正在载入思源字体</b><span>字体完成后再计算分页，确保 Windows 与 macOS 一致</span></div></div>}
-          {posterFontsReady && !paginationReady && <div className="poster-font-loading" role="status"><div>
+          {!posterFontsReady && !contentPageCount && <div className="poster-font-loading" role="status"><div><i aria-hidden="true" /><b>正在载入思源字体</b><span>字体完成后再计算分页，确保 Windows 与 macOS 一致</span></div></div>}
+          {posterFontsReady && !paginationReady && !contentPageCount && <div className="poster-font-loading" role="status"><div>
             {!paginationError && <i aria-hidden="true" />}
             <b>{paginationError ? "当前内容排版失败" : "正在排版当前内容"}</b>
             <span>{paginationError || "排版完成后将显示最新预览，并恢复导出"}</span>
             {paginationError && <button type="button" className="smart-pagination-button" onClick={() => setPaginationRevision((revision) => revision + 1)}>重新排版</button>}
           </div></div>}
 
-          <div className={`poster-grid ${posterFontsReady ? "fonts-ready" : "fonts-loading"}`} style={{
+          <div className={`poster-grid ${posterFontsReady || contentPageCount > 0 ? "fonts-ready" : "fonts-loading"}`} aria-busy={!paginationReady} style={{
             "--page-height": `${format.height}px`,
             ...(previewScale ? { "--preview-scale": previewScale } : {}),
             "--poster-paper": paperColor,

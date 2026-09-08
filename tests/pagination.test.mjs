@@ -5,6 +5,7 @@ import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 const dom = installDom();
 const { paginateArticle, assertPaginationSemantics } = await loadDomModule("lib/pagination/paginateArticle.ts");
 const { articleBlocks, TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE } = await loadDomModule("lib/pagination/splitDomBlock.ts");
+const { connectAdjacentCallouts, connectCalloutsInHtml } = await loadDomModule("lib/beautify/connectCallouts.ts");
 
 test.after(() => dom.window.close());
 
@@ -287,4 +288,139 @@ test("stacked style effects cannot lose an ancestor while keeping the same visib
   const pages = ['<p><span style="opacity:0.5">甲<span style="opacity:0.5">乙</span></span></p>', '<p><span style="opacity:0.5"><span style="opacity:0.5">丙</span>丁</span></p>'];
   assert.doesNotThrow(() => assertPaginationSemantics(source, pages));
   assert.throws(() => assertPaginationSemantics(source, ['<p><span style="opacity:0.5">甲乙丙丁</span></p>']), /span\[style\]/);
+});
+
+test("a manual break inside a painted wrapper preserves both styled sides and their images", () => {
+  const source = '<section style="background:#fff;padding:5px"><div style="color:red">'
+    + '<p><strong><span style="color:blue">前文</span></strong></p><img src="https://example.com/before.png" data-height="10">'
+    + '<div class="manual-page-break">— 手动分页 —</div>'
+    + '<p><strong><span style="color:blue">后文</span></strong></p><img src="https://example.com/after.png" data-height="10">'
+    + '</div></section>';
+  const { pages } = paginateArticle(source, createBoxMeasure(), 100);
+  assert.equal(pages.length, 2);
+  assert.deepEqual(pages.map((page) => pageBody(page).textContent), ["前文", "后文"]);
+  assert.deepEqual(pages.map((page) => pageBody(page).querySelector("img").getAttribute("src")), [
+    "https://example.com/before.png", "https://example.com/after.png",
+  ]);
+  for (const page of pages) {
+    const body = pageBody(page);
+    assert.equal(body.querySelectorAll("img").length, 1);
+    assert.equal(body.querySelector("section").style.backgroundColor, "rgb(255, 255, 255)");
+    assert.equal(body.querySelector("strong > span").style.color, "blue");
+    assert.equal(body.querySelector(".manual-page-break"), null);
+  }
+  assert.doesNotThrow(() => assertPaginationSemantics(source, pages));
+});
+
+test("leading trailing and consecutive nested manual breaks create no empty pages", () => {
+  const marker = '<div class="manual-page-break"></div>';
+  const source = `<section style="background:#fff">${marker}<div>${marker}<p>甲</p>${marker}${marker}<p>乙</p>${marker}</div>${marker}</section>`;
+  const { pages } = paginateArticle(source, createBoxMeasure(), 100);
+  assert.deepEqual(pages.map((page) => pageBody(page).textContent), ["甲", "乙"]);
+});
+
+test("manual boundaries preserve nested inline style depth and require the exact marker class", () => {
+  const source = '<p><span style="opacity:0.5">前<span class="manual-page-break">分页</span>后</span></p>';
+  const { pages } = paginateArticle(source, createBoxMeasure(), 100);
+  assert.deepEqual(pages.map((page) => pageBody(page).textContent), ["前", "后"]);
+  assert.ok(pages.every((page) => pageBody(page).querySelector('span[style="opacity:0.5"]')));
+  assert.doesNotThrow(() => assertPaginationSemantics(source, pages));
+  const ordinary = '<p class="manual-page-break-note">普通说明</p>';
+  assert.deepEqual(paginateArticle(ordinary, createBoxMeasure(), 100).pages, [ordinary]);
+});
+
+const keyPoint = (text) => `<p class="auto-key-point">${text}</p>`;
+function calloutEdges(html) {
+  return [...pageBody(html).querySelectorAll("p.auto-key-point,p.auto-data-callout")].map((paragraph) => [
+    paragraph.classList.contains("auto-callout-joined-before"),
+    paragraph.classList.contains("auto-callout-joined-after"),
+  ]);
+}
+
+test("three sibling callouts join at only their shared edges and recomputation is stable", () => {
+  const root = document.createElement("div");
+  root.innerHTML = ["甲", "乙", "丙"].map(keyPoint).join("\n");
+  assert.equal(connectAdjacentCallouts(root), 4);
+  assert.deepEqual(calloutEdges(root.innerHTML), [[false, true], [true, true], [true, false]]);
+  assert.equal(root.querySelectorAll("p").length, 3);
+  assert.equal(root.children.length, 3);
+  assert.equal(connectAdjacentCallouts(root), 0);
+  assert.equal(connectCalloutsInHtml(root.innerHTML), root.innerHTML);
+  const untouched = "<P class='auto-key-point'>独立段落 &amp; 原始写法</P>";
+  assert.equal(connectCalloutsInHtml(untouched), untouched);
+});
+
+test("body headings manual breaks media and different callout kinds break adjacency", () => {
+  const boundaries = [
+    "<p>普通正文</p>", "<h2>小标题</h2>", '<div class="manual-page-break">分页</div>',
+    '<img src="chart.png">', '<p class="auto-data-callout">数据段落</p>',
+    '<p class="auto-key-point auto-data-callout">旧双重类型</p>',
+    '<p class="auto-key-point">带图片<img src="chart.png"></p>',
+    "<p></p>", "直接正文",
+  ];
+  for (const boundary of boundaries) {
+    const result = connectCalloutsInHtml(keyPoint("前") + boundary + keyPoint("后"));
+    assert.ok(calloutEdges(result).every(([before, after]) => !before && !after), boundary);
+  }
+  const data = '<p class="auto-data-callout">数据甲</p><p class="auto-data-callout">数据乙</p>';
+  assert.deepEqual(calloutEdges(connectCalloutsInHtml(data)), [[false, true], [true, false]]);
+});
+
+test("ordinary wrappers connect their own paragraphs without connecting separate containers", () => {
+  const source = `<section>${keyPoint("甲")}${keyPoint("乙")}</section>`
+    + `<section>${keyPoint("丙")}${keyPoint("丁")}</section>`;
+  assert.deepEqual(calloutEdges(connectCalloutsInHtml(source)), [[false, true], [true, false], [false, true], [true, false]]);
+  const separate = `<section>${keyPoint("甲")}</section><section>${keyPoint("乙")}</section>`;
+  assert.equal(connectCalloutsInHtml(separate), separate);
+});
+
+test("pagination shells retain original sibling adjacency through nested styled wrappers", () => {
+  const source = `<section style="color:red"><div style="text-align:left">${["甲", "乙", "丙"].map(keyPoint).join("")}</div></section>`;
+  const blocks = articleBlocks(source);
+  assert.equal(blocks.length, 3);
+  assert.deepEqual(calloutEdges(connectCalloutsInHtml(blocks.join(""))), [[false, true], [true, true], [true, false]]);
+  const independent = `<section style="color:red"><div style="text-align:left">${keyPoint("甲")}</div>`
+    + `<div style="text-align:left">${keyPoint("乙")}</div></section>`;
+  assert.deepEqual(calloutEdges(connectCalloutsInHtml(articleBlocks(independent).join(""))), [[false, false], [false, false]]);
+});
+
+test("shell start and end boundaries separate groups and complex layout shells do not connect", () => {
+  const shell = (position, text, extra = "") => `<section data-pagination-wrapper="${position}" ${extra}>${keyPoint(text)}</section>`;
+  const twoGroups = shell("start", "甲") + shell("end", "乙") + shell("start", "丙") + shell("end", "丁");
+  assert.deepEqual(calloutEdges(connectCalloutsInHtml(twoGroups)), [[false, true], [true, false], [false, true], [true, false]]);
+  for (const extra of ['style="display:flex"', 'class="imported-composite-visual"']) {
+    const layout = shell("start", "甲", extra) + shell("end", "乙", extra);
+    assert.deepEqual(calloutEdges(connectCalloutsInHtml(layout)), [[false, false], [false, false]]);
+  }
+  const complex = `<section data-pagination-wrapper="start">${keyPoint("甲")}<h2>标题</h2></section>` + shell("end", "乙");
+  assert.deepEqual(calloutEdges(connectCalloutsInHtml(complex)), [[false, false], [false, false]]);
+});
+
+test("each final page recomputes callout edges and removes stale cross-page joins", () => {
+  const source = connectCalloutsInHtml(["甲", "乙", "丙", "丁"].map((text) => `<p class="auto-key-point" data-height="30">${text}</p>`).join(""));
+  const { pages } = paginateArticle(source, createBoxMeasure(), 60);
+  assert.equal(pages.length, 2);
+  assert.ok(pages.every((page) => JSON.stringify(calloutEdges(page)) === JSON.stringify([[false, true], [true, false]])));
+  assert.equal(pageBody(pages.join("")).textContent, "甲乙丙丁");
+  const isolated = '<p class="auto-key-point auto-callout-joined-before auto-callout-joined-after">独立段落</p>';
+  assert.deepEqual(calloutEdges(connectCalloutsInHtml(isolated)), [[false, false]]);
+});
+
+test("pagination measures with the same joined callout edges that it returns", () => {
+  const measure = document.createElement("div");
+  const measured = [];
+  Object.defineProperty(measure, "scrollHeight", {
+    get() {
+      measured.push(measure.innerHTML);
+      return [...measure.querySelectorAll("p")].reduce((height, paragraph) => height + 30
+        + (paragraph.classList.contains("auto-callout-joined-before") ? 0 : 10)
+        + (paragraph.classList.contains("auto-callout-joined-after") ? 0 : 10), 0);
+    },
+  });
+  const source = ["甲", "乙", "丙"].map(keyPoint).join("");
+  const { pages, usage } = paginateArticle(source, measure, 110);
+  assert.equal(pages.length, 1);
+  assert.deepEqual(usage, [1]);
+  assert.deepEqual(calloutEdges(pages[0]), [[false, true], [true, true], [true, false]]);
+  assert.ok(measured.some((html) => html === pages[0]));
 });

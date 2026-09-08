@@ -139,7 +139,7 @@ textarea { padding: 11px 12px; resize: vertical; }
 .editor-auto-typeset small { color: #887a7d; font-size: 8px; line-height: 1.4; }
 .editor-auto-typeset em { flex: none; padding: 5px 7px; border-radius: 999px; color: #66776a; background: #eef5ef; font-size: 7px; font-style: normal; font-weight: 780; white-space: nowrap; }
 .editor-auto-typeset:hover { border-color: var(--editor-accent); background: color-mix(in srgb, var(--editor-accent) 9%, white); box-shadow: 0 6px 15px color-mix(in srgb, var(--editor-accent) 12%, transparent); }
-.numbered-style-choice { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid #e3e5e9; border-radius: 8px; color: transparent; background: #fff; font-size: 0; cursor: pointer; }
+.numbered-style-choice { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid #e3e5e9; border-radius: 8px; color: #4e5663; background: #fff; font-size: 0; cursor: pointer; }
 .numbered-style-choice input { width: 15px; height: 15px; flex: none; accent-color: var(--editor-accent); }
 .numbered-style-choice span { display: grid; gap: 1px; }
 .numbered-style-choice b { font-size: 9px; }
@@ -815,6 +815,29 @@ select:focus { border-color: var(--brown); box-shadow: 0 0 0 3px var(--focus-rin
 .article-flow.layout-keyCards .auto-data-callout::before { color: var(--poster-on-accent); }
 .article-flow.layout-keyCards .auto-conclusion-heading { padding: 25px; text-align: left; }
 .article-flow.layout-keyCards .auto-lead-paragraph { border: 0; border-left: 6px solid var(--poster-accent); border-radius: 0 10px 10px 0; background: var(--poster-accent-softer); }
+
+/* Keep paragraphs editable and splittable while painting adjacent callouts as
+   one group. Pagination recomputes the edge classes for each measured page. */
+.layout-editor p.auto-key-point:not(.auto-data-callout):has(+ p.auto-key-point:not(.auto-data-callout)),
+.layout-editor p.auto-data-callout:not(.auto-key-point):has(+ p.auto-data-callout:not(.auto-key-point)),
+.article-flow p.auto-callout-joined-after {
+  margin-bottom: 0 !important;
+  padding-bottom: .26em !important;
+  border-bottom-width: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+}
+.layout-editor p.auto-key-point:not(.auto-data-callout) + p.auto-key-point:not(.auto-data-callout),
+.layout-editor p.auto-data-callout:not(.auto-key-point) + p.auto-data-callout:not(.auto-key-point),
+.article-flow p.auto-callout-joined-before {
+  margin-top: 0 !important;
+  padding-top: .26em !important;
+  border-top-width: 0 !important;
+  border-top-left-radius: 0 !important;
+  border-top-right-radius: 0 !important;
+}
+.layout-editor p.auto-data-callout:not(.auto-key-point) + p.auto-data-callout:not(.auto-key-point)::before,
+.article-flow p.auto-data-callout.auto-callout-joined-before::before { display: none; }
 
 @media (max-width: 1120px) {
   .layout-style-grid { grid-template-columns: 1fr 1fr; }

@@ -1,4 +1,5 @@
 import { measureParts } from "./measureBlock";
+import { connectCalloutsInHtml } from "../beautify/connectCallouts";
 import { RICH_LAYOUT_CLASS, isRichLayoutGroup } from "../richText/normalizeRichHtml";
 import { TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE, articleBlocks, blockIsHeading, blockText, splitOversizedBlock, tableHeader } from "./splitDomBlock";
 import type { PaginationResult } from "./paginationTypes";
@@ -154,7 +155,9 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
 
   while (queue.length) {
     const block = queue.shift()!;
-    if (/class=["'][^"']*manual-page-break/.test(block)) {
+    const isManualBreak = /class=["'][^"']*manual-page-break/.test(block)
+      && new DOMParser().parseFromString(block, "text/html").body.firstElementChild?.classList.contains("manual-page-break");
+    if (isManualBreak) {
       commit();
       continue;
     }
@@ -232,7 +235,7 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
   }
 
   commit();
-  const normalizedPages = pages.length ? pages : ["<p>暂无正文内容</p>"];
+  const normalizedPages = (pages.length ? pages : ["<p>暂无正文内容</p>"]).map(connectCalloutsInHtml);
   assertPaginationSemantics(html, normalizedPages);
   const usage = normalizedPages.map((page) => Math.min(1.5, heightOf([page]) / maxHeight));
   measure.innerHTML = "";
