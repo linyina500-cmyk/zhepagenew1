@@ -106,6 +106,42 @@ async function mountWorkspace(context, articleHtml) {
   return { editor, insertText, click, waitFor, bulkExport, singleExport, downloads, captures, act };
 }
 
+function holdPaginationTimers(context, act) {
+  const timers = new Map();
+  const schedule = window.setTimeout.bind(window);
+  const cancel = window.clearTimeout.bind(window);
+  context.mock.method(window, "setTimeout", (callback, delay, ...args) => {
+    if (delay !== 160 && delay !== 320) return schedule(callback, delay, ...args);
+    const timer = schedule(() => {}, 60_000);
+    timers.set(timer, () => callback(...args));
+    return timer;
+  });
+  context.mock.method(window, "clearTimeout", (timer) => {
+    timers.delete(timer);
+    cancel(timer);
+  });
+  return async () => {
+    assert.ok(timers.size, "pagination must remain pending until the test releases it");
+    await act(async () => {
+      const pending = [...timers];
+      timers.clear();
+      for (const [timer, callback] of pending) {
+        cancel(timer);
+        callback();
+      }
+    });
+  };
+}
+
+async function importRichDraft({ click, waitFor, act }, html) {
+  await click(document.querySelector(".import-trigger"));
+  await click([...document.querySelectorAll(".import-source-tabs button")].find((button) => button.textContent === "富文本"));
+  await waitFor(() => document.querySelector(".import-modal .tiptap-surface")?.editor, "the actual compact editor becomes ready");
+  await act(async () => { document.querySelector(".import-modal .tiptap-surface").editor.commands.setContent(html); });
+  await click(document.querySelector(".import-modal-actions .primary"));
+  assert.equal(document.querySelector(".import-modal"), null);
+}
+
 test("real editor changes immediately block old exports and the next export contains the new text", { timeout: 15_000 }, async (context) => {
   const workspace = await mountWorkspace(context, "<p>旧正文。</p>");
   const { editor, insertText, click, waitFor, bulkExport, singleExport, downloads, captures } = workspace;
@@ -191,4 +227,59 @@ test("cancelled URL imports cannot overwrite a reopened rich-text draft or preve
   await waitFor(() => !document.querySelector(".import-modal"), "a new rich-text import completes normally");
   assert.match(editor.getText(), /取消后创建的新草稿/);
   assert.doesNotMatch(editor.getText(), /迟到请求/);
+});
+
+test("late import pagination preserves a newer rejected-paste notice and the next valid paste still replaces the selection", { timeout: 15_000 }, async (context) => {
+  const workspace = await mountWorkspace(context, "<p>原有正文。</p>");
+  const { editor, act, bulkExport } = workspace;
+  const finishPagination = holdPaginationTimers(context, act);
+  await importRichDraft(workspace, "<h1>导入标题</h1><p>导入正文开头。</p><p>导入正文结尾。</p>");
+  assert.equal(bulkExport().disabled, true);
+  assert.match(document.querySelector(".status-pill").textContent, /正在计算完整分页/);
+  const importedText = editor.state.doc.textContent;
+  const paste = (html, text) => {
+    const event = new window.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: {
+      getData: (type) => type === "text/html" ? html : type === "text/plain" ? text : "",
+      files: [], items: [], types: html ? ["text/html", "text/plain"] : ["text/plain"],
+    } });
+    editor.view.dom.dispatchEvent(event);
+  };
+  await act(async () => { editor.commands.selectAll(); });
+  const selectedArticle = editor.state.selection;
+  await act(async () => { paste("", "文".repeat(30_001)); });
+  assert.match(document.querySelector(".status-pill.error").textContent, /3 万字/);
+  assert.equal(editor.state.doc.textContent, importedText);
+  assert.ok(editor.state.selection.eq(selectedArticle));
+
+  await finishPagination();
+  assert.equal(bulkExport().disabled, false, "the imported article must still finish paginating");
+  assert.equal(document.querySelector(".poster-grid").getAttribute("aria-busy"), "false");
+  assert.match(document.querySelector(".status-pill").textContent, /3 万字/, "an older import completion must not replace the newer rejection notice");
+  assert.ok(document.querySelector(".status-pill.error"));
+  assert.equal(editor.state.doc.textContent, importedText);
+  assert.ok(editor.state.selection.eq(selectedArticle), "finishing pagination must preserve the rejected paste's selection");
+
+  await act(async () => {
+    // JSDOM has no selection geometry; the actual paste transaction and parent
+    // updates remain active while its scroll-to-selection step is skipped.
+    editor.view.setProps({ handleScrollToSelection: () => true });
+    paste("<p>恢复后正文完整。</p>", "恢复后正文完整。");
+  });
+  assert.equal(editor.state.doc.textContent, "恢复后正文完整。");
+  assert.equal(bulkExport().disabled, true);
+  await finishPagination();
+  assert.equal(bulkExport().disabled, false);
+  assert.match(document.querySelector(".content-page .article-flow").textContent, /恢复后正文完整/);
+});
+
+test("an uninterrupted rich-text import still reports successful pagination", { timeout: 15_000 }, async (context) => {
+  const workspace = await mountWorkspace(context, "<p>原有正文。</p>");
+  const finishPagination = holdPaginationTimers(context, workspace.act);
+  await importRichDraft(workspace, "<h1>正常导入标题</h1><p>正常导入正文。</p>");
+  assert.equal(workspace.bulkExport().disabled, true);
+  await finishPagination();
+  assert.equal(workspace.bulkExport().disabled, false);
+  assert.match(document.querySelector(".status-pill.success").textContent, /导入完成，正文已自动排成/);
+  assert.equal(workspace.editor.state.doc.textContent, "正常导入正文。");
 });

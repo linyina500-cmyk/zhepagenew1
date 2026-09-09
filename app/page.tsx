@@ -275,15 +275,20 @@ export default function Home() {
   const [paginationRevision, setPaginationRevision] = useState(0);
   const [activePreviewPage, setActivePreviewPage] = useState(0);
   const [previewZoom, setPreviewZoom] = useState<PreviewZoom>("fit");
-  const [notice, setNotice] = useState<Notice>({ tone: "neutral", text: "示例内容已排版，可直接预览导出" });
+  const [notice, setNoticeState] = useState<Notice>({ tone: "neutral", text: "示例内容已排版，可直接预览导出" });
+  const noticeVersionRef = useRef(0);
+  const setNotice = useCallback((next: Notice) => {
+    noticeVersionRef.current += 1;
+    setNoticeState(next);
+  }, []);
   const [working, setWorking] = useState(false);
   const [sourceEditorHtml, setSourceEditorHtml] = useState(DEFAULT_HTML);
   const [leadCardInsertRequest, setLeadCardInsertRequest] = useState(0);
   const [workspaceReady, setWorkspaceReady] = useState(false);
-  const importPendingRef = useRef(false);
+  const importPendingRef = useRef<number | null>(null);
   const importRequestRef = useRef<AbortController | null>(null);
   const currentArticleHtmlRef = useRef(articleHtml);
-  const paginationOptimizationRef = useRef<{ pageCount: number; usage: number[] } | null>(null);
+  const paginationOptimizationRef = useRef<{ pageCount: number; usage: number[]; noticeVersion: number } | null>(null);
   const [editorRevision, setEditorRevision] = useState(0);
   const [showAllPreviewPages, setShowAllPreviewPages] = useState(false);
   const [editorModuleReady, setEditorModuleReady] = useState(false);
@@ -293,7 +298,7 @@ export default function Home() {
   const measureRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Array<HTMLElement | null>>([]);
   const paginationVersionRef = useRef(0);
-  const paginationFailedRef = useRef(false);
+  const paginationFailedRef = useRef<number | null>(null);
   const exportVersionRef = useRef<ExportVersion | null>(null);
   const format = FORMATS[formatKey];
   const layoutPreset = LAYOUT_PRESETS[layoutStyle];
@@ -358,7 +363,7 @@ export default function Home() {
       setNotice({ tone: "neutral", text: "已取消导入，当前正文保持不变" });
     }
     setImportOpen(false);
-  }, []);
+  }, [setNotice]);
 
   useEffect(() => () => {
     importRequestRef.current?.abort();
@@ -383,7 +388,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [titleFont, bodyFont]);
+  }, [titleFont, bodyFont, setNotice]);
 
   useLayoutEffect(() => {
     exportVersionRef.current = paginationReady
@@ -405,9 +410,12 @@ export default function Home() {
         setPageUsage(result.usage);
         setPaginationState({ inputKey: paginationInputKey, version, status: "ready", error: "" });
         setActivePreviewPage((page) => Math.min(page, Math.max(0, result.pages.length + pageOffset - 1)));
-        if (paginationFailedRef.current) {
-          paginationFailedRef.current = false;
-          setNotice({ tone: "success", text: "排版已恢复，最新预览可以导出" });
+        if (paginationFailedRef.current !== null) {
+          const failedNoticeVersion = paginationFailedRef.current;
+          paginationFailedRef.current = null;
+          if (failedNoticeVersion === noticeVersionRef.current) {
+            setNotice({ tone: "success", text: "排版已恢复，最新预览可以导出" });
+          }
         }
         if (paginationOptimizationRef.current) {
           const before = paginationOptimizationRef.current;
@@ -415,17 +423,28 @@ export default function Home() {
           const beforeLowest = Math.min(...before.usage.slice(0, -1).concat(1));
           const afterLowest = Math.min(...result.usage.slice(0, -1).concat(1));
           const improved = afterLowest > beforeLowest + 0.015 || result.pages.length < before.pageCount;
-          setNotice({
-            tone: "success",
-            text: improved
-              ? "分页优化完成：已减少中间页面留白"
-              : `分页优化完成：${result.pages.length} 页已是当前字号与行距下的平衡结果`,
-          });
+          if (before.noticeVersion === noticeVersionRef.current) {
+            setNotice({
+              tone: "success",
+              text: improved
+                ? "分页优化完成：已减少中间页面留白"
+                : `分页优化完成：${result.pages.length} 页已是当前字号与行距下的平衡结果`,
+            });
+          }
         }
-        if (importPendingRef.current) {
-          importPendingRef.current = false;
-          setNotice({ tone: "success", text: `导入完成，正文已自动排成 ${result.pages.length} 页` });
-          window.requestAnimationFrame(() => document.querySelector(".professional-editor")?.closest(".control-section")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+        if (importPendingRef.current !== null) {
+          const importNoticeVersion = importPendingRef.current;
+          importPendingRef.current = null;
+          // The article can still finish paginating after the user has moved
+          // on. Its completion must not replace a newer action's notice.
+          if (importNoticeVersion === noticeVersionRef.current) {
+            setNotice({ tone: "success", text: `导入完成，正文已自动排成 ${result.pages.length} 页` });
+            const completedNoticeVersion = noticeVersionRef.current;
+            window.requestAnimationFrame(() => {
+              if (completedNoticeVersion !== noticeVersionRef.current || document.activeElement?.closest(".professional-editor")) return;
+              document.querySelector(".professional-editor")?.closest(".control-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            });
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "分页保真检查失败，请检查正文格式";
@@ -434,11 +453,11 @@ export default function Home() {
         setPageUsage([]);
         setActivePreviewPage(0);
         setPaginationState({ inputKey: paginationInputKey, version, status: "error", error: message });
-        paginationFailedRef.current = true;
         exportVersionRef.current = null;
         paginationOptimizationRef.current = null;
-        importPendingRef.current = false;
+        importPendingRef.current = null;
         setNotice({ tone: "error", text: message });
+        paginationFailedRef.current = noticeVersionRef.current;
       }
     };
     const scheduleUpdate = () => {
@@ -462,7 +481,7 @@ export default function Home() {
       cancelled = true;
       if (updateTimer) window.clearTimeout(updateTimer);
     };
-  }, [paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, posterFontsReady, paginationRevision, pageOffset, layoutStyle, paginationInputKey]);
+  }, [paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, posterFontsReady, paginationRevision, pageOffset, layoutStyle, paginationInputKey, setNotice]);
 
   /* Workspace restoration intentionally hydrates many independent controls once. */
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -519,7 +538,7 @@ export default function Home() {
     } finally {
       setWorkspaceReady(true);
     }
-  }, []);
+  }, [setNotice]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
@@ -544,7 +563,7 @@ export default function Home() {
       }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [workspaceReady, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText, layoutStyle, autoStructure, numberedDotStyle, previewPresentation, articleHtml, firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor, textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, leadGuide, qrDataUrl, customThemePresets, riskPresets]);
+  }, [workspaceReady, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText, layoutStyle, autoStructure, numberedDotStyle, previewPresentation, articleHtml, firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor, textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, leadGuide, qrDataUrl, customThemePresets, riskPresets, setNotice]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setEditorModuleReady(true), 900);
@@ -606,12 +625,12 @@ export default function Home() {
     setAutoStructure(true);
     setManualTypesetPreview(true);
     setPreviewPresentation("beautified");
-    importPendingRef.current = true;
     setNotice({
       tone: "neutral",
       text: "内容已按原富文本格式读取，正在计算完整分页…",
     });
-  }, [preserveStyles]);
+    importPendingRef.current = noticeVersionRef.current;
+  }, [preserveStyles, setNotice]);
 
   function applyTheme(key: ThemeKey) {
     const theme = THEMES[key];
@@ -645,9 +664,9 @@ export default function Home() {
   }
 
   function optimizePagination() {
-    paginationOptimizationRef.current = { pageCount: contentPages.length, usage: pageUsage };
     setPaginationRevision((revision) => revision + 1);
     setNotice({ tone: "neutral", text: sparsePageIndex >= 0 ? `正在优化第 ${sparsePageIndex + 1} 页附近的留白…` : "正在重新检查标题与分页平衡…" });
+    paginationOptimizationRef.current = { pageCount: contentPages.length, usage: pageUsage, noticeVersion: noticeVersionRef.current };
   }
 
   function applyAutomaticTypeset(currentHtml = articleHtml, useNumberedDotStyle = numberedDotStyle) {
