@@ -9,7 +9,7 @@ import { LAYOUT_PRESETS, LAYOUT_STYLE_KEYS } from "../lib/layouts/layoutPresets"
 import { resolveThemeTokens } from "../lib/layouts/resolveThemeTokens";
 import type { LayoutStyleKey, PreviewPresentation } from "../lib/layouts/layoutTypes";
 import { paginateArticle } from "../lib/pagination/paginateArticle";
-import { INLINE_RUN_CLASS, RICH_LAYOUT_CLASS, normalizeRichHtmlDocument, richTextLimitMessage } from "../lib/richText/normalizeRichHtml";
+import { extractArticle, extractRichTextFragment } from "../lib/richText/importArticle";
 
 const ZhepageEditor = lazy(() => import("./components/ZhepageEditor"));
 
@@ -22,6 +22,8 @@ type ThemeKey = "paper" | "whiteRed" | "butter" | "mistBlue"
   | "gloryGold" | "blazeRed" | "sweetPink" | "slatePurple" | "cheeseGreen" | "kleinMint"
   | "verdigris" | "gooseBlue" | "terracotta" | "deepSeaBlue" | "camelliaRed";
 type Notice = { tone: "neutral" | "success" | "error"; text: string };
+type PaginationState = { inputKey: string; version: number; status: "pending" | "ready" | "error"; error: string };
+type ExportVersion = { inputKey: string; paginationVersion: number };
 type CustomThemePreset = {
   id: string;
   name: string;
@@ -157,22 +159,6 @@ const DEFAULT_HTML = `
   <p>产业的重要时刻值得关注，具体交易仍要回到概率、价格和风险承受能力。把事实与情绪分开，才能做出更清醒的判断。</p>
 `;
 
-const SAFE_ELEMENTS = "script,style,link,meta,base,iframe,object,embed,form,input,button,textarea,select,video,audio,canvas,svg";
-function safeUrl(raw: string) {
-  try {
-    const url = new URL(raw, window.location.href);
-    if (!["http:", "https:"].includes(url.protocol)) return "";
-    return url.href;
-  } catch {
-    return "";
-  }
-}
-
-function safeImageUrl(raw: string) {
-  if (/^data:image\/(?:png|jpe?g|webp);base64,/i.test(raw)) return raw;
-  return safeUrl(raw);
-}
-
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (character) => ({
     "&": "&amp;",
@@ -252,129 +238,6 @@ function removeEmptyHeadings(html: string) {
     if (!heading.textContent?.trim() && !heading.querySelector("img")) heading.remove();
   });
   return parsed.body.innerHTML;
-}
-
-function scaleInlineTypography(style: string) {
-  const clean = style
-    .replace(/expression\s*\([^)]*\)/gi, "")
-    .replace(/url\s*\(\s*['"]?javascript:[^)]*\)/gi, "")
-    .replace(/position\s*:\s*(fixed|sticky)\s*;?/gi, "")
-    .replace(/z-index\s*:[^;]+;?/gi, "")
-    .replace(/transform\s*:[^;]+;?/gi, "")
-    // Imported WeChat spans frequently carry a fixed line-height intended for
-    // the article page. It becomes far too tight after poster font scaling and
-    // also prevents the user's line-height control from taking effect.
-    .replace(/line-height\s*:[^;]+;?/gi, "");
-  return clean.replace(/font-size\s*:\s*([\d.]+)px/gi, (_, size) => {
-    const value = Number(size);
-    if (!Number.isFinite(value)) return _;
-    return `font-size:calc(${Math.max(26, Math.min(52, value * 2.05))}px * var(--type-scale))`;
-  });
-}
-
-function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
-  const documentNode = new DOMParser().parseFromString(rawHtml, "text/html");
-  documentNode.querySelectorAll(SAFE_ELEMENTS).forEach((element) => element.remove());
-  documentNode.querySelectorAll("*").forEach((element) => {
-    const originalStyle = element.getAttribute("style") || "";
-    const isNumberBadge = /^\d{1,3}$/.test(element.textContent?.trim() || "")
-      && /border-radius\s*:\s*50%/i.test(originalStyle)
-      && /background(?:-color)?\s*:/i.test(originalStyle);
-    const lazyImageSource = element instanceof HTMLImageElement
-      ? element.getAttribute("src") || element.getAttribute("data-src") || ""
-      : "";
-    const internalClasses = [...element.classList].filter((className) => [
-      "image-caption", "manual-empty-line", "manual-page-break", "lead-card-placeholder", RICH_LAYOUT_CLASS, INLINE_RUN_CLASS,
-    ].includes(className));
-    [...element.attributes].forEach((attribute) => {
-      const name = attribute.name.toLowerCase();
-      if (name.startsWith("on") || ["srcdoc", "id", "class"].includes(name) || name.startsWith("data-") || name.startsWith("aria-")) {
-        element.removeAttribute(attribute.name);
-      }
-    });
-    internalClasses.forEach((className) => element.classList.add(className));
-
-    if (!preserveStyles) element.removeAttribute("style");
-    else if (element.hasAttribute("style")) element.setAttribute("style", scaleInlineTypography(element.getAttribute("style") || ""));
-    if (isNumberBadge) element.classList.add("imported-number-badge");
-
-    if (element instanceof HTMLAnchorElement) {
-      // Poster exports are static images, so imported links retain their text styling
-      // but are intentionally made non-interactive.
-      element.removeAttribute("href");
-      element.removeAttribute("target");
-      element.removeAttribute("rel");
-    }
-
-    if (element instanceof HTMLImageElement) {
-      const resolved = safeImageUrl(lazyImageSource.replace(/^http:\/\//i, "https://"));
-      if (resolved.startsWith("data:image/")) element.src = resolved;
-      else if (resolved) element.src = `/api/image?url=${encodeURIComponent(resolved)}`;
-      else element.remove();
-      element.removeAttribute("srcset");
-      element.removeAttribute("width");
-      element.removeAttribute("height");
-      element.alt ||= "文章配图";
-    }
-  });
-  documentNode.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((heading) => {
-    if (!heading.textContent?.trim() && !heading.querySelector("img")) heading.remove();
-  });
-  normalizeRichHtmlDocument(documentNode);
-  const limitMessage = richTextLimitMessage(rawHtml, documentNode.body);
-  if (limitMessage) throw new Error(limitMessage);
-  return documentNode.body.innerHTML.trim();
-}
-
-function extractArticle(source: string, preserveStyles: boolean) {
-  const parsed = new DOMParser().parseFromString(source, "text/html");
-  const title =
-    parsed.querySelector('meta[property="og:title"]')?.getAttribute("content") ||
-    parsed.querySelector("h1")?.textContent?.trim() ||
-    parsed.title ||
-    "未命名文章";
-  const subtitle =
-    parsed.querySelector('meta[property="og:description"]')?.getAttribute("content") ||
-    parsed.querySelector('meta[name="description"]')?.getAttribute("content") ||
-    "把长内容变成更容易读完的一组贴图";
-  const article =
-    parsed.querySelector("#js_content") ||
-    parsed.querySelector(".rich_media_content") ||
-    parsed.querySelector("article") ||
-    parsed.querySelector("main") ||
-    parsed.body;
-  article.querySelectorAll("mp-common-profile,.mp_profile_iframe_wrp,noscript").forEach((element) => element.remove());
-  return {
-    title: title.replace(/\s+/g, " ").trim(),
-    subtitle: subtitle.replace(/\s+/g, " ").trim().slice(0, 100),
-    html: sanitizeHtml(article.innerHTML, preserveStyles),
-  };
-}
-
-function extractRichTextFragment(source: string, preserveStyles: boolean, inferTitle: boolean) {
-  const sanitized = sanitizeHtml(source, preserveStyles);
-  if (!inferTitle) return { title: "", html: sanitized, inferredTitle: false };
-
-  const parsed = new DOMParser().parseFromString(sanitized, "text/html");
-  const blocks = [...parsed.body.children].filter((element) => element.textContent?.trim() || element.querySelector("img,table"));
-  const firstBlock = blocks[0] as HTMLElement | undefined;
-  const firstText = firstBlock?.textContent?.replace(/\s+/g, " ").trim() || "";
-  const remainingTextLength = blocks.slice(1).reduce((total, element) => total + (element.textContent?.trim().length || 0), 0);
-  const explicitHeading = firstBlock?.tagName === "H1";
-  const plainTextTitle = firstBlock?.tagName === "P"
-    && Array.from(firstText).length >= 4
-    && Array.from(firstText).length <= 72
-    && blocks.length >= 3
-    && remainingTextLength >= 36
-    && !/[。；;]$/.test(firstText);
-
-  if (!explicitHeading && !plainTextTitle) return { title: "", html: sanitized, inferredTitle: false };
-  firstBlock?.remove();
-  return {
-    title: firstText,
-    html: parsed.body.innerHTML.trim(),
-    inferredTitle: true,
-  };
 }
 
 function downloadDataUrl(dataUrl: string, filename: string) {
@@ -460,8 +323,9 @@ export default function Home() {
   const [publicationName, setPublicationName] = useState(DEFAULT_PUBLICATION_NAME);
   const [leadGuide, setLeadGuide] = useState(DEFAULT_LEAD_GUIDE);
   const [qrDataUrl, setQrDataUrl] = useState("");
-  const [contentPages, setContentPages] = useState<string[]>([DEFAULT_HTML]);
-  const [pageUsage, setPageUsage] = useState<number[]>([0]);
+  const [contentPages, setContentPages] = useState<string[]>([]);
+  const [pageUsage, setPageUsage] = useState<number[]>([]);
+  const [paginationState, setPaginationState] = useState<PaginationState>({ inputKey: "", version: 0, status: "pending", error: "" });
   const [paginationRevision, setPaginationRevision] = useState(0);
   const [activePreviewPage, setActivePreviewPage] = useState(0);
   const [previewZoom, setPreviewZoom] = useState<PreviewZoom>("fit");
@@ -481,6 +345,9 @@ export default function Home() {
   const [posterFontsReady, setPosterFontsReady] = useState(false);
   const measureRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Array<HTMLElement | null>>([]);
+  const paginationVersionRef = useRef(0);
+  const paginationFailedRef = useRef(false);
+  const exportVersionRef = useRef<ExportVersion | null>(null);
   const htmlToImageModuleRef = useRef<Promise<typeof import("html-to-image")> | null>(null);
   const jsZipModuleRef = useRef<Promise<typeof import("jszip")> | null>(null);
   const fontEmbedCssRef = useRef<{ key: string; promise: Promise<string> } | null>(null);
@@ -489,13 +356,8 @@ export default function Home() {
   const layoutClass = layoutClassName(layoutStyle);
   const themeTokens = resolveThemeTokens({ paper: paperColor, accent: accentColor, text: textColor, highlight: highlightColor });
   const contentHeight = format.height - 300 - bottomReserve;
-  const paginationHeight = Math.max(280, contentHeight - 72);
-  const firstTitleHeight = Math.round(contentHeight * 0.48);
+  const paginationHeight = contentHeight;
   const pageOffset = firstPageContent ? 0 : 1;
-  const contentPageCount = contentPages.length;
-  const totalPages = contentPageCount + pageOffset;
-  const visiblePageCount = showAllPreviewPages ? totalPages : Math.min(4, totalPages);
-  const sparsePageIndex = pageUsage.findIndex((usage, index) => index < pageUsage.length - 1 && usage < 0.88);
   const previewScale = previewZoom === "fit" ? undefined : Number(previewZoom);
   const firstPageHtml = firstPageContent
     ? `<section class="first-page-lede"><h1><span>${title.split("\n").map(escapeHtml).join("<br>")}</span></h1>${subtitle.trim() ? `<p>${escapeHtml(subtitle)}</p>` : ""}</section>`
@@ -510,6 +372,21 @@ export default function Home() {
     return beautifyArticle(articleHtml, { numberedDotStyle }).html;
   }, [articleHtml, autoStructure, layoutStyle, manualTypesetPreview, numberedDotStyle, previewPresentation]);
   const paginationHtml = `${firstPageHtml}${replaceLeadCardPlaceholders(presentationArticleHtml, leadCardHtml)}${riskNoteHtml}`;
+  const paginationInputKey = useMemo(() => JSON.stringify([
+    paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, layoutStyle, pageOffset, paginationRevision,
+  ]), [paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, layoutStyle, pageOffset, paginationRevision]);
+  const paginationError = paginationState.inputKey === paginationInputKey && paginationState.status === "error" ? paginationState.error : "";
+  const paginationReady = posterFontsReady && paginationState.inputKey === paginationInputKey && paginationState.status === "ready";
+  // Keep the last preview mounted while its replacement is being measured.
+  // Removing its fixed-height pages would shrink the document and move the
+  // user's scroll position; export readiness is checked separately.
+  const contentPageCount = contentPages.length;
+  const totalPages = contentPageCount ? contentPageCount + pageOffset : 0;
+  const visiblePageCount = showAllPreviewPages ? totalPages : Math.min(4, totalPages);
+  const sparsePageIndex = paginationReady ? pageUsage.findIndex((usage, index) => index < pageUsage.length - 1 && usage < 0.88) : -1;
+  const exportInputKey = useMemo(() => JSON.stringify([
+    paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor,
+  ]), [paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor]);
   const leadCardCount = (articleHtml.match(/lead-card-placeholder/g) || []).length;
   const selectedCustomTheme = customThemePresets.find((preset) => themeKey === null
     && paperColor === preset.paperColor
@@ -543,18 +420,29 @@ export default function Home() {
   }, [titleFont, bodyFont]);
 
   useLayoutEffect(() => {
+    exportVersionRef.current = paginationReady
+      ? { inputKey: exportInputKey, paginationVersion: paginationState.version }
+      : null;
+  }, [exportInputKey, paginationReady, paginationState.version]);
+
+  useLayoutEffect(() => {
     const measure = measureRef.current;
     if (!measure || !posterFontsReady) return;
     let cancelled = false;
     let updateTimer: number | null = null;
     const updateDelay = paginationHtml.length > 120_000 ? 320 : 160;
-    const update = () => {
-      if (cancelled) return;
+    const update = (version: number) => {
+      if (cancelled || version !== paginationVersionRef.current) return;
       try {
         const result = paginateArticle(paginationHtml, measure, paginationHeight);
         setContentPages(result.pages);
         setPageUsage(result.usage);
+        setPaginationState({ inputKey: paginationInputKey, version, status: "ready", error: "" });
         setActivePreviewPage((page) => Math.min(page, Math.max(0, result.pages.length + pageOffset - 1)));
+        if (paginationFailedRef.current) {
+          paginationFailedRef.current = false;
+          setNotice({ tone: "success", text: "排版已恢复，最新预览可以导出" });
+        }
         if (paginationOptimizationRef.current) {
           const before = paginationOptimizationRef.current;
           paginationOptimizationRef.current = null;
@@ -574,17 +462,28 @@ export default function Home() {
           window.requestAnimationFrame(() => document.querySelector(".professional-editor")?.closest(".control-section")?.scrollIntoView({ behavior: "smooth", block: "start" }));
         }
       } catch (error) {
+        const message = error instanceof Error ? error.message : "分页保真检查失败，请检查正文格式";
         measure.innerHTML = "";
+        setContentPages([]);
+        setPageUsage([]);
+        setActivePreviewPage(0);
+        setPaginationState({ inputKey: paginationInputKey, version, status: "error", error: message });
+        paginationFailedRef.current = true;
+        exportVersionRef.current = null;
         paginationOptimizationRef.current = null;
         importPendingRef.current = false;
-        setNotice({ tone: "error", text: error instanceof Error ? error.message : "分页保真检查失败，请检查正文格式" });
+        setNotice({ tone: "error", text: message });
       }
     };
     const scheduleUpdate = () => {
+      if (cancelled) return;
       if (updateTimer) window.clearTimeout(updateTimer);
-      updateTimer = window.setTimeout(update, updateDelay);
+      const version = ++paginationVersionRef.current;
+      exportVersionRef.current = null;
+      setPaginationState({ inputKey: paginationInputKey, version, status: "pending", error: "" });
+      updateTimer = window.setTimeout(() => update(version), updateDelay);
     };
-    const timer = window.setTimeout(update, updateDelay);
+    scheduleUpdate();
     document.fonts?.ready.then(scheduleUpdate);
     const parsed = new DOMParser().parseFromString(paginationHtml, "text/html");
     [...parsed.images].slice(0, 80).forEach((source) => {
@@ -595,10 +494,9 @@ export default function Home() {
     });
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
       if (updateTimer) window.clearTimeout(updateTimer);
     };
-  }, [paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, posterFontsReady, paginationRevision, pageOffset, layoutStyle]);
+  }, [paginationHtml, paginationHeight, preserveStyles, typeScale, lineHeight, titleFont, bodyFont, posterFontsReady, paginationRevision, pageOffset, layoutStyle, paginationInputKey]);
 
   /* Workspace restoration intentionally hydrates many independent controls once. */
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -739,7 +637,7 @@ export default function Home() {
     setArticleHtml(result.html);
     setSourceEditorHtml(result.html);
     setEditorRevision((revision) => revision + 1);
-    setAutoStructure(false);
+    setAutoStructure(true);
     setManualTypesetPreview(true);
     setPreviewPresentation("beautified");
     importPendingRef.current = true;
@@ -972,11 +870,21 @@ export default function Home() {
     }
   }
 
-  async function renderPage(index: number) {
+  function requireCurrentExport(expected?: ExportVersion) {
+    const current = exportVersionRef.current;
+    if (expected && current !== expected) throw new Error("内容或样式已更新，已停止本次导出。请等待排版完成后重新导出");
+    if (!current) throw new Error("当前内容尚未完成排版，请等待排版成功后再导出");
+    return current;
+  }
+
+  async function renderPage(index: number, version: ExportVersion) {
+    requireCurrentExport(version);
     await withTimeout(waitForPosterFonts([titleFont, bodyFont]), 20000, "字体加载超时，请刷新页面后重试");
+    requireCurrentExport(version);
     if (!pageRefs.current[index]) {
       setShowAllPreviewPages(true);
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
+      requireCurrentExport(version);
     }
     const node = pageRefs.current[index];
     if (!node) throw new Error("页面尚未准备好");
@@ -984,6 +892,7 @@ export default function Home() {
     if (contentIndex >= 0 && contentPages[contentIndex]) assertExportSemantics(node, contentPages[contentIndex]);
     const imageModule = await getHtmlToImageModule();
     const fontEmbedCSS = await getPosterFontEmbedCss(node, imageModule);
+    requireCurrentExport(version);
     const controller = new AbortController();
     const renderTimer = window.setTimeout(() => controller.abort(), 90000);
     try {
@@ -1000,6 +909,7 @@ export default function Home() {
         filter: (capturedNode) => !(capturedNode instanceof HTMLElement && capturedNode.classList.contains("page-export")),
         style: { transform: "none", transformOrigin: "top left" },
       }), 95000, `第 ${index + 1} 页转换超时`);
+      requireCurrentExport(version);
       if (!blob) throw new Error(`第 ${index + 1} 页图片生成失败`);
       return blob;
     } finally {
@@ -1011,7 +921,9 @@ export default function Home() {
     setExporting(true);
     setNotice({ tone: "neutral", text: `正在导出第 ${index + 1} 页…` });
     try {
-      const blob = await renderPage(index);
+      const version = requireCurrentExport();
+      const blob = await renderPage(index, version);
+      requireCurrentExport(version);
       const platform = formatExportLabel(formatKey);
       const downloadUrl = URL.createObjectURL(blob);
       downloadDataUrl(downloadUrl, `折页-${platform}-${String(index + 1).padStart(2, "0")}.png`);
@@ -1027,17 +939,20 @@ export default function Home() {
   async function exportAll() {
     setExporting(true);
     try {
+      const version = requireCurrentExport();
       jsZipModuleRef.current ||= import("jszip");
       const { default: JSZip } = await withTimeout(jsZipModuleRef.current, 20000, "压缩组件加载超时，请刷新页面后重试");
+      requireCurrentExport(version);
       const zip = new JSZip();
       for (let index = 0; index < totalPages; index += 1) {
         setNotice({ tone: "neutral", text: index === 0 ? "正在准备导出字体（首次约需数秒）…" : `正在打包 ${index + 1} / ${totalPages}…` });
-        const blob = await renderPage(index);
+        const blob = await renderPage(index, version);
         const platform = formatExportLabel(formatKey);
         zip.file(`折页-${platform}-${String(index + 1).padStart(2, "0")}.png`, blob);
       }
       setNotice({ tone: "neutral", text: "图片已生成，正在压缩下载包…" });
       const blob = await withTimeout(zip.generateAsync({ type: "blob" }), 60000, "压缩图片超时，请尝试单张导出");
+      requireCurrentExport(version);
       const downloadUrl = URL.createObjectURL(blob);
       downloadDataUrl(downloadUrl, `${formatExportTitle(title)}-${formatExportLabel(formatKey)}-全部贴图.zip`);
       window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
@@ -1063,7 +978,7 @@ export default function Home() {
             setImportOpen(false);
             setHelpOpen(true);
           }}><i aria-hidden="true">?</i><span>使用说明</span></button>
-          <button className="primary compact" onClick={exportAll} disabled={exporting || !posterFontsReady}>{exporting ? "处理中…" : posterFontsReady ? `批量导出 ${totalPages} 张` : "字体加载中…"}</button>
+          <button className="primary compact" onClick={exportAll} disabled={exporting || !paginationReady}>{exporting ? "处理中…" : !posterFontsReady ? "字体加载中…" : paginationError ? "排版失败" : paginationReady ? `批量导出 ${totalPages} 张` : "正在排版…"}</button>
         </div>
       </header>
 
@@ -1278,12 +1193,12 @@ export default function Home() {
 
         <section className="preview-workspace">
           <div className="workspace-heading">
-            <div><span className="eyebrow">实时预览</span><h2>{totalPages} 张贴图 · {format.label}</h2></div>
+            <div><span className="eyebrow" aria-live="polite">{!paginationReady && contentPageCount > 0 ? "预览更新中 · 暂示上次排版" : "实时预览"}</span><h2>{contentPageCount ? `${totalPages} 张贴图` : paginationError ? "排版失败" : "正在排版"} · {format.label}</h2></div>
             <div className="preview-toolbar" aria-label="预览导航">
               <div className="preview-pager">
-                <button type="button" onClick={() => goToPreviewPage(activePreviewPage - 1)} disabled={activePreviewPage === 0} aria-label="上一页">‹</button>
-                <b>{activePreviewPage + 1} / {totalPages}</b>
-                <button type="button" onClick={() => goToPreviewPage(activePreviewPage + 1)} disabled={activePreviewPage >= totalPages - 1} aria-label="下一页">›</button>
+                <button type="button" onClick={() => goToPreviewPage(activePreviewPage - 1)} disabled={!totalPages || activePreviewPage === 0} aria-label="上一页">‹</button>
+                <b>{totalPages ? `${activePreviewPage + 1} / ${totalPages}` : "— / —"}</b>
+                <button type="button" onClick={() => goToPreviewPage(activePreviewPage + 1)} disabled={!totalPages || activePreviewPage >= totalPages - 1} aria-label="下一页">›</button>
               </div>
               {(layoutStyle !== "xiaohongshu" || manualTypesetPreview) && <div className="presentation-toggle" aria-label="预览展示方式">
                 <button type="button" className={previewPresentation === "beautified" ? "active" : ""} onClick={() => setPreviewPresentation("beautified")}>美化后</button>
@@ -1298,9 +1213,15 @@ export default function Home() {
             {Array.from({ length: totalPages }, (_, index) => <button key={index} type="button" className={activePreviewPage === index ? "active" : ""} onClick={() => goToPreviewPage(index)}>{index + 1}</button>)}
           </div>
 
-          {!posterFontsReady && <div className="poster-font-loading" role="status"><div><i aria-hidden="true" /><b>正在载入思源字体</b><span>字体完成后再计算分页，确保 Windows 与 macOS 一致</span></div></div>}
+          {!posterFontsReady && !contentPageCount && <div className="poster-font-loading" role="status"><div><i aria-hidden="true" /><b>正在载入思源字体</b><span>字体完成后再计算分页，确保 Windows 与 macOS 一致</span></div></div>}
+          {posterFontsReady && !paginationReady && !contentPageCount && <div className="poster-font-loading" role="status"><div>
+            {!paginationError && <i aria-hidden="true" />}
+            <b>{paginationError ? "当前内容排版失败" : "正在排版当前内容"}</b>
+            <span>{paginationError || "排版完成后将显示最新预览，并恢复导出"}</span>
+            {paginationError && <button type="button" className="smart-pagination-button" onClick={() => setPaginationRevision((revision) => revision + 1)}>重新排版</button>}
+          </div></div>}
 
-          <div className={`poster-grid ${posterFontsReady ? "fonts-ready" : "fonts-loading"}`} style={{
+          <div className={`poster-grid ${posterFontsReady || contentPageCount > 0 ? "fonts-ready" : "fonts-loading"}`} aria-busy={!paginationReady} style={{
             "--page-height": `${format.height}px`,
             ...(previewScale ? { "--preview-scale": previewScale } : {}),
             "--poster-paper": paperColor,
@@ -1329,7 +1250,7 @@ export default function Home() {
                 width={format.width}
                 height={format.height}
                 exporting={exporting}
-                fontsReady={posterFontsReady}
+                fontsReady={paginationReady}
                 onExport={() => exportOne(0)}
                 setRef={(node) => { pageRefs.current[0] = node; }}
               />
@@ -1342,10 +1263,10 @@ export default function Home() {
                 <article className={`poster-page content-page ${layoutClass}`} data-layout-style={layoutStyle} ref={(node) => { pageRefs.current[pageIndex + pageOffset] = node; }} style={{ width: format.width, height: format.height }}>
                   <header><span>{pageBrand}</span><b>{String(pageIndex + 1).padStart(2, "0")}</b></header>
                   <div className="article-viewport" style={{ height: contentHeight }}>
-                    <div className={`article-flow ${layoutClass} ${preserveStyles ? "preserve" : "unified"}`} style={{ "--type-scale": typeScale, "--article-leading": lineHeight, "--first-title-height": `${firstTitleHeight}px` } as React.CSSProperties} dangerouslySetInnerHTML={{ __html: pageHtml }} />
+                    <div className={`article-flow ${layoutClass} ${preserveStyles ? "preserve" : "unified"}`} style={{ "--type-scale": typeScale, "--article-leading": lineHeight } as React.CSSProperties} dangerouslySetInnerHTML={{ __html: pageHtml }} />
                   </div>
                   <footer><span>{footerText.trim() || labName.trim()}</span><span>{pageIndex + 1} / {contentPageCount}</span></footer>
-                  <button className="page-export" onClick={() => exportOne(pageIndex + pageOffset)} disabled={exporting || !posterFontsReady} aria-label={`导出第 ${pageIndex + pageOffset + 1} 页`}>↓</button>
+                  <button className="page-export" onClick={() => exportOne(pageIndex + pageOffset)} disabled={exporting || !paginationReady} aria-label={`导出第 ${pageIndex + pageOffset + 1} 页`}>↓</button>
                 </article>
               </div>
             ))}
@@ -1359,7 +1280,6 @@ export default function Home() {
             <div ref={measureRef} className={`article-flow article-measure ${layoutClass} ${preserveStyles ? "preserve" : "unified"}`} style={{
               "--type-scale": typeScale,
               "--article-leading": lineHeight,
-              "--first-title-height": `${firstTitleHeight}px`,
               "--poster-paper": paperColor,
               "--poster-accent": accentColor,
               "--poster-text": textColor,

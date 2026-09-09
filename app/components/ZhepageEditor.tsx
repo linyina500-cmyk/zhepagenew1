@@ -11,7 +11,8 @@ import { TableKit } from "@tiptap/extension-table";
 import { Extension, Mark, Node, getStyleProperty, mergeAttributes } from "@tiptap/core";
 import { NodeSelection } from "@tiptap/pm/state";
 import UnifiedColorPopover from "./UnifiedColorPopover";
-import { RICH_TEXT_LIMITS, normalizeRichHtmlDocument, richTextLimitMessage } from "../../lib/richText/normalizeRichHtml";
+import { createContentLimitExtension, createPasteHandlers } from "../../lib/richText/editorPaste";
+import { IMAGE_FILE_ACCEPT, insertImageFiles } from "../../lib/richText/editorImages";
 
 type ZhepageEditorProps = {
   html: string;
@@ -209,6 +210,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     immediatelyRender: false,
     extensions: [
       StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: false, code: false, codeBlock: false }),
+      createContentLimitExtension(onNotice),
       GenericBlock,
       SourceStyle,
       PreservedAttributes,
@@ -222,38 +224,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     content: html,
     editorProps: {
       attributes: { class: "tiptap-surface", spellcheck: "false" },
-      handlePaste: (_view, event) => {
-        const pastedHtml = event.clipboardData?.getData("text/html") || "";
-        const pastedText = event.clipboardData?.getData("text/plain") || "";
-        const parsed = pastedHtml ? new DOMParser().parseFromString(pastedHtml, "text/html") : null;
-        const limitMessage = parsed
-          ? richTextLimitMessage(pastedHtml, parsed.body)
-          : Array.from(pastedText).length > RICH_TEXT_LIMITS.textLength
-            ? "正文超过 3 万字，请拆分文章后再导入"
-            : "";
-        if (!limitMessage) return false;
-        event.preventDefault();
-        onNotice(`未粘贴：${limitMessage}`, "error");
-        return true;
-      },
-      transformPastedHTML: (pastedHtml) => {
-        const parsed = new DOMParser().parseFromString(pastedHtml, "text/html");
-        parsed.body.querySelectorAll<HTMLElement>("*").forEach((element) => {
-          if (!element.hasAttribute("style")) return;
-          element.style.removeProperty("font-size");
-          element.style.removeProperty("line-height");
-          element.style.removeProperty("font-family");
-          element.style.removeProperty("letter-spacing");
-          if (!element.getAttribute("style")?.trim()) element.removeAttribute("style");
-        });
-        normalizeRichHtmlDocument(parsed);
-        const limitMessage = richTextLimitMessage(pastedHtml, parsed.body);
-        if (limitMessage) {
-          onNotice(`未粘贴：${limitMessage}`, "error");
-          return "";
-        }
-        return parsed.body.innerHTML;
-      },
+      ...createPasteHandlers(onNotice),
     },
     onUpdate: ({ editor: currentEditor }) => {
       if (applyingExternalContent.current) return;
@@ -311,7 +282,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     lastRevision.current = revision;
     if (updateTimer.current) window.clearTimeout(updateTimer.current);
     applyingExternalContent.current = true;
-    editor.commands.setContent(html, { emitUpdate: false, contentType: "html" });
+    editor.chain().setMeta("richTextExternalContent", true).setContent(html, { emitUpdate: false }).run();
     applyingExternalContent.current = false;
   }, [editor, html, revision]);
 
@@ -426,25 +397,9 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
   }
 
   function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!/^image\/(png|jpe?g|webp)$/i.test(file.type)) {
-      onNotice("请上传 PNG、JPG 或 WebP 图片");
-      event.target.value = "";
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      editor!.chain().focus().setImage({
-        src: String(reader.result),
-        alt: file.name,
-        style: "width:100%;height:auto;max-width:100%;display:block;margin-left:auto;margin-right:auto",
-      }).run();
-      onNotice("图片已插入，可继续调整尺寸、对齐、圆角和图注");
-    };
-    reader.onerror = () => onNotice("图片读取失败，请重新选择");
-    reader.readAsDataURL(file);
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
+    if (editor && files.length) void insertImageFiles(editor.view, files, onNotice);
   }
 
   function saveImageCaption() {
@@ -484,7 +439,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     </div>
 
     <>
-      <input ref={imageInputRef} className="editor-image-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageUpload} />
+      <input ref={imageInputRef} className="editor-image-input" type="file" accept={IMAGE_FILE_ACCEPT} multiple onChange={handleImageUpload} />
       {!compact && onAutoTypeset && <div className="auto-typeset-bar" aria-label="自动排版">
         <button type="button" className="editor-auto-typeset" onClick={() => onAutoTypeset(editor.getHTML(), numberedDotStyle)}>
           <span><b>一键自动排版</b><small>整理导语、章节标题、重点段落和图表</small></span>

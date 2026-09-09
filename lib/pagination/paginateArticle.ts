@@ -1,12 +1,13 @@
 import { measureParts } from "./measureBlock";
+import { connectCalloutsInHtml } from "../beautify/connectCallouts";
 import { RICH_LAYOUT_CLASS, isRichLayoutGroup } from "../richText/normalizeRichHtml";
-import { articleBlocks, blockIsHeading, blockText, splitOversizedBlock } from "./splitDomBlock";
+import { TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE, articleBlocks, blockIsHeading, blockText, splitOversizedBlock, tableHeader } from "./splitDomBlock";
 import type { PaginationResult } from "./paginationTypes";
 
 const FIT_TOLERANCE = 2;
 const INLINE_SEMANTIC_SELECTORS = ["strong", "b", "em", "i", "u", "s", "strike", "span[style]", "mark"];
 const BLOCK_TEXT_TAGS = new Set([
-  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DIV", "DL", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER",
+  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "CAPTION", "COL", "COLGROUP", "DIV", "DL", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER",
   "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN", "NAV", "OL", "P", "PRE",
   "SECTION", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "UL",
 ]);
@@ -67,10 +68,27 @@ function semanticAttributeKey(element: Element) {
 
 function semanticBuckets(parsed: Document, selector: string) {
   const buckets = new Map<string, string>();
-  parsed.querySelectorAll(selector).forEach((element) => {
-    const key = semanticAttributeKey(element);
-    buckets.set(key, `${buckets.get(key) || ""}${element.textContent || ""}`);
-  });
+  const walker = parsed.createTreeWalker(parsed.body, NodeFilter.SHOW_TEXT);
+  let textNode = walker.nextNode();
+  while (textNode) {
+    // Compare text runs in document order at each active style depth. Whole
+    // ancestor textContent duplicates nested spans and reorders that duplicate
+    // text across pages. Retain the nesting count: opacity/em sizes can stack.
+    const depths = new Map<string, number>();
+    let ancestor = textNode.parentElement;
+    while (ancestor) {
+      if (ancestor.matches(selector)) {
+        const key = semanticAttributeKey(ancestor);
+        depths.set(key, (depths.get(key) || 0) + 1);
+      }
+      ancestor = ancestor.parentElement;
+    }
+    for (const [style, depth] of depths) {
+      const key = JSON.stringify([style, depth]);
+      buckets.set(key, `${buckets.get(key) || ""}${textNode.textContent || ""}`);
+    }
+    textNode = walker.nextNode();
+  }
   return JSON.stringify([...buckets.entries()]
     .map(([key, value]) => [key, normalizeSemanticText(value)])
     .sort(([left], [right]) => left.localeCompare(right)));
@@ -79,6 +97,23 @@ function semanticBuckets(parsed: Document, selector: string) {
 export function assertPaginationSemantics(sourceHtml: string, pages: string[]) {
   const source = semanticDocument(sourceHtml);
   const output = semanticDocument(pages.join(""));
+  const sourceTables = [...source.querySelectorAll("table")];
+  output.querySelectorAll(`[${TABLE_REPEAT_ATTRIBUTE}]`).forEach((element) => {
+    const table = element.parentElement;
+    const sourceIndex = table?.getAttribute(TABLE_SOURCE_ATTRIBUTE) || "";
+    const sourceTable = /^\d+$/.test(sourceIndex) ? sourceTables[Number(sourceIndex)] : undefined;
+    const original = sourceTable && (element.tagName === "THEAD"
+      ? tableHeader(sourceTable)
+      : element.tagName === "CAPTION" ? sourceTable.querySelector(":scope > caption") : null);
+    const clone = element.cloneNode(true) as Element;
+    clone.removeAttribute(TABLE_REPEAT_ATTRIBUTE);
+    // Only exact copies of this table's own header/caption may repeat. A
+    // marker on arbitrary content or on an altered header must still fail.
+    if (table?.tagName !== "TABLE" || !original || clone.outerHTML !== original.outerHTML) {
+      throw new Error("分页保真检查失败：续表表头或标题与原表不一致");
+    }
+    element.remove();
+  });
   const sourceText = semanticPlainText(source);
   if (!sourceText) return;
   const outputText = semanticPlainText(output);
@@ -120,7 +155,9 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
 
   while (queue.length) {
     const block = queue.shift()!;
-    if (/class=["'][^"']*manual-page-break/.test(block)) {
+    const isManualBreak = /class=["'][^"']*manual-page-break/.test(block)
+      && new DOMParser().parseFromString(block, "text/html").body.firstElementChild?.classList.contains("manual-page-break");
+    if (isManualBreak) {
       commit();
       continue;
     }
@@ -142,13 +179,19 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
       // Measure the first fragment together with the content already on the
       // page. Measuring it alone loses collapsed margins and can incorrectly
       // move a splittable paragraph to the next page, leaving a large hole.
-      const pieces = splitOversizedBlock(
+      const { pieces, splitAtPageBoundary } = splitOversizedBlock(
         block,
         measure,
         maxHeight,
         availableHeight,
         (piece) => fits([...current, piece]),
       );
+      // Exposing child paragraphs is not a page break. Keep packing them in
+      // order instead of committing a mostly empty page after the first child.
+      if (pieces.length > 1 && !splitAtPageBoundary) {
+        queue.unshift(...pieces);
+        continue;
+      }
       const firstPieceFits = pieces.length > 1 && fits([...current, pieces[0]]);
       const splitFollowerIsUseful = !blockIsHeading(current[current.length - 1])
         || blockText(pieces[0]).trim().length >= 18;
@@ -159,17 +202,17 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
         continue;
       }
 
-      // A styled wrapper can contain several normal paragraphs. Expose those
-      // children to the queue before giving up on the remaining page space;
-      // each child can then be split without losing its wrapper styles.
+      // A measured fragment may be unsuitable after a heading or wrapper.
+      // Retry its smaller pieces in order before abandoning the page space.
       if (pieces.length > 1) {
         queue.unshift(...pieces);
         continue;
       }
 
-      // Keep H1/H2/H3 with the following paragraph. Rolling the heading back is
-      // a bounded one-block backtrack and never changes source order.
-      if (blockIsHeading(current[current.length - 1])) {
+      // Move a trailing heading only when it leaves content on the old page.
+      // A heading already alone on a fresh page cannot move any farther:
+      // retrying it with the same unsplittable follower would loop forever.
+      if (current.length > 1 && blockIsHeading(current[current.length - 1])) {
         const heading = current.pop()!;
         commit();
         queue.unshift(heading, block);
@@ -181,7 +224,7 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
       continue;
     }
 
-    const pieces = splitOversizedBlock(block, measure, maxHeight, maxHeight);
+    const { pieces } = splitOversizedBlock(block, measure, maxHeight, maxHeight);
     if (!pieces.length) continue;
     if (pieces.length > 1) {
       queue.unshift(...pieces);
@@ -192,7 +235,7 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
   }
 
   commit();
-  const normalizedPages = pages.length ? pages : ["<p>暂无正文内容</p>"];
+  const normalizedPages = (pages.length ? pages : ["<p>暂无正文内容</p>"]).map(connectCalloutsInHtml);
   assertPaginationSemantics(html, normalizedPages);
   const usage = normalizedPages.map((page) => Math.min(1.5, heightOf([page]) / maxHeight));
   measure.innerHTML = "";
