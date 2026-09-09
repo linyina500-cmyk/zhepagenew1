@@ -160,6 +160,16 @@ test.afterEach(async ({ page }, testInfo) => {
   const diagnostics = exportDiagnostics.get(page);
   if (diagnostics?.messages.length) await testInfo.attach("image-export-console", { body: diagnostics.messages.join("\n\n"), contentType: "text/plain" });
   if (testInfo.status !== testInfo.expectedStatus) {
+    const fontDiagnostics = await page.evaluate(async () => {
+      const fonts = [...document.fonts].map((font) => ({ family: font.family, weight: font.weight, status: font.status }));
+      const requests = performance.getEntriesByType("resource").filter((entry) => entry.name.includes("/fonts/")).map((entry) => ({ name: entry.name, duration: entry.duration }));
+      const loaded = await Promise.all(fonts.map(async (font) => {
+        try { await document.fonts.load(`400 34px ${font.family}`, "导出字体测试"); return { family: font.family, result: "loaded" }; }
+        catch (error) { return { family: font.family, result: String(error), stack: error instanceof Error ? error.stack : "" }; }
+      }));
+      return { fonts, requests, loaded };
+    }).catch((error) => ({ error: String(error) }));
+    console.log("EXPORT_FONT_DIAGNOSTICS", JSON.stringify(fontDiagnostics));
     const status = await page.locator(".status-pill").textContent().catch(() => "Page unavailable");
     await testInfo.attach("image-export-status", { body: status || "", contentType: "text/plain" });
   }
