@@ -2,6 +2,35 @@ import type { DraftAccount, DraftContent, DraftImage, SyncReceipt } from "./type
 
 export const COMPANION_URL = "http://127.0.0.1:47831";
 export type CompanionConnection = { token: string };
+const STARTUP_PAIRING_KEY = "zhepage-pairing";
+let startupConnection: CompanionConnection | null = null;
+let startupOrigin = "";
+
+// The double-click launcher hands this page a one-time fragment. Fragments are
+// not sent in HTTP requests; remove it from browser history before keeping the
+// connection in memory for the lazily opened dialog. Never use web storage.
+export function getStartupConnection(): CompanionConnection | null {
+  if (typeof window === "undefined") return null;
+  const url = new URL(window.location.href);
+  const isLocalPage = url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname) && !url.username && !url.password;
+  const fragment = new URLSearchParams(url.hash.slice(1));
+  if (fragment.has(STARTUP_PAIRING_KEY)) {
+    const tokens = fragment.getAll(STARTUP_PAIRING_KEY);
+    fragment.delete(STARTUP_PAIRING_KEY);
+    const remaining = fragment.toString();
+    startupConnection = null;
+    startupOrigin = "";
+    try {
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${remaining ? `#${remaining}` : ""}`);
+    } catch { return null; }
+    if (isLocalPage && tokens.length === 1 && /^[A-Za-z0-9_-]{32,128}$/.test(tokens[0])) {
+      startupConnection = { token: tokens[0] };
+      startupOrigin = url.origin;
+    }
+  }
+  return isLocalPage && startupOrigin === url.origin && startupConnection ? { ...startupConnection } : null;
+}
+
 class CompanionRequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
@@ -20,8 +49,11 @@ function readReceipt(value: unknown, account: DraftAccount): SyncReceipt | null 
   return { accountId: account.id, platform: account.platform, status: value.status as SyncReceipt["status"], message: value.message, ...(isText(value.draftId) ? { draftId: value.draftId } : {}) };
 }
 
-async function request<T>(connection: CompanionConnection, path: string, body?: unknown, timeout = 20000): Promise<T> {
+async function request<T>(connection: CompanionConnection, path: string, body?: unknown, timeout = 20000, signal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
   const timer = window.setTimeout(() => controller.abort(), timeout);
   try {
     const response = await fetch(`${COMPANION_URL}/api${path}`, {
@@ -30,12 +62,13 @@ async function request<T>(connection: CompanionConnection, path: string, body?: 
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal,
     });
     const data = await response.json();
-    if (!response.ok) throw new CompanionRequestError(isRecord(data) && typeof data.error === "string" ? data.error : "本机助手请求失败", response.status);
+    if (!response.ok) throw new CompanionRequestError(response.status === 401 ? "连接已过期，请重新双击“启动折页”，使用重新打开的页面。" : isRecord(data) && typeof data.error === "string" ? data.error : "暂时连接不上，请重新双击“启动折页”后再试。", response.status);
     return data as T;
   } catch (error) {
-    if (error instanceof TypeError || (error instanceof DOMException && error.name === "AbortError")) throw new Error("未收到本机助手响应。请确认助手正在运行、配对码正确，并允许浏览器访问本地网络");
+    if (signal?.aborted) throw new DOMException("已结束本次登录等待", "AbortError");
+    if (error instanceof TypeError || (error instanceof DOMException && error.name === "AbortError")) throw new Error("连接暂时中断。请重新双击“启动折页”，使用它打开的页面；若浏览器询问是否允许访问本地网络，请选择允许。");
     throw error;
-  } finally { window.clearTimeout(timer); }
+  } finally { window.clearTimeout(timer); signal?.removeEventListener("abort", onAbort); }
 }
 
 export async function listAccounts(connection: CompanionConnection): Promise<DraftAccount[]> {
@@ -53,11 +86,17 @@ export async function addWechatAccount(connection: CompanionConnection, input: {
   return account;
 }
 
-export async function addXiaohongshuAccount(connection: CompanionConnection, displayName: string): Promise<DraftAccount> {
-  const data = await request<{ account?: unknown }>(connection, "/accounts/xiaohongshu", { displayName }, 300000);
+export async function addXiaohongshuAccount(connection: CompanionConnection, displayName: string, loginRequestId: string, signal?: AbortSignal): Promise<DraftAccount> {
+  const data = await request<{ account?: unknown }>(connection, "/accounts/xiaohongshu", { displayName, loginRequestId }, 300000, signal);
   const account = readAccount(data?.account);
   if (account.platform !== "xiaohongshu") throw new Error("本机助手返回了不匹配的平台账号，请刷新账号后重试");
   return account;
+}
+
+export async function cancelXiaohongshuLogin(connection: CompanionConnection, loginRequestId: string): Promise<boolean> {
+  const data = await request<unknown>(connection, "/accounts/cancel-login", { loginRequestId });
+  if (!isRecord(data) || typeof data.cancelled !== "boolean") throw new Error("尚未确认登录是否结束，请再点一次“取消登录”。");
+  return data.cancelled;
 }
 
 export async function removeAccount(connection: CompanionConnection, accountId: string): Promise<void> {

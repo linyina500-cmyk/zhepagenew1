@@ -62,34 +62,59 @@ function result(page, status, message) {
   return { status, message, url };
 }
 
-export async function loginXiaohongshu({ context }) {
+export async function loginXiaohongshu({ context, signal }) {
+  signal?.throwIfAborted();
   const page = await context.newPage();
   let received;
   let resume;
+  let refuse;
   let timer;
+  let closed = false;
+  const loginError = (message, statusCode) => Object.assign(new Error(message), { publicMessage: message, statusCode });
+  const closedError = () => loginError("登录窗口已关闭，可以重新尝试连接小红书账号", 409);
+  const checkLogin = () => { signal?.throwIfAborted(); if (closed || page.isClosed?.()) throw closedError(); };
+  const onAbort = () => refuse?.(signal.reason);
+  const onClose = () => { closed = true; refuse?.(closedError()); };
   const onResponse = async (response) => {
     try {
+      checkLogin();
       const url = new URL(response.url());
       if (url.origin !== ORIGIN || url.pathname !== IDENTITY_PATH || !response.ok()) return;
       const identity = identityFrom(await response.json());
+      checkLogin();
       if (identity) { received = identity; resume?.(identity); }
     } catch { /* Login responses without a verified account are ignored. */ }
   };
   page.on("response", onResponse);
+  page.on("close", onClose);
+  context.on?.("close", onClose);
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
-    await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    checkLogin();
+    try { await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 30000 }); }
+    catch {
+      checkLogin();
+      throw loginError("无法打开小红书登录页，请检查网络后再试", 502);
+    }
+    checkLogin();
     await page.bringToFront();
     // Completing login can navigate while evaluate is waiting for fetch. Keep
     // listening on this same tab when its initial execution context disappears.
     const identity = await readIdentity(page).catch(() => null);
+    checkLogin();
     if (identity) return identity;
     if (received) return received;
     return await new Promise((resolve, reject) => {
       resume = resolve;
-      timer = setTimeout(() => reject(new Error("请在打开的创作中心完成登录后重新连接账号")), 120000);
+      refuse = reject;
+      checkLogin();
+      timer = setTimeout(() => reject(loginError("扫码等待已超时，请重新打开登录窗口", 408)), 120000);
     });
   } finally {
     page.off("response", onResponse);
+    page.off("close", onClose);
+    context.off?.("close", onClose);
+    signal?.removeEventListener("abort", onAbort);
     clearTimeout(timer);
   }
 }

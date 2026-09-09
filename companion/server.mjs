@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createAccountStore, publicAccount } from "./accountStore.mjs";
 import { authorizeRequest, DEFAULT_ORIGINS, readJson, requireLocalOrigin } from "./security.mjs";
 import { decodeImages } from "./imageInput.mjs";
+import { localBrowserLaunchOptions } from "./browserRuntime.mjs";
 import { validateDraft } from "../lib/draftSync/validation.ts";
 
 const reject = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode, publicMessage: message });
@@ -19,21 +20,45 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
   const store = await createAccountStore(dataDir);
   const contexts = new Map();
   const jobs = new Map();
+  const loginSessions = new Set();
+  let activeLogin = null;
   let accountOperation = false;
   let activeJob = null;
   let actualPort = port;
 
-  async function getContext(id) {
-    if (contexts.has(id)) return contexts.get(id);
+  async function createContext(id, signal) {
     const profilePath = await store.profilePath(id);
+    signal?.throwIfAborted();
     const createBrowser = browserFactory || (async (profile) => {
       const { chromium } = await import("@playwright/test");
-      return chromium.launchPersistentContext(profile, { headless: false, acceptDownloads: false, viewport: { width: 1280, height: 900 } });
+      const browser = await localBrowserLaunchOptions();
+      if (!browser) throw reject("缺少小红书登录组件。请关闭启动窗口，再双击“启动折页”完成首次准备。", 503);
+      return chromium.launchPersistentContext(profile, { ...browser, headless: false, acceptDownloads: false, viewport: { width: 1280, height: 900 } });
     });
-    const context = await createBrowser(profilePath);
+    return createBrowser(profilePath);
+  }
+
+  function registerContext(id, context) {
     contexts.set(id, context);
-    context.on?.("close", () => contexts.delete(id));
+    context.on?.("close", () => { if (contexts.get(id) === context) contexts.delete(id); });
+  }
+
+  async function getContext(id) {
+    if (contexts.has(id)) return contexts.get(id);
+    const context = await createContext(id);
+    registerContext(id, context);
     return context;
+  }
+
+  function cleanupLogin(login) {
+    login.cleanup ??= (async () => {
+      const context = await login.contextPromise.catch(() => undefined);
+      // A committed account owns its profile and is never part of cancellation.
+      if (store.accounts.has(login.id)) return;
+      await context?.close();
+      await store.discardProfile(login.id);
+    })().finally(() => loginSessions.delete(login));
+    return login.cleanup;
   }
 
   const adapters = providers || {
@@ -81,9 +106,21 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
     if (request.method !== "POST") throw reject("此接口不受支持", 404);
     const input = await readJson(request, pathname === "/api/jobs" ? undefined : 8192);
     if (!input || typeof input !== "object" || Array.isArray(input)) throw reject("请求格式无效");
+    if (pathname === "/api/accounts/cancel-login") {
+      if (Object.keys(input).length !== 1 || !validId(input.loginRequestId)) throw reject("取消登录需要有效的登录请求编号，且不接受其他参数");
+      const login = activeLogin;
+      if (!login || login.requestId !== input.loginRequestId) return { cancelled: false };
+      if (login.committing) { await login.finished; return { cancelled: false }; }
+      login.controller.abort(reject("已取消小红书登录，可以重新尝试", 409));
+      void cleanupLogin(login).catch(() => {});
+      await login.finished;
+      return { cancelled: true };
+    }
     if (pathname === "/api/accounts/wechat" || pathname === "/api/accounts/xiaohongshu") {
       if (accountOperation || activeJob) throw reject("请等待当前账号连接或同步完成", 409);
-      accountOperation = true;
+      const operation = {};
+      accountOperation = operation;
+      let login;
       try {
         const displayName = requireText(input.displayName, "账号备注", 80);
         if (pathname.endsWith("wechat")) {
@@ -97,21 +134,46 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
           await store.set(account);
           return { account: publicAccount(account) };
         }
+        if (!validId(input.loginRequestId)) throw reject("登录请求编号无效");
         const id = randomUUID();
-        try {
-          const context = await getContext(id);
-          const verified = await adapters.loginXiaohongshu({ context });
-          if (!verified?.remoteId || typeof verified.remoteId !== "string") throw reject("未能确认创作者账号，请完成登录后重试");
-          if ([...store.accounts.values()].some((account) => account.platform === "xiaohongshu" && account.remoteId === verified.remoteId)) throw reject("该小红书账号已连接，请从已有账号中选择");
-          const account = { id, platform: "xiaohongshu", remoteId: verified.remoteId, displayName: `${displayName} · ${verified.displayName || verified.remoteId}` };
-          await store.set(account);
-          return { account: publicAccount(account) };
-        } catch (error) {
-          await contexts.get(id)?.close();
-          await store.discardProfile(id);
-          throw error;
-        }
-      } finally { accountOperation = false; }
+        const controller = new AbortController();
+        login = { id, requestId: input.loginRequestId, controller, committing: false };
+        login.finished = new Promise((resolve) => { login.finish = resolve; });
+        login.contextPromise = createContext(id, controller.signal);
+        loginSessions.add(login);
+        activeLogin = login;
+        let onAbort;
+        const cancelled = new Promise((_resolve, fail) => {
+          onAbort = () => fail(controller.signal.reason);
+          controller.signal.addEventListener("abort", onAbort, { once: true });
+        });
+        const connect = (async () => {
+          try {
+            const context = await login.contextPromise;
+            controller.signal.throwIfAborted();
+            const verified = await adapters.loginXiaohongshu({ context, signal: controller.signal });
+            controller.signal.throwIfAborted();
+            if (!verified?.remoteId || typeof verified.remoteId !== "string") throw reject("未能确认创作者账号，请完成登录后重试");
+            if ([...store.accounts.values()].some((account) => account.platform === "xiaohongshu" && account.remoteId === verified.remoteId)) throw reject("该小红书账号已连接，请从已有账号中选择");
+            const account = { id, platform: "xiaohongshu", remoteId: verified.remoteId, displayName: `${displayName} · ${verified.displayName || verified.remoteId}` };
+            // Cancellation stops before this commit boundary, never during it.
+            login.committing = true;
+            await store.set(account);
+            registerContext(id, context);
+            loginSessions.delete(login);
+            return { account: publicAccount(account) };
+          } catch (error) {
+            await cleanupLogin(login).catch(() => {});
+            throw error;
+          }
+        })();
+        try { return await Promise.race([connect, cancelled]); }
+        finally { controller.signal.removeEventListener("abort", onAbort); }
+      } finally {
+        if (accountOperation === operation) accountOperation = false;
+        if (activeLogin === login) activeLogin = null;
+        login?.finish();
+      }
     }
     if (pathname === "/api/accounts/remove") {
       if (accountOperation || activeJob) throw reject("请等待当前连接或同步完成后移除账号", 409);
@@ -207,6 +269,9 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
       return actualPort;
     },
     async close() {
+      const pendingLogins = [...loginSessions];
+      for (const login of pendingLogins) if (!login.committing) login.controller.abort(reject("本机助手已关闭，请重新连接账号", 409));
+      await Promise.allSettled(pendingLogins.map((login) => login.committing ? login.finished : cleanupLogin(login)));
       await Promise.allSettled([...contexts.values()].map((context) => context.close()));
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));

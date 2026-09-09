@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
@@ -11,6 +12,7 @@ import path from "node:path";
 import { createCompanion } from "../companion/server.mjs";
 import { authorizeRequest, DEFAULT_ORIGINS, requireLocalOrigin } from "../companion/security.mjs";
 import { decodeImages } from "../companion/imageInput.mjs";
+import { loginXiaohongshu } from "../companion/providers/xiaohongshu.mjs";
 
 const token = "test-only-pairing-token-never-a-real-secret";
 const origin = "http://localhost:5173";
@@ -53,7 +55,7 @@ test("image boundary uses the file bytes and rejects remote URLs, MIME mismatche
   assert.equal(decodeImages([{ ...image, mime: "image/jpeg", base64: jpeg.toString("base64") }])[0].bytes.equals(jpeg), true);
 });
 
-async function fixture(context, changes = {}, existingDirectory) {
+async function fixture(context, changes = {}, existingDirectory, options = {}) {
   const dataDir = existingDirectory || await mkdtemp(path.join(os.tmpdir(), "zhepage-helper-test-"));
   const calls = [];
   const profiles = [];
@@ -69,7 +71,8 @@ async function fixture(context, changes = {}, existingDirectory) {
     profiles.push(profile);
     await writeFile(path.join(profile, "mock-cookie"), "test-only-local-cookie", { mode: 0o600 });
     let onClose;
-    return { on(_event, listener) { onClose = listener; }, async close() { closedProfiles.push(profile); onClose?.(); } };
+    const browser = { on(_event, listener) { onClose = listener; }, async close() { closedProfiles.push(profile); onClose?.(); } };
+    return options.createBrowser ? options.createBrowser({ profile, browser }) : browser;
   } });
   const port = await companion.listen();
   let closed = false;
@@ -294,7 +297,7 @@ test("failed account writes preserve committed metadata and credentials while re
 
 test("profile cleanup failure keeps the account available for removal after restart", async (context) => {
   const first = await fixture(context);
-  const account = (await first.request("/accounts/xiaohongshu", { displayName: "my creator account" })).data.account;
+  const account = (await first.request("/accounts/xiaohongshu", { loginRequestId: randomUUID(), displayName: "my creator account" })).data.account;
   const profile = path.join(first.dataDir, `profile-${account.id}`);
   const metadataPath = path.join(first.dataDir, "accounts.json");
   const metadata = await readFile(metadataPath, "utf8");
@@ -399,8 +402,8 @@ test("truncated PNG and JPEG containers are rejected before calling a platform p
 test("creator sessions use separate local profiles and failed account saves close and remove new profiles", async (context) => {
   let nextCreator = 0;
   const { request, profiles, closedProfiles, dataDir } = await fixture(context, { loginXiaohongshu: async () => ({ remoteId: `creator-${++nextCreator}`, displayName: "mock creator" }) });
-  const first = (await request("/accounts/xiaohongshu", { displayName: "first" })).data.account;
-  const second = (await request("/accounts/xiaohongshu", { displayName: "second" })).data.account;
+  const first = (await request("/accounts/xiaohongshu", { loginRequestId: randomUUID(), displayName: "first" })).data.account;
+  const second = (await request("/accounts/xiaohongshu", { loginRequestId: randomUUID(), displayName: "second" })).data.account;
   assert.deepEqual(profiles, [path.join(dataDir, `profile-${first.id}`), path.join(dataDir, `profile-${second.id}`)]);
   assert.notEqual(profiles[0], profiles[1]);
   for (const profile of profiles) {
@@ -411,7 +414,7 @@ test("creator sessions use separate local profiles and failed account saves clos
   assert.equal(JSON.stringify((await request("/accounts")).data).includes("test-only-local-cookie"), false);
   const blocked = path.join(dataDir, "accounts.json.tmp");
   await mkdir(blocked);
-  assert.equal((await request("/accounts/xiaohongshu", { displayName: "third" })).status, 400);
+  assert.equal((await request("/accounts/xiaohongshu", { loginRequestId: randomUUID(), displayName: "third" })).status, 400);
   assert.equal((await request("/accounts")).data.accounts.length, 2);
   assert.deepEqual(closedProfiles, [profiles[2]]);
   await assert.rejects(stat(profiles[2]), { code: "ENOENT" });
@@ -454,8 +457,271 @@ test("account connection in progress prevents acknowledgements of another pendin
   await waitJob(input.requestId);
   const connection = request("/accounts/wechat", { appId: otherAppId, appSecret, displayName: "other" });
   await started;
+  assert.deepEqual((await request("/accounts/cancel-login", { loginRequestId: randomUUID() })).data, { cancelled: false });
   assert.equal((await request("/jobs/acknowledge", { accountId: account.id, outcome: "not_saved" })).status, 409);
   finishVerification({ remoteId: otherAppId });
   assert.equal((await connection).status, 200);
   assert.equal((await request("/jobs/acknowledge", { accountId: account.id, outcome: "not_saved" })).status, 200);
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+async function expectRemoved(profile) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { await stat(profile); }
+    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail("Temporary login profile was not removed");
+}
+
+test("login and cancellation require a UUID request identity and cancellation rejects additional fields", async (context) => {
+  let logins = 0;
+  const f = await fixture(context, { loginXiaohongshu: async () => { logins++; return { remoteId: "valid-creator" }; } });
+  for (const loginRequestId of [undefined, null, "", 17, [], {}, "not-a-uuid", `${randomUUID()}x`, randomUUID().replaceAll("-", "")]) {
+    assert.equal((await f.request("/accounts/xiaohongshu", { displayName: "invalid request", loginRequestId })).status, 400);
+    assert.equal((await f.request("/accounts/cancel-login", { loginRequestId })).status, 400);
+  }
+  assert.equal((await f.request("/accounts/cancel-login", { loginRequestId: randomUUID(), accountId: randomUUID() })).status, 400);
+  assert.equal((await f.request("/accounts/cancel-login", { loginRequestId: randomUUID(), displayName: "extra field" })).status, 400);
+  assert.equal(logins, 0);
+  assert.deepEqual(f.profiles, []);
+  assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: randomUUID() })).data, { cancelled: false });
+  const loginRequestId = randomUUID();
+  const connected = await f.request("/accounts/xiaohongshu", { displayName: "valid request", loginRequestId });
+  assert.equal(connected.status, 200);
+  assert.notEqual(connected.data.account.id, loginRequestId);
+  assert.equal(logins, 1);
+});
+
+test("two pages cannot cancel another page's pending login or a later retry through real HTTP", { timeout: 5000 }, async (context) => {
+  const pageA = { loginRequestId: randomUUID(), started: deferred(), identity: deferred() };
+  const pageB = { loginRequestId: randomUUID(), started: deferred(), identity: deferred() };
+  const pages = [pageA, pageB];
+  let logins = 0;
+  const f = await fixture(context, { loginXiaohongshu: async ({ signal }) => {
+    const page = pages[logins++];
+    page.signal = signal;
+    page.started.resolve();
+    return page.identity.promise;
+  } });
+  const connectionA = f.request("/accounts/xiaohongshu", { displayName: "page A", loginRequestId: pageA.loginRequestId });
+  await pageA.started.promise;
+  const requestB = { displayName: "page B", loginRequestId: pageB.loginRequestId };
+  assert.equal((await f.request("/accounts/xiaohongshu", requestB)).status, 409);
+  assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: pageB.loginRequestId })).data, { cancelled: false });
+  assert.equal(pageA.signal.aborted, false);
+  assert.equal(f.closedProfiles.length, 0);
+  assert.equal(logins, 1);
+  assert.equal((await f.request("/accounts/xiaohongshu", requestB)).status, 409);
+
+  assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: pageA.loginRequestId })).data, { cancelled: true });
+  assert.equal((await connectionA).status, 409);
+  await expectRemoved(f.profiles[0]);
+  const connectionB = f.request("/accounts/xiaohongshu", requestB);
+  await pageB.started.promise;
+  assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: pageA.loginRequestId })).data, { cancelled: false });
+  pageA.identity.resolve({ remoteId: "cancelled-page-A" });
+  await nextTurn();
+  assert.equal(pageB.signal.aborted, false);
+  assert.equal((await f.request("/accounts/xiaohongshu", { displayName: "page C", loginRequestId: randomUUID() })).status, 409);
+  assert.deepEqual((await f.request("/accounts")).data.accounts, []);
+  pageB.identity.resolve({ remoteId: "current-page-B" });
+  assert.equal((await connectionB).status, 200);
+  assert.deepEqual((await f.request("/accounts")).data.accounts.map((account) => account.remoteId), ["current-page-B"]);
+  assert.equal(f.closedProfiles.includes(f.profiles[1]), false);
+  const metadata = await readFile(path.join(f.dataDir, "accounts.json"), "utf8");
+  for (const page of pages) assert.equal(metadata.includes(page.loginRequestId), false);
+});
+
+test("cancelled login releases its lock, discards only its temporary profile and ignores late identity", async (context) => {
+  const firstRequestId = randomUUID();
+  const secondRequestId = randomUUID();
+  const firstStarted = deferred();
+  const secondStarted = deferred();
+  const firstIdentity = deferred();
+  const secondIdentity = deferred();
+  let reads = 0;
+  const f = await fixture(context, { loginXiaohongshu: async ({ signal }) => {
+    assert.ok(signal instanceof AbortSignal);
+    reads++;
+    (reads === 1 ? firstStarted : secondStarted).resolve();
+    return reads === 1 ? firstIdentity.promise : secondIdentity.promise;
+  } });
+  const existing = await f.add();
+  const first = f.request("/accounts/xiaohongshu", { loginRequestId: firstRequestId, displayName: "cancelled creator" });
+  await firstStarted.promise;
+  assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: firstRequestId })).data, { cancelled: true });
+  const cancelled = await first;
+  assert.equal(cancelled.status, 409);
+  assert.match(cancelled.data.error, /已取消小红书登录/);
+  await expectRemoved(f.profiles[0]);
+  assert.deepEqual((await f.request("/accounts")).data.accounts, [existing]);
+  const second = f.request("/accounts/xiaohongshu", { loginRequestId: secondRequestId, displayName: "current creator" });
+  await secondStarted.promise;
+  firstIdentity.resolve({ remoteId: "late-cancelled-creator" });
+  await nextTurn();
+  assert.equal((await f.request("/accounts/wechat", { appId, appSecret, displayName: "must wait" })).status, 409);
+  secondIdentity.resolve({ remoteId: "current-creator" });
+  assert.equal((await second).status, 200);
+  const accounts = (await f.request("/accounts")).data.accounts;
+  assert.deepEqual(accounts.map((account) => account.remoteId), [appId, "current-creator"]);
+  assert.equal(f.closedProfiles.filter((profile) => profile === f.profiles[0]).length, 1);
+  assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: secondRequestId })).data, { cancelled: false });
+  assert.equal(f.closedProfiles.includes(f.profiles[1]), false);
+  assert.equal((await f.request("/accounts/cancel-login", { accountId: existing.id })).status, 400);
+});
+
+test("cancelling browser creation handles its late context once without unlocking a newer login", async (context) => {
+  const firstRequestId = randomUUID();
+  const creating = deferred();
+  const releaseBrowser = deferred();
+  const currentStarted = deferred();
+  const currentIdentity = deferred();
+  let created = 0;
+  let logins = 0;
+  const f = await fixture(context, { loginXiaohongshu: async () => {
+    logins++;
+    currentStarted.resolve();
+    return currentIdentity.promise;
+  } }, undefined, { createBrowser: async ({ browser }) => {
+    if (++created === 1) { creating.resolve(); await releaseBrowser.promise; }
+    return browser;
+  } });
+  const first = f.request("/accounts/xiaohongshu", { loginRequestId: firstRequestId, displayName: "opening" });
+  await creating.promise;
+  assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: firstRequestId })).data, { cancelled: true });
+  assert.equal((await first).status, 409);
+  assert.equal(logins, 0);
+  const second = f.request("/accounts/xiaohongshu", { loginRequestId: randomUUID(), displayName: "retry" });
+  await currentStarted.promise;
+  releaseBrowser.resolve();
+  await expectRemoved(f.profiles[0]);
+  assert.equal(logins, 1);
+  assert.equal((await f.request("/accounts/xiaohongshu", { loginRequestId: randomUUID(), displayName: "must wait" })).status, 409);
+  assert.deepEqual((await f.request("/accounts")).data.accounts, []);
+  currentIdentity.resolve({ remoteId: "only-current-creator" });
+  assert.equal((await second).status, 200);
+  assert.equal(f.closedProfiles.filter((profile) => profile === f.profiles[0]).length, 1);
+  assert.equal(f.closedProfiles.includes(f.profiles[1]), false);
+});
+
+test("cancel waits for a committing login to finish on either persistence success or failure", async (context) => {
+  for (const failWrite of [false, true]) {
+    const f = await fixture(context);
+    const committing = deferred();
+    const finishCommit = deferred();
+    const originalRename = fs.rename;
+    const rename = context.mock.method(fs, "rename", async (source, destination) => {
+      if (destination === path.join(f.dataDir, "accounts.json")) {
+        committing.resolve();
+        await finishCommit.promise;
+        if (failWrite) throw new Error("simulated metadata failure");
+      }
+      return originalRename(source, destination);
+    });
+    syncBuiltinESMExports();
+    try {
+      const loginRequestId = randomUUID();
+      const connection = f.request("/accounts/xiaohongshu", { loginRequestId, displayName: "committing creator" });
+      await committing.promise;
+      assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId: randomUUID() })).data, { cancelled: false });
+      const cancelReceived = new Promise((resolve) => {
+        const observe = (request) => {
+          if (request.url !== "/api/accounts/cancel-login") return;
+          f.companion.server.off("request", observe);
+          request.once("end", resolve);
+        };
+        f.companion.server.on("request", observe);
+      });
+      let cancelledReturned = false;
+      const cancellation = f.request("/accounts/cancel-login", { loginRequestId }).then((value) => { cancelledReturned = true; return value; });
+      await cancelReceived;
+      await nextTurn();
+      assert.equal(cancelledReturned, false);
+      finishCommit.resolve();
+      assert.equal((await connection).status, failWrite ? 400 : 200);
+      assert.deepEqual((await cancellation).data, { cancelled: false });
+      assert.equal((await f.request("/accounts")).data.accounts.length, failWrite ? 0 : 1);
+      assert.equal(f.closedProfiles.length, failWrite ? 1 : 0);
+      assert.deepEqual((await f.request("/accounts/cancel-login", { loginRequestId })).data, { cancelled: false });
+      assert.equal(f.closedProfiles.length, failWrite ? 1 : 0);
+      if (!failWrite) assert.equal(await readFile(path.join(f.profiles[0], "mock-cookie"), "utf8"), "test-only-local-cookie");
+    } finally {
+      finishCommit.resolve();
+      rename.mock.restore();
+      syncBuiltinESMExports();
+    }
+  }
+});
+
+test("helper shutdown cancels an unregistered login window and never persists its late identity", async (context) => {
+  const started = deferred();
+  const identity = deferred();
+  const f = await fixture(context, { loginXiaohongshu: async () => { started.resolve(); return identity.promise; } });
+  const connection = f.request("/accounts/xiaohongshu", { loginRequestId: randomUUID(), displayName: "interrupted creator" }).catch(() => null);
+  await started.promise;
+  await f.close();
+  await connection;
+  identity.resolve({ remoteId: "must-not-persist" });
+  await nextTurn();
+  assert.equal(f.closedProfiles.length, 1);
+  await expectRemoved(f.profiles[0]);
+  const restarted = await fixture(context, {}, f.dataDir);
+  assert.deepEqual((await restarted.request("/accounts")).data.accounts, []);
+});
+
+test("real login adapter ends on cancellation, closed page or context, and timeout without listeners or pending waits", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const schedule = globalThis.setTimeout;
+  const loginTimers = [];
+  context.mock.method(globalThis, "setTimeout", (callback, delay, ...args) => {
+    const timer = schedule(callback, delay, ...args);
+    if (delay === 120_000) loginTimers.push(timer);
+    return timer;
+  });
+  const cleared = context.mock.method(globalThis, "clearTimeout");
+  for (const reason of ["abort", "page", "context", "timeout"]) {
+    const page = Object.assign(new EventEmitter(), { goto: async () => {}, bringToFront: async () => {}, evaluate: async () => null });
+    const browser = Object.assign(new EventEmitter(), { newPage: async () => page });
+    const controller = new AbortController();
+    const pending = loginXiaohongshu({ context: browser, signal: controller.signal });
+    const checked = assert.rejects(pending, (error) => {
+      if (reason === "abort") return error.message === "test cancellation";
+      assert.equal(error.publicMessage, reason === "timeout" ? "扫码等待已超时，请重新打开登录窗口" : "登录窗口已关闭，可以重新尝试连接小红书账号");
+      return true;
+    });
+    await nextTurn();
+    if (reason === "abort") controller.abort(new Error("test cancellation"));
+    else if (reason === "timeout") context.mock.timers.tick(120_001);
+    else (reason === "page" ? page : browser).emit("close");
+    await checked;
+    assert.equal(page.listenerCount("response"), 0);
+    assert.equal(page.listenerCount("close"), 0);
+    assert.equal(browser.listenerCount("close"), 0);
+  }
+  assert.equal(loginTimers.length, 4);
+  for (const timer of loginTimers) {
+    assert.ok(cleared.mock.calls.some((call) => call.arguments[0] === timer));
+  }
+  context.mock.timers.tick(120_001);
+});
+
+test("login navigation failures provide safe actionable text without browser credentials", async () => {
+  const page = Object.assign(new EventEmitter(), { goto: async () => { throw new Error("https://private-account:private-password@example.test/?token=private-token"); } });
+  await assert.rejects(loginXiaohongshu({ context: { newPage: async () => page } }), (error) => {
+    assert.equal(error.publicMessage, "无法打开小红书登录页，请检查网络后再试");
+    assert.equal(error.message.includes("private"), false);
+    assert.equal(error.statusCode, 502);
+    return true;
+  });
+  assert.equal(page.listenerCount("response"), 0);
+  assert.equal(page.listenerCount("close"), 0);
 });

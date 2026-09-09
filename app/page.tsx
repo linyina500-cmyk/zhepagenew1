@@ -5,6 +5,7 @@ import UnifiedColorPopover from "./components/UnifiedColorPopover";
 import PosterCover from "./components/PosterCover";
 import { usePosterExport, type ExportVersion } from "./hooks/usePosterExport";
 import { withTimeout } from "../lib/async/withTimeout";
+import { getStartupConnection } from "../lib/draftSync/companionClient";
 import { beautifyArticle } from "../lib/beautify/beautifyArticle";
 import { layoutClassName } from "../lib/layouts/layoutClasses";
 import { LAYOUT_PRESETS, LAYOUT_STYLE_KEYS } from "../lib/layouts/layoutPresets";
@@ -231,6 +232,15 @@ function EditorFallback() {
 }
 
 export default function Home() {
+  useEffect(() => {
+    const captureConnection = () => {
+      getStartupConnection();
+      window.dispatchEvent(new window.Event("zhepage-startup-connection"));
+    };
+    captureConnection();
+    window.addEventListener("hashchange", captureConnection);
+    return () => window.removeEventListener("hashchange", captureConnection);
+  }, []);
   const [mode, setMode] = useState<InputMode>("url");
   const [formatKey, setFormatKey] = useState<FormatKey>("xiaohongshu");
   const [url, setUrl] = useState(DEFAULT_ARTICLE_URL);

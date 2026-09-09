@@ -18,7 +18,7 @@ export function validateDraft(platform: DraftPlatform, content: DraftContent, im
   if (!content.title.trim()) issues.push({ severity: "error", code: "title-empty", message: "请填写同步标题" });
   if (countCharacters(content.title) > limit.title) issues.push({ severity: "error", code: "title-long", message: `本工具的${limit.label}标题最多 ${limit.title} 字，请缩短后同步` });
   if (countCharacters(content.body) > limit.body) issues.push({ severity: "error", code: "body-long", message: `本工具的${limit.label}文案最多 ${limit.body} 字，请缩短后同步` });
-  if (platform === "wechat" && new TextEncoder().encode(content.body).length > 2048) issues.push({ severity: "error", code: "body-bytes", message: "本工具对公众号文案采用 2,048 字节的保守限制（约 682 个汉字），请缩短后同步" });
+  if (platform === "wechat" && new TextEncoder().encode(content.body).length > 2048) issues.push({ severity: "error", code: "body-bytes", message: "这段公众号文案太长，请缩短后再保存。本次可填写约 680 个汉字，表情和标点也占用长度。" });
   if (!images.length || images.length > limit.images) issues.push({ severity: "error", code: "image-count", message: `${limit.label}本次同步需要 1–${limit.images} 张图片，当前 ${images.length} 张` });
   if (images.reduce((sum, image) => sum + image.size, 0) > MAX_TOTAL_IMAGE_BYTES) issues.push({ severity: "error", code: "total-size", message: "本次图片总大小超过 60 MB，请减少图片或压缩后再同步" });
   for (const image of images) {
@@ -48,7 +48,7 @@ export async function readDraftImage(file: File): Promise<DraftImage> {
     const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
       timer = setTimeout(() => reject(new Error(`${file.name} 图片读取超时，请重新选择`)), 15000);
       image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
-      image.onerror = () => reject(new Error(`${file.name} 无法解码，请重新选择图片`));
+      image.onerror = () => reject(new Error(`${file.name} 无法打开，请重新选择图片`));
       image.src = url;
     });
     if (!dimensions.width || !dimensions.height || Math.max(dimensions.width, dimensions.height) > 20000) throw new Error(`${file.name} 图片尺寸无效或过大`);

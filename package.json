@@ -9,17 +9,20 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "dev:pages": "npm run build:pages && wrangler pages dev dist-pages --compatibility-date=2026-05-22",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build && node build/prerender-static-shell.mjs",
-    "build:pages": "vite build --config vite.pages.config.ts && node build/finalize-pages-build.mjs",
+    "build:pages": "vite build --config vite.pages.config.ts && node build/finalize-pages-build.mjs && node build/package-local-draft.mjs",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run test:unit && npm run build && node --test tests/rendered-html.test.mjs",
-    "test:unit": "node --test tests/article-import.test.mjs tests/editor-paste.test.mjs tests/editor-update-boundary.test.mjs tests/rich-text-normalization.test.mjs tests/pagination.test.mjs tests/pagination-content-regressions.test.mjs tests/pagination-property.test.mjs tests/preview-state.test.mjs tests/layout-labels.test.mjs tests/poster-export-snapshot.test.mjs tests/draft-sync-model.test.mjs tests/companion-wechat.test.mjs tests/companion-xiaohongshu.test.mjs tests/companion-security.test.mjs",
+    "test:unit": "node --test tests/article-import.test.mjs tests/editor-paste.test.mjs tests/editor-update-boundary.test.mjs tests/rich-text-normalization.test.mjs tests/pagination.test.mjs tests/pagination-content-regressions.test.mjs tests/pagination-property.test.mjs tests/preview-state.test.mjs tests/layout-labels.test.mjs tests/poster-export-snapshot.test.mjs tests/draft-sync-model.test.mjs tests/companion-wechat.test.mjs tests/companion-xiaohongshu.test.mjs tests/companion-security.test.mjs tests/draft-startup-connection.test.mjs tests/companion-launcher.test.mjs tests/companion-package.test.mjs",
     "lint": "eslint app lib worker companion tests --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "test:browser": "playwright test",
     "test:browser:list": "playwright test --list",
     "typecheck": "tsc --noEmit",
     "draft:helper": "node companion/start.mjs",
-    "draft:dev": "vinext dev --hostname 127.0.0.1 --port 5173"
+    "draft:dev": "vinext dev --hostname 127.0.0.1 --port 5173",
+    "draft:launch": "node companion/launch.mjs",
+    "predev": "node build/package-local-draft.mjs --output public/downloads/zhepage-draft-helper.zip",
+    "predraft:dev": "node build/package-local-draft.mjs --output public/downloads/zhepage-draft-helper.zip"
   },
   "dependencies": {
     "@tiptap/core": "3.30.0",
