@@ -15,24 +15,34 @@ export async function createAccountStore(dataDir) {
   if (!Array.isArray(saved) || !saved.every((account) => /^[a-f0-9-]{36}$/.test(account.id) && ["wechat", "xiaohongshu"].includes(account.platform) && typeof account.remoteId === "string" && typeof account.displayName === "string")) throw new Error("本机账号记录无效");
   const accounts = new Map(saved.map((account) => [account.id, { id: account.id, platform: account.platform, remoteId: account.remoteId, displayName: account.displayName, ...(typeof account.pendingJobId === "string" ? { pendingJobId: account.pendingJobId } : {}), ...(account.platform === "wechat" ? { appId: account.remoteId } : {}) }]));
   let writes = Promise.resolve();
-  async function persist() {
-    const metadata = [...accounts.values()].map(({ id, platform, displayName, remoteId, pendingJobId }) => ({ id, platform, displayName, remoteId, pendingJobId }));
+  function update(change) {
     const write = writes.then(async () => {
+      const next = new Map(accounts);
+      change(next);
+      const metadata = [...next.values()].map(({ id, platform, displayName, remoteId, pendingJobId }) => ({ id, platform, displayName, remoteId, pendingJobId }));
       await writeFile(`${file}.tmp`, JSON.stringify(metadata), { mode: 0o600 });
       await chmod(`${file}.tmp`, 0o600);
       await rename(`${file}.tmp`, file);
+      // Readers must keep seeing the committed state if a disk write fails.
+      accounts.clear();
+      for (const [id, account] of next) accounts.set(id, account);
     });
     writes = write.catch(() => {});
-    await write;
+    return write;
   }
   return {
     accounts,
-    async set(account) { accounts.set(account.id, account); await persist(); },
+    async set(account) {
+      const snapshot = { ...account };
+      await update((next) => next.set(snapshot.id, snapshot));
+    },
     async remove(id) {
       if (!accounts.has(id)) throw new Error("账号不存在");
-      accounts.delete(id);
-      await persist();
+      // Keep the account available for another removal attempt if cleanup fails.
       await rm(path.join(dataDir, `profile-${id}`), { recursive: true, force: true });
+      await update((next) => {
+        if (!next.delete(id)) throw new Error("账号不存在");
+      });
     },
     async profilePath(id) {
       if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("账号标识无效");

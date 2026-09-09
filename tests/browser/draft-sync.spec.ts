@@ -36,7 +36,7 @@ async function uploadDraftFile(page: Page, button: Locator, name: string, png: B
 
 async function savedDraftSummary(page: Page) {
   return page.evaluate(async () => {
-    type Stored = { content: Record<string, { title: string; body: string }>; images: { name: string; blob: Blob; width: number; height: number }[] };
+    type Stored = { content: Record<string, { title: string; body: string }>; images: { name: string; blob: Blob; width: number; height: number }[]; selectedAccountIds: string[]; receipts: { accountId: string; status: string }[] };
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("zhepage-local-draft-sync", 1);
       request.onsuccess = () => resolve(request.result);
@@ -52,6 +52,8 @@ async function savedDraftSummary(page: Page) {
       if (!value) return null;
       return {
         content: value.content,
+        selectedAccountIds: value.selectedAccountIds,
+        receipts: value.receipts,
         images: await Promise.all(value.images.map(async (image) => ({
           name: image.name, width: image.width, height: image.height, size: image.blob.size,
           signature: Array.from(new Uint8Array(await image.blob.slice(0, 8).arrayBuffer())),
@@ -127,6 +129,10 @@ test("size acknowledgement and per-account receipts govern real PNG submissions 
   test.setTimeout(240_000);
   const jobs: SubmittedJob[] = [];
   const acknowledgements: unknown[] = [];
+  let releaseFirstJob!: () => void;
+  const firstJobResponse = new Promise<void>((resolve) => { releaseFirstJob = resolve; });
+  let releaseFirstAcknowledgement!: () => void;
+  const firstAcknowledgementResponse = new Promise<void>((resolve) => { releaseFirstAcknowledgement = resolve; });
   let wechatBlocked = false;
   await page.route("http://127.0.0.1:47831/api/**", async (route) => {
     const request = route.request();
@@ -141,11 +147,13 @@ test("size acknowledgement and per-account receipts govern real PNG submissions 
     ] });
     if (path === "/api/jobs/acknowledge") {
       acknowledgements.push(request.postDataJSON());
+      if (acknowledgements.length === 1) await firstAcknowledgementResponse;
       wechatBlocked = false;
       return respond({ ok: true });
     }
     if (path === "/api/jobs") {
       jobs.push(request.postDataJSON() as SubmittedJob);
+      if (jobs.length === 1) await firstJobResponse;
       return respond({ state: "queued" });
     }
     const job = jobs.find((item) => path === `/api/jobs/${item.requestId}`);
@@ -153,7 +161,9 @@ test("size acknowledgement and per-account receipts govern real PNG submissions 
     if (job.accountId === "wechat-test") wechatBlocked = true;
     return respond({ state: "completed", receipt: job.accountId === "xhs-test"
       ? { accountId: job.accountId, platform: "xiaohongshu", status: "saved", draftId: "verified-xhs-draft", message: "测试助手已读取并核对草稿" }
-      : { accountId: job.accountId, platform: "wechat", status: "needs_confirmation", message: "平台保存结果待核实，请先检查草稿" },
+      : jobs.indexOf(job) === 2
+        ? { accountId: job.accountId, platform: "unknown-platform", status: "saved", draftId: "mismatched-draft", message: "畸形响应不能当作保存成功" }
+        : { accountId: job.accountId, platform: "wechat", status: "needs_confirmation", message: "平台保存结果待核实，请先检查草稿" },
     });
   });
   const dialog = await prepareRealImages(page);
@@ -167,13 +177,24 @@ test("size acknowledgement and per-account receipts govern real PNG submissions 
   await dialog.getByRole("checkbox", { name: /公众号测试账号/ }).check();
   await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("公众号同步标题");
   await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("公众号同步配文");
-  const submit = dialog.getByRole("button", { name: "同步到 2 个账号草稿", exact: true });
+  const submit = dialog.locator(".draft-sync-footer-actions .primary");
+  await expect(submit).toHaveText("同步到 2 个账号草稿");
   await expect(submit).toBeDisabled();
   await expect(dialog.getByRole("region", { name: "同步前检查" })).toContainText("不是平台强制尺寸");
   expect(jobs).toHaveLength(0);
   await dialog.getByRole("checkbox", { name: "我已核对图片，沿用当前尺寸和比例", exact: true }).check();
   await expect(submit).toBeEnabled();
   await submit.click();
+  try {
+    await expect.poll(() => jobs.length).toBe(1);
+    await expect(submit).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "关闭草稿同步", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "返回工作台调整海报尺寸", exact: true })).toBeDisabled();
+    await dialog.press("Escape");
+    await expect(dialog).toBeVisible();
+    await submit.evaluate((button) => (button as HTMLButtonElement).click());
+    expect(jobs).toHaveLength(1);
+  } finally { releaseFirstJob(); }
   await expect(dialog.getByText("已保存平台草稿", { exact: true })).toBeVisible();
   await expect(dialog.getByText("待核实", { exact: true })).toBeVisible();
   await expect(dialog.locator(".draft-sync-footer-status")).toContainText("所选账号已处理");
@@ -190,15 +211,66 @@ test("size acknowledgement and per-account receipts govern real PNG submissions 
     expect(png.length).toBeGreaterThan(10_000);
   }
   expect(jobs[0].images).toEqual(jobs[1].images);
+  await expect(submit).toHaveText("同步到 1 个账号草稿");
   await expect(submit).toBeDisabled();
   await dialog.getByRole("button", { name: "刷新账号", exact: true }).click();
   await expect(submit).toBeDisabled();
-  await dialog.getByRole("button", { name: "已在平台核对，确认未保存", exact: true }).click();
-  await expect(submit).toBeEnabled();
-  expect(acknowledgements).toEqual([{ accountId: "wechat-test", confirmedNotSaved: true }]);
+  const wechatReceipt = dialog.getByRole("article", { name: "公众号测试账号的同步结果", exact: true });
+  await wechatReceipt.getByRole("button", { name: "已在平台核对，确认已保存", exact: true }).click();
+  try {
+    await expect.poll(() => acknowledgements.length).toBe(1);
+    await expect(wechatReceipt.getByRole("button", { name: "已在平台核对，确认未保存", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "关闭草稿同步", exact: true })).toBeDisabled();
+    await dialog.press("Escape");
+    await expect(dialog).toBeVisible();
+  } finally { releaseFirstAcknowledgement(); }
+  await expect(wechatReceipt.getByText("用户确认已保存", { exact: true })).toBeVisible();
+  await expect(wechatReceipt).toContainText("本机助手未自动验证");
+  await expect(wechatReceipt).toHaveClass(/confirmed_by_user/);
+  await expect(wechatReceipt.getByText("已保存平台草稿", { exact: true })).toHaveCount(0);
+  await expect(submit).toHaveText("同步到 0 个账号草稿");
+  await expect(submit).toBeDisabled();
+  expect(acknowledgements).toEqual([{ accountId: "wechat-test", outcome: "saved" }]);
   expect(jobs).toHaveLength(2);
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain("test-local-pairing");
   expect(await savedDraftSummary(page), "A sync itself must not opt the user into local draft storage").toBeNull();
+  await dialog.getByRole("button", { name: "存到本机", exact: true }).click();
+  await expect(dialog.getByText("图片、文案和账号选择已存到当前浏览器", { exact: true })).toBeVisible();
+  const saved = await savedDraftSummary(page);
+  expect(saved?.selectedAccountIds).toEqual([]);
+  expect(saved?.receipts.find((receipt) => receipt.accountId === "wechat-test")?.status).toBe("confirmed_by_user");
+
+  await dialog.getByRole("checkbox", { name: /公众号测试账号/ }).check();
+  await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("公众号后续草稿");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+  await expect(wechatReceipt.getByText("待核实", { exact: true })).toBeVisible();
+  await expect(wechatReceipt).toContainText("未收到完整结果");
+  await expect(submit).toBeDisabled();
+  await dialog.getByRole("button", { name: "存到本机", exact: true }).click();
+  await expect(dialog.getByText("图片、文案和账号选择已存到当前浏览器", { exact: true })).toBeVisible();
+  expect((await savedDraftSummary(page))?.receipts.find((receipt) => receipt.accountId === "wechat-test")?.status).toBe("needs_confirmation");
+  await wechatReceipt.getByRole("button", { name: "已在平台核对，确认未保存", exact: true }).click();
+  await expect(wechatReceipt.getByText("未保存", { exact: true })).toBeVisible();
+  await expect(wechatReceipt).toContainText("尚未再次发送");
+  await expect(submit).toBeEnabled();
+  expect(acknowledgements).toEqual([{ accountId: "wechat-test", outcome: "saved" }, { accountId: "wechat-test", outcome: "not_saved" }]);
+  expect(jobs.map((job) => job.accountId)).toEqual(["xhs-test", "wechat-test", "wechat-test"]);
+  expect((await savedDraftSummary(page))?.receipts.find((receipt) => receipt.accountId === "wechat-test")?.status).toBe("needs_confirmation");
+  await dialog.press("Escape");
+  await page.reload();
+  const restored = await openDraftDialog(page);
+  await restored.getByRole("button", { name: "继续本机存档", exact: true }).click();
+  await restored.getByLabel("本机助手配对码", { exact: true }).fill("test-local-pairing");
+  await restored.getByRole("button", { name: "连接助手", exact: true }).click();
+  const historical = restored.getByRole("article", { name: "公众号测试账号的同步结果", exact: true });
+  await expect(historical.getByText("历史回执", { exact: true })).toBeVisible();
+  await expect(historical).toContainText("助手当前已解除锁定");
+  await expect(historical.getByRole("button", { name: /^已在平台核对/ })).toHaveCount(0);
+  await restored.getByRole("checkbox", { name: "我已核对图片，沿用当前尺寸和比例", exact: true }).check();
+  await expect(restored.locator(".draft-sync-footer-actions .primary")).toBeEnabled();
+  expect(jobs).toHaveLength(3);
+  expect(acknowledgements).toHaveLength(2);
 });
 
 test("mobile draft controls stay usable and a denied local save never reports success", async ({ page }) => {
@@ -215,6 +287,30 @@ test("mobile draft controls stay usable and a denied local save never reports su
   expect(geometry.bottom).toBeLessThanOrEqual(geometry.height);
   expect(geometry.footerBottom).toBeLessThanOrEqual(geometry.height);
   expect(geometry.overflow).toBeLessThanOrEqual(1);
+  const clippedControls = await dialog.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return [...element.querySelectorAll("button,input,textarea,summary")].filter((node) => {
+      if (!node.getClientRects().length) return false;
+      const box = node.getBoundingClientRect();
+      return box.left < bounds.left - 1 || box.right > bounds.right + 1;
+    }).map((node) => node.getAttribute("aria-label") || node.textContent);
+  });
+  expect(clippedControls, "Narrow-screen controls must remain inside the dialog").toEqual([]);
+  await dialog.getByRole("button", { name: "关闭草稿同步", exact: true }).focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect.poll(() => dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  let accountReply = 0;
+  await page.route("http://127.0.0.1:47831/api/accounts", async (route) => {
+    const headers = { "Access-Control-Allow-Origin": "http://127.0.0.1:4173", "Access-Control-Allow-Headers": "authorization,content-type", "Access-Control-Allow-Methods": "GET,POST,OPTIONS" };
+    const body = route.request().method() === "OPTIONS" ? {} : ++accountReply === 1 ? { accounts: null } : { accounts: [{ id: "invalid", platform: "unknown-platform", displayName: "无效账号", remoteId: "invalid", ready: true }] };
+    await route.fulfill({ status: 200, contentType: "application/json", headers, body: JSON.stringify(body) });
+  });
+  await dialog.getByLabel("本机助手配对码", { exact: true }).fill("invalid-response-test");
+  await dialog.getByRole("button", { name: "连接助手", exact: true }).click();
+  await expect(dialog.locator(".draft-sync-footer-status").getByRole("alert")).toContainText("账号列表无效");
+  await dialog.getByRole("button", { name: "连接助手", exact: true }).click();
+  await expect(dialog.locator(".draft-sync-footer-status").getByRole("alert")).toContainText("账号信息不完整");
+  await expect(dialog.getByRole("checkbox", { name: /无效账号/ })).toHaveCount(0);
   await page.evaluate(() => {
     const originalOpen = IDBFactory.prototype.open;
     IDBFactory.prototype.open = function(name: string, version?: number) {

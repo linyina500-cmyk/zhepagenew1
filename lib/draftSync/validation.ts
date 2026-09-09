@@ -42,14 +42,22 @@ export function validateDraft(platform: DraftPlatform, content: DraftContent, im
 export async function readDraftImage(file: File): Promise<DraftImage> {
   if (!["image/png", "image/jpeg"].includes(file.type) || file.size <= 0 || file.size > MAX_IMAGE_BYTES) throw new Error("请使用不超过 10 MB 的 PNG 或 JPEG 图片");
   const url = URL.createObjectURL(file);
+  const image = new Image();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-      const image = new Image();
+      timer = setTimeout(() => reject(new Error(`${file.name} 图片读取超时，请重新选择`)), 15000);
       image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
       image.onerror = () => reject(new Error(`${file.name} 无法解码，请重新选择图片`));
       image.src = url;
     });
     if (!dimensions.width || !dimensions.height || Math.max(dimensions.width, dimensions.height) > 20000) throw new Error(`${file.name} 图片尺寸无效或过大`);
     return { id: crypto.randomUUID(), name: file.name, blob: file, ...dimensions };
-  } finally { URL.revokeObjectURL(url); }
+  } finally {
+    clearTimeout(timer);
+    image.onload = null;
+    image.onerror = null;
+    image.removeAttribute("src");
+    URL.revokeObjectURL(url);
+  }
 }

@@ -5,8 +5,9 @@ import { authorizeRequest, DEFAULT_ORIGINS, readJson, requireLocalOrigin } from 
 import { decodeImages } from "./imageInput.mjs";
 import { validateDraft } from "../lib/draftSync/validation.ts";
 
-const reject = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+const reject = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode, publicMessage: message });
 const validId = (value) => typeof value === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
+const validDraftId = (value) => typeof value === "string" && value.length > 0 && value.length <= 512 && value.trim() === value && [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
 function requireText(value, name, max) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw reject(`${name}无效`);
   return value.trim();
@@ -48,16 +49,24 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
         ? await adapters.saveWechatDraft({ account, draft })
         : await adapters.saveXiaohongshuDraft({ context: await getContext(account.id), account, draft });
       if (!["saved", "needs_confirmation", "failed"].includes(result?.status)) throw new Error("适配器未给出有效结果");
-      job.receipt = { accountId: account.id, platform: account.platform, status: result.status, message: result.message, ...(result.draftId ? { draftId: result.draftId } : {}) };
+      const draftId = validDraftId(result.draftId) ? result.draftId : undefined;
+      const status = result.status === "saved" && !draftId ? "needs_confirmation" : result.status;
+      const message = result.status === "saved" && !draftId
+        ? "平台未返回有效草稿编号，尚不能确认保存结果。请到所选账号核对草稿后解除锁定。"
+        : result.message;
+      job.receipt = { accountId: account.id, platform: account.platform, status, message, ...(draftId ? { draftId } : {}) };
       if (result.url && /^https:\/\/(?:creator\.xiaohongshu\.com|mp\.weixin\.qq\.com)(?:\/|$)/.test(result.url)) job.receipt.url = result.url;
-      if (result.status !== "needs_confirmation") {
-        const previousJob = account.pendingJobId;
-        delete account.pendingJobId;
-        try { await store.set(account); }
-        catch { account.pendingJobId = previousJob; }
+      if (status !== "needs_confirmation") {
+        const unlocked = { ...store.accounts.get(account.id) };
+        delete unlocked.pendingJobId;
+        try { await store.set(unlocked); }
+        catch {
+          job.receipt.status = "needs_confirmation";
+          job.receipt.message = "平台结果已返回，但本机确认记录未能保存。请到所选账号核对草稿后解除锁定。";
+        }
       }
     } catch {
-      job.receipt = { accountId: account.id, platform: account.platform, status: "needs_confirmation", message: "同步过程未完成确认。请到对应平台账号核对草稿，确认未保存后再解除锁定。" };
+      job.receipt = { accountId: account.id, platform: account.platform, status: "needs_confirmation", message: "同步过程未完成确认。请到对应平台账号核对草稿结果后解除锁定。" };
     } finally { job.state = "finished"; activeJob = null; }
   }
 
@@ -107,6 +116,9 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
     if (pathname === "/api/accounts/remove") {
       if (accountOperation || activeJob) throw reject("请等待当前连接或同步完成后移除账号", 409);
       if (!validId(input.accountId)) throw reject("账号标识无效");
+      const account = store.accounts.get(input.accountId);
+      if (!account) throw reject("账号不存在", 404);
+      if (account.pendingJobId) throw reject("此账号有尚未确认的草稿，请先到平台核对并解除锁定", 409);
       accountOperation = true;
       try {
         await contexts.get(input.accountId)?.close();
@@ -115,13 +127,16 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
       } finally { accountOperation = false; }
     }
     if (pathname === "/api/jobs/acknowledge") {
-      const account = store.accounts.get(input.accountId);
-      if (!account || input.confirmedNotSaved !== true) throw reject("请先在平台核对，确认未保存后再解锁");
       if (activeJob || accountOperation) throw reject("当前任务仍在处理，暂不能解除锁定", 409);
+      if (!validId(input.accountId) || !["saved", "not_saved"].includes(input.outcome)) throw reject("请先在平台核对并选择草稿是否已保存");
+      const account = store.accounts.get(input.accountId);
+      if (!account) throw reject("账号不存在", 404);
+      if (!account.pendingJobId) throw reject("此账号没有待核对的草稿", 409);
       accountOperation = true;
       try {
-        delete account.pendingJobId;
-        await store.set(account);
+        const unlocked = { ...account };
+        delete unlocked.pendingJobId;
+        await store.set(unlocked);
         return { acknowledged: true };
       } finally { accountOperation = false; }
     }
@@ -143,13 +158,13 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
       const blocking = issues.find((issue) => issue.severity === "error");
       if (blocking) throw reject(blocking.message);
       activeJob = input.requestId;
-      account.pendingJobId = input.requestId;
-      try { await store.set(account); }
-      catch (error) { activeJob = null; delete account.pendingJobId; throw error; }
+      const locked = { ...account, pendingJobId: input.requestId };
+      try { await store.set(locked); }
+      catch (error) { activeJob = null; throw error; }
       const job = { state: "running", fingerprint, receipt: null };
       jobs.set(input.requestId, job);
       // Keep the idempotency ledger for this helper session; it contains no text or images.
-      void executeJob(job, account, { title: input.content.title, body: input.content.body, images });
+      void executeJob(job, locked, { title: input.content.title, body: input.content.body, images });
       return { id: input.requestId, state: job.state };
     }
     throw reject("此接口不受支持", 404);
@@ -175,10 +190,10 @@ export async function createCompanion({ dataDir, port = 47831, token = randomByt
       const result = await route(request, parsed.pathname);
       response.writeHead(200); response.end(JSON.stringify(result));
     } catch (error) {
-      const status = Number.isInteger(error.statusCode) ? error.statusCode : 400;
+      const status = Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode <= 599 ? error.statusCode : 400;
       response.writeHead(status);
       // Provider errors are deliberately not reflected: they can contain credential URLs.
-      response.end(JSON.stringify({ error: error.statusCode ? error.message : error.publicMessage || "操作未完成，请检查账号权限、网络及本机助手设置后重试" }));
+      response.end(JSON.stringify({ error: typeof error?.publicMessage === "string" && error.publicMessage.trim() ? error.publicMessage : "操作未完成，请检查账号权限、网络及本机助手设置后重试" }));
     }
   });
   server.requestTimeout = 120000;

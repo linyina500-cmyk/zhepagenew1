@@ -30,6 +30,8 @@
 
 第一次使用请阅读 [使用说明.md](使用说明.md)。
 
+开发分支新增本机草稿同步：支持账号选择、两平台独立文案、图片调整、尺寸提醒和设备本地存档。公众号使用官方图片草稿接口，小红书使用独立窗口适配并保留人工核对。启动方式、开源来源和验证边界见 [DRAFT_SYNC.md](DRAFT_SYNC.md)。
+
 自动排版的中文阅读层级参考了 [doocs/md](https://github.com/doocs/md)、[Markdown Nice](https://github.com/mdnice/markdown-nice) 与 [wechat-format](https://github.com/lyricat/wechat-format) 的公开设计思路，并按贴图分页场景重新实现。V4 提供“小红书爆款、财经深度长文、数据指数型、极简新闻型、重点卡片型”5 套结构版式；版式只管理信息层级，主题只管理颜色，两者可以独立切换。
 
 ## 本地运行

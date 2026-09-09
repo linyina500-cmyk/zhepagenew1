@@ -5,7 +5,8 @@ export type DraftAccount = { id: string; platform: DraftPlatform; displayName: s
 export type SyncReceipt = {
   accountId: string;
   platform: DraftPlatform;
-  status: "saved" | "needs_confirmation" | "failed";
+  // Only provider-verified saves use "saved"; manual checks remain explicit.
+  status: "saved" | "confirmed_by_user" | "needs_confirmation" | "failed";
   message: string;
   draftId?: string;
   url?: string;

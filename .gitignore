@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-pages/
 .next/
+.vinext/
 .wrangler/
 playwright-report/
 test-results/

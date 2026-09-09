@@ -1,16 +1,79 @@
-import type { LocalDraft } from "./types";
+import type { DraftContent, DraftPlatform, LocalDraft, SyncReceipt } from "./types";
 
 const DATABASE = "zhepage-local-draft-sync";
 const STORE = "drafts";
 const KEY = "current";
 
+const invalidArchive = () => new Error("本机存档不完整，请清除存档后重新准备素材");
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidArchive();
+  return value as Record<string, unknown>;
+}
+function text(value: unknown, max: number, required = false): string {
+  if (typeof value !== "string" || value.length > max || (required && !value.trim())) throw invalidArchive();
+  return value;
+}
+function platform(value: unknown): DraftPlatform {
+  if (value !== "xiaohongshu" && value !== "wechat") throw invalidArchive();
+  return value;
+}
+function content(value: unknown): DraftContent {
+  const fields = record(value);
+  // An unfinished draft may exceed platform limits while the user is editing.
+  return { title: text(fields.title, 10000), body: text(fields.body, 100000) };
+}
+function identifiers(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 100) throw invalidArchive();
+  const result = value.map((id) => text(id, 200, true));
+  if (new Set(result).size !== result.length) throw invalidArchive();
+  return result;
+}
+
+/** Restore only draft fields; credentials and unrelated objects are never archived. */
+export function normalizeLocalDraft(value: unknown): LocalDraft {
+  const draft = record(value);
+  if (draft.schemaVersion !== 1 || !Array.isArray(draft.images) || draft.images.length > 250) throw invalidArchive();
+  const images = draft.images.map((value) => {
+    const image = record(value);
+    if (!(image.blob instanceof Blob) || !["image/png", "image/jpeg"].includes(image.blob.type) || !image.blob.size) throw invalidArchive();
+    if (![image.width, image.height].every((dimension) => Number.isSafeInteger(dimension) && Number(dimension) > 0 && Number(dimension) <= 20000)) throw invalidArchive();
+    return { id: text(image.id, 200, true), name: text(image.name, 500), blob: image.blob, width: Number(image.width), height: Number(image.height) };
+  });
+  if (new Set(images.map((image) => image.id)).size !== images.length) throw invalidArchive();
+  const fields = record(draft.content);
+  const updatedAt = text(draft.updatedAt, 40, true);
+  if (!Number.isFinite(Date.parse(updatedAt))) throw invalidArchive();
+  if (!Array.isArray(draft.receipts) || draft.receipts.length > 100) throw invalidArchive();
+  const receipts: SyncReceipt[] = draft.receipts.map((value) => {
+    const receipt = record(value);
+    if (typeof receipt.status !== "string" || !["saved", "confirmed_by_user", "needs_confirmation", "failed"].includes(receipt.status)) throw invalidArchive();
+    const draftId = receipt.draftId === undefined ? undefined : text(receipt.draftId, 512, true);
+    if (receipt.status === "saved" && !draftId) throw invalidArchive();
+    let url: string | undefined;
+    if (receipt.url !== undefined) {
+      const parsed = new URL(text(receipt.url, 2048, true));
+      if (parsed.protocol !== "https:" || !["mp.weixin.qq.com", "creator.xiaohongshu.com"].includes(parsed.hostname) || parsed.port || parsed.username || parsed.password) throw invalidArchive();
+      // Platform navigation never needs credential-bearing query parameters.
+      url = `${parsed.origin}${parsed.pathname}`;
+    }
+    return { accountId: text(receipt.accountId, 200, true), platform: platform(receipt.platform), status: receipt.status as SyncReceipt["status"], message: text(receipt.message, 4000), ...(draftId ? { draftId } : {}), ...(url ? { url } : {}) };
+  });
+  if (new Set(receipts.map((receipt) => receipt.accountId)).size !== receipts.length) throw invalidArchive();
+  return {
+    schemaVersion: 1, id: text(draft.id, 200, true), updatedAt, sourceFormat: text(draft.sourceFormat, 40, true), images,
+    content: { xiaohongshu: content(fields.xiaohongshu), wechat: content(fields.wechat) },
+    selectedAccountIds: identifiers(draft.selectedAccountIds), receipts,
+  };
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE, 1);
     request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-    request.onsuccess = () => resolve(request.result);
+    let blocked = false;
+    request.onsuccess = () => { if (blocked) request.result.close(); else resolve(request.result); };
     request.onerror = () => reject(new Error("本机存档不可用，请检查浏览器存储权限"));
-    request.onblocked = () => reject(new Error("另一窗口正在使用本机存档，请关闭后重试"));
+    request.onblocked = () => { blocked = true; reject(new Error("另一窗口正在使用本机存档，请关闭后重试")); };
   });
 }
 
@@ -28,14 +91,15 @@ async function withStore<T>(mode: IDBTransactionMode, operation: (store: IDBObje
 }
 
 export async function loadLocalDraft(): Promise<LocalDraft | null> {
-  const draft = await withStore<LocalDraft | undefined>("readonly", (store) => store.get(KEY));
-  if (!draft) return null;
-  if (draft.schemaVersion !== 1 || !Array.isArray(draft.images) || !draft.images.every((image) => image.blob instanceof Blob) || !draft.content?.xiaohongshu || !draft.content?.wechat) throw new Error("本机存档不完整，请清除存档后重新准备素材");
-  return draft;
+  const draft = await withStore<unknown>("readonly", (store) => store.get(KEY));
+  if (draft === undefined) return null;
+  try { return normalizeLocalDraft(draft); }
+  catch { throw invalidArchive(); }
 }
 
 export async function saveLocalDraft(draft: LocalDraft): Promise<void> {
-  await withStore("readwrite", (store) => store.put(draft, KEY));
+  const snapshot = normalizeLocalDraft(draft);
+  await withStore("readwrite", (store) => store.put(snapshot, KEY));
 }
 
 export async function clearLocalDraft(): Promise<void> {

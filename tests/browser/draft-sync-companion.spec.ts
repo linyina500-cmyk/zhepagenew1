@@ -1,0 +1,38 @@
+import { expect, test } from "@playwright/test";
+import { shortArticleHtml, shortBody, shortTitle } from "./fixtures";
+import { expectPreviewReady, importRichArticle, openWorkbench } from "./helpers";
+
+test("the real loopback helper receives generated PNGs and returns a per-account draft receipt", async ({ page }, testInfo) => {
+  test.setTimeout(240000);
+  await openWorkbench(page);
+  await importRichArticle(page, shortArticleHtml, shortTitle + shortBody);
+  await expectPreviewReady(page);
+  await page.getByRole("button", { name: "同步草稿", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "同步到平台草稿", exact: true });
+  await dialog.getByRole("button", { name: "用当前图片新建草稿", exact: true }).click();
+  await expect(dialog.locator(".draft-sync-image-card").first()).toBeVisible({ timeout: 110000 });
+  await dialog.locator(".draft-sync-platforms").getByRole("button", { name: /^公众号贴图/ }).click();
+  await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("本机 HTTP 整链路");
+  await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("测试素材仅交给回环地址上的模拟平台适配器。");
+  await dialog.getByLabel("本机助手配对码", { exact: true }).fill("browser-test-pairing-code-only-not-a-real-secret");
+  await dialog.getByRole("button", { name: "连接助手", exact: true }).click();
+  await expect(dialog.getByText("已连接本机助手，配对码仅保留在当前窗口内存", { exact: true })).toBeVisible();
+  if (!await dialog.getByLabel("账号备注", { exact: true }).isVisible()) await dialog.locator(".draft-sync-connection summary").click();
+  await dialog.getByLabel("账号备注", { exact: true }).fill("回环接口测试公众号");
+  await dialog.getByLabel("公众号 AppID", { exact: true }).fill("wx1234567890abcdef");
+  await dialog.getByLabel("公众号 AppSecret", { exact: true }).fill("synthetic-test-secret-only");
+  await dialog.getByRole("button", { name: "验证并添加公众号", exact: true }).click();
+  const account = dialog.getByRole("checkbox", { name: /回环接口测试公众号/ });
+  await expect(account).toBeVisible();
+  await expect(dialog.getByLabel("公众号 AppSecret", { exact: true })).toHaveValue("");
+  await account.check();
+  await dialog.getByRole("checkbox", { name: "我已核对图片，沿用当前尺寸和比例", exact: true }).check();
+  await dialog.getByRole("button", { name: "同步到 1 个账号草稿", exact: true }).click();
+  await expect(dialog.getByText("已保存平台草稿", { exact: true })).toBeVisible({ timeout: 30000 });
+  await expect(dialog.getByText("草稿编号：test-only-verified-draft", { exact: true })).toBeVisible();
+  await expect(account).not.toBeChecked();
+  const persistence = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }));
+  expect(persistence).not.toContain("synthetic-test-secret-only");
+  expect(persistence).not.toContain("browser-test-pairing-code-only-not-a-real-secret");
+  await testInfo.attach("draft-sync-account-result", { body: await page.screenshot(), contentType: "image/png" });
+});
