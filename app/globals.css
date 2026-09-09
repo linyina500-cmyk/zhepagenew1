@@ -507,6 +507,7 @@ select:focus { border-color: var(--brown); box-shadow: 0 0 0 3px var(--focus-rin
 .article-flow .lead-card-disclaimer { position: absolute; z-index: 1; left: 32px; right: 32px; bottom: 20px; padding-top: 13px; border-top: 1px solid rgba(179, 139, 67, .3); color: #999084 !important; font-family: var(--poster-body-font), "Source Han Serif SC", serif !important; font-size: calc(14px * var(--type-scale)); letter-spacing: .02em; text-align: center; }
 .content-page > footer { position: absolute; left: 96px; right: 96px; bottom: 34px; display: flex; justify-content: space-between; padding-top: 15px; border-top: 2px solid color-mix(in srgb, var(--poster-accent) 24%, transparent); color: color-mix(in srgb, var(--poster-accent) 60%, #8b8178); font-size: 14px; letter-spacing: .08em; }
 .content-page > footer span:first-child { max-width: 76%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.content-page > footer span:last-child { flex-shrink: 0; white-space: nowrap; }
 .measure-viewport { position: fixed; top: 0; left: -10000px; width: 888px; overflow: visible; visibility: hidden; pointer-events: none; }
 .article-measure { width: 888px; min-height: 0; height: auto; }
 

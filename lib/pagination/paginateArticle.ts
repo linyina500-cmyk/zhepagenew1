@@ -1,133 +1,12 @@
 import { measureParts } from "./measureBlock";
 import { connectCalloutsInHtml } from "../beautify/connectCallouts";
 import { RICH_LAYOUT_CLASS, isRichLayoutGroup } from "../richText/normalizeRichHtml";
-import { TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE, articleBlocks, blockIsHeading, blockText, splitOversizedBlock, tableHeader } from "./splitDomBlock";
+import { articleBlocks, blockIsHeading, blockText } from "./articleBlocks";
+import { splitOversizedBlock } from "./splitDomBlock";
+import { assertPaginationSemantics } from "./semanticIntegrity";
 import type { PaginationResult } from "./paginationTypes";
 
 const FIT_TOLERANCE = 2;
-const INLINE_SEMANTIC_SELECTORS = ["strong", "b", "em", "i", "u", "s", "strike", "span[style]", "mark"];
-const BLOCK_TEXT_TAGS = new Set([
-  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "CAPTION", "COL", "COLGROUP", "DIV", "DL", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER",
-  "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "LI", "MAIN", "NAV", "OL", "P", "PRE",
-  "SECTION", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "UL",
-]);
-
-function semanticDocument(html: string) {
-  const parsed = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
-  parsed.querySelectorAll(".manual-page-break").forEach((element) => element.remove());
-  return parsed;
-}
-
-function normalizeSemanticText(value: string | null) {
-  return (value || "").replace(/\s+/g, " ").trim();
-}
-
-function nearestMeaningfulSibling(node: Node, direction: "previousSibling" | "nextSibling") {
-  let sibling = node[direction];
-  while (sibling?.nodeType === Node.TEXT_NODE && !sibling.textContent?.trim()) sibling = sibling[direction];
-  return sibling;
-}
-
-function semanticPlainText(parsed: Document) {
-  const clone = parsed.body.cloneNode(true) as HTMLElement;
-  const walker = parsed.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
-  const formattingWhitespace: Text[] = [];
-  let current = walker.nextNode();
-  while (current) {
-    const text = current as Text;
-    if (!text.data.trim()) {
-      const previous = nearestMeaningfulSibling(text, "previousSibling");
-      const next = nearestMeaningfulSibling(text, "nextSibling");
-      const bordersBlock = [previous, next].some((sibling) => (
-        sibling?.nodeType === Node.ELEMENT_NODE && BLOCK_TEXT_TAGS.has((sibling as Element).tagName)
-      ));
-      if (text.parentElement === clone || bordersBlock) formattingWhitespace.push(text);
-    }
-    current = walker.nextNode();
-  }
-  formattingWhitespace.forEach((text) => text.remove());
-  return normalizeSemanticText(clone.textContent);
-}
-
-function semanticAttributeKey(element: Element) {
-  const style = (element.getAttribute("style") || "")
-    .split(";")
-    .map((declaration) => declaration.trim())
-    .filter(Boolean)
-    .sort()
-    .join(";");
-  const className = [...element.classList].sort().join(" ");
-  return [
-    element.tagName.toLowerCase(),
-    className,
-    style,
-    element.getAttribute("data-color") || "",
-    element.getAttribute("data-highlight-style") || "",
-  ].join("|");
-}
-
-function semanticBuckets(parsed: Document, selector: string) {
-  const buckets = new Map<string, string>();
-  const walker = parsed.createTreeWalker(parsed.body, NodeFilter.SHOW_TEXT);
-  let textNode = walker.nextNode();
-  while (textNode) {
-    // Compare text runs in document order at each active style depth. Whole
-    // ancestor textContent duplicates nested spans and reorders that duplicate
-    // text across pages. Retain the nesting count: opacity/em sizes can stack.
-    const depths = new Map<string, number>();
-    let ancestor = textNode.parentElement;
-    while (ancestor) {
-      if (ancestor.matches(selector)) {
-        const key = semanticAttributeKey(ancestor);
-        depths.set(key, (depths.get(key) || 0) + 1);
-      }
-      ancestor = ancestor.parentElement;
-    }
-    for (const [style, depth] of depths) {
-      const key = JSON.stringify([style, depth]);
-      buckets.set(key, `${buckets.get(key) || ""}${textNode.textContent || ""}`);
-    }
-    textNode = walker.nextNode();
-  }
-  return JSON.stringify([...buckets.entries()]
-    .map(([key, value]) => [key, normalizeSemanticText(value)])
-    .sort(([left], [right]) => left.localeCompare(right)));
-}
-
-export function assertPaginationSemantics(sourceHtml: string, pages: string[]) {
-  const source = semanticDocument(sourceHtml);
-  const output = semanticDocument(pages.join(""));
-  const sourceTables = [...source.querySelectorAll("table")];
-  output.querySelectorAll(`[${TABLE_REPEAT_ATTRIBUTE}]`).forEach((element) => {
-    const table = element.parentElement;
-    const sourceIndex = table?.getAttribute(TABLE_SOURCE_ATTRIBUTE) || "";
-    const sourceTable = /^\d+$/.test(sourceIndex) ? sourceTables[Number(sourceIndex)] : undefined;
-    const original = sourceTable && (element.tagName === "THEAD"
-      ? tableHeader(sourceTable)
-      : element.tagName === "CAPTION" ? sourceTable.querySelector(":scope > caption") : null);
-    const clone = element.cloneNode(true) as Element;
-    clone.removeAttribute(TABLE_REPEAT_ATTRIBUTE);
-    // Only exact copies of this table's own header/caption may repeat. A
-    // marker on arbitrary content or on an altered header must still fail.
-    if (table?.tagName !== "TABLE" || !original || clone.outerHTML !== original.outerHTML) {
-      throw new Error("分页保真检查失败：续表表头或标题与原表不一致");
-    }
-    element.remove();
-  });
-  const sourceText = semanticPlainText(source);
-  if (!sourceText) return;
-  const outputText = semanticPlainText(output);
-  if (sourceText !== outputText) {
-    let differenceAt = 0;
-    while (differenceAt < sourceText.length && sourceText[differenceAt] === outputText[differenceAt]) differenceAt += 1;
-    throw new Error(`分页保真检查失败：正文在第 ${differenceAt + 1} 字附近异常（源文 ${sourceText.length} 字 / 分页 ${outputText.length} 字）`);
-  }
-  INLINE_SEMANTIC_SELECTORS.forEach((selector) => {
-    if (semanticBuckets(source, selector) !== semanticBuckets(output, selector)) {
-      throw new Error(`分页保真检查失败：${selector} 的颜色或强调样式未完整继承`);
-    }
-  });
-}
 
 export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight: number): PaginationResult {
   const pages: string[] = [];
@@ -235,8 +114,10 @@ export function paginateArticle(html: string, measure: HTMLDivElement, maxHeight
   }
 
   commit();
-  const normalizedPages = (pages.length ? pages : ["<p>暂无正文内容</p>"]).map(connectCalloutsInHtml);
+  const normalizedPages = pages.map(connectCalloutsInHtml);
   assertPaginationSemantics(html, normalizedPages);
+  // This is a UI empty state, added only after the content contract is checked.
+  if (!normalizedPages.length) normalizedPages.push("<p>暂无正文内容</p>");
   const usage = normalizedPages.map((page) => Math.min(1.5, heightOf([page]) / maxHeight));
   measure.innerHTML = "";
   return { pages: normalizedPages, usage };

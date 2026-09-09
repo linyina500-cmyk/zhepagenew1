@@ -41,6 +41,44 @@ test("article extraction keeps metadata, colored text and lazy-loaded article im
   assert.equal(image.hasAttribute("data-src"), false);
 });
 
+test("article image paths resolve against the final article URL, including redirects and lazy images", () => {
+  const source = '<article><p>文章配图。</p><img src="/images/cover.jpg"><img src="../charts/revenue.png"><img data-src="charts/profit.webp"></article>';
+  const result = extractArticle(source, true, "https://news.example.com/reports/2026/market.html");
+  const images = [...parse(result.html).querySelectorAll("img")];
+  assert.deepEqual(images.map((image) => new URL(image.getAttribute("src"), window.location.href).searchParams.get("url")), [
+    "https://news.example.com/images/cover.jpg",
+    "https://news.example.com/reports/charts/revenue.png",
+    "https://news.example.com/reports/2026/charts/profit.webp",
+  ]);
+});
+
+test("an article base URL is resolved before unsafe document elements are removed", () => {
+  const source = '<html><head><base href="../assets/"></head><body><article><p>图表。</p><img src="chart.png"></article></body></html>';
+  const result = extractArticle(source, true, "https://news.example.com/reports/article.html");
+  const article = parse(result.html);
+  const image = article.querySelector("img");
+  assert.equal(new URL(image.getAttribute("src"), window.location.href).searchParams.get("url"), "https://news.example.com/assets/chart.png");
+  assert.equal(article.querySelector("base"), null);
+});
+
+test("reimporting existing image proxies does not add another proxy layer", () => {
+  const original = "https://images.example.com/chart.png?width=900&format=png";
+  const proxy = `/api/image?url=${encodeURIComponent(original)}`;
+  for (const source of [proxy, new URL(proxy, window.location.href).href]) {
+    let html = `<p>已有正文。</p><img src="${source}">`;
+    for (let iteration = 0; iteration < 3; iteration += 1) {
+      html = extractRichTextFragment(html, true, false).html;
+      assert.equal(parse(html).querySelector("img").getAttribute("src"), proxy);
+    }
+  }
+});
+
+test("a different website's image endpoint remains an external image source", () => {
+  const original = "https://news.example.com/api/image?url=https%3A%2F%2Fcdn.example.com%2Fchart.png";
+  const result = extractArticle(`<article><p>外站图片。</p><img src="${original}"></article>`, true, "https://news.example.com/article");
+  assert.equal(parse(result.html).querySelector("img").getAttribute("src"), `/api/image?url=${encodeURIComponent(original)}`);
+});
+
 test("website payloads above 6 MiB are rejected before DOM parsing, including multibyte text", () => {
   const originalParser = globalThis.DOMParser;
   let parseAttempts = 0;

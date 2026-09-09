@@ -10,7 +10,9 @@ import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 test("preview updates retain the current page, clear failed results, and prevent outdated downloads", { timeout: 20_000 }, async (context) => {
   const dom = installDom();
   const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  const previousImage = Object.getOwnPropertyDescriptor(globalThis, "Image");
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  Object.defineProperty(globalThis, "Image", { configurable: true, value: dom.window.Image });
   const pagePath = fileURLToPath(new URL("../app/page.tsx", import.meta.url));
   const nativeRequire = createRequire(pagePath);
   const React = nativeRequire("react");
@@ -61,6 +63,12 @@ test("preview updates retain the current page, clear failed results, and prevent
     if (specifier === "./components/UnifiedColorPopover") return { __esModule: true, default: () => null };
     if (specifier === "./components/PosterCover") return loadDomModule("app/components/PosterCover.tsx");
     if (specifier === "./components/ZhepageEditor") return { __esModule: true, default: Editor };
+    if (specifier === "./hooks/usePosterExport") {
+      const hookPath = resolve(dirname(pagePath), "hooks/usePosterExport.ts");
+      return loadUiModule(hookPath, (dependency) => dependency.startsWith("../../lib/")
+        ? loadDomModule(`${resolve(dirname(hookPath), dependency)}.ts`)
+        : require(dependency));
+    }
     if (specifier === "../lib/pagination/paginateArticle") return {
       paginateArticle: (html) => {
         if (failPagination) throw new Error("分页保真检查失败：span[style] 的颜色或强调样式未完整继承");
@@ -78,12 +86,16 @@ test("preview updates retain the current page, clear failed results, and prevent
     if (specifier.startsWith("../lib/")) return loadDomModule(`${resolve(dirname(pagePath), specifier)}.ts`);
     return nativeRequire(specifier);
   };
-  const { outputText } = ts.transpileModule(readFileSync(pagePath, "utf8"), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
-    fileName: pagePath,
-  });
-  const loaded = { exports: {} };
-  new Function("require", "module", "exports", outputText)(require, loaded, loaded.exports);
+  function loadUiModule(filename, requireDependency = require) {
+    const { outputText } = ts.transpileModule(readFileSync(filename, "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
+      fileName: filename,
+    });
+    const loadedModule = { exports: {} };
+    new Function("require", "module", "exports", outputText)(requireDependency, loadedModule, loadedModule.exports);
+    return loadedModule.exports;
+  }
+  const loaded = { exports: loadUiModule(pagePath) };
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -177,9 +189,35 @@ test("preview updates retain the current page, clear failed results, and prevent
     await click(document.querySelector(".content-page .page-export"));
     await waitFor(() => downloads > 0, "a stable completed preview can still download");
     assert.equal(downloads, 1);
+
+    // The page must pass the response's redirected URL to article extraction;
+    // resolving against the editor's own URL would break relative image paths.
+    const importRequests = [];
+    context.mock.method(globalThis, "fetch", async (url, options) => {
+      importRequests.push({ url, options });
+      return {
+        ok: true,
+        json: async () => ({
+          html: '<article><h1>跳转后的文章</h1><p>来自重定向页面的正文。</p><img src="charts/cash.png"></article>',
+          finalUrl: "https://redirected.example.com/reports/article.html",
+        }),
+      };
+    });
+    await click(document.querySelector(".import-trigger"));
+    await click(document.querySelector(".import-modal-actions .primary"));
+    await waitFor(() => !document.querySelector(".import-modal"), "a successful URL import closes the dialog");
+    assert.equal(importRequests.length, 1);
+    assert.equal(importRequests[0].url, "/api/import");
+    const importedImage = new DOMParser().parseFromString(editorProps.html, "text/html").querySelector("img");
+    assert.ok(importedImage, "the imported image remains in the editor content");
+    assert.equal(new URL(importedImage.getAttribute("src"), window.location.href).searchParams.get("url"),
+      "https://redirected.example.com/reports/charts/cash.png");
+    await waitFor(() => !bulkExport().disabled, "the redirected article finishes pagination");
   } finally {
     await act(async () => { root.unmount(); });
     dom.window.close();
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    if (previousImage) Object.defineProperty(globalThis, "Image", previousImage);
+    else delete globalThis.Image;
   }
 });
