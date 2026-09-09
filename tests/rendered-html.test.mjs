@@ -118,7 +118,7 @@ test("keeps the requested production defaults", async () => {
   assert.match(page, /zhepage-guide-seen-v1/);
   assert.match(articleImporter, /function extractRichTextFragment/);
   assert.match(page, /首行标题会自动识别/);
-  assert.match(page, /applySource\(sourceEditorHtml, "fragment", true\)/);
+  assert.match(page, /applySource\(sourceEditorHtmlRef\.current, "fragment", true\)/);
   assert.match(page, /setNotice\(\{[\s\S]*?item === "url"[\s\S]*?item === "editor"/);
 
   assert.match(css, /--poster-paper:\s*#ffffff/);

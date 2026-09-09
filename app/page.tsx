@@ -284,6 +284,23 @@ export default function Home() {
   }, []);
   const [working, setWorking] = useState(false);
   const [sourceEditorHtml, setSourceEditorHtml] = useState(DEFAULT_HTML);
+  const sourceEditorHtmlRef = useRef(DEFAULT_HTML);
+  const [importImagesPending, setImportImagesPending] = useState(false);
+  const importImagesPendingRef = useRef(false);
+  const [mainImagesPending, setMainImagesPending] = useState(false);
+  const mainImagesPendingRef = useRef(false);
+  const handleSourceEditorChange = useCallback((html: string) => {
+    sourceEditorHtmlRef.current = html;
+    setSourceEditorHtml(html);
+  }, []);
+  const handleImportImagesPending = useCallback((pending: boolean) => {
+    importImagesPendingRef.current = pending;
+    setImportImagesPending(pending);
+  }, []);
+  const handleMainImagesPending = useCallback((pending: boolean) => {
+    mainImagesPendingRef.current = pending;
+    setMainImagesPending(pending);
+  }, []);
   const [leadCardInsertRequest, setLeadCardInsertRequest] = useState(0);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const importPendingRef = useRef<number | null>(null);
@@ -357,6 +374,10 @@ export default function Home() {
     currentArticleHtmlRef.current = articleHtml;
   }, [articleHtml]);
 
+  useLayoutEffect(() => {
+    sourceEditorHtmlRef.current = sourceEditorHtml;
+  }, [sourceEditorHtml]);
+
   const closeImportDialog = useCallback(() => {
     const request = importRequestRef.current;
     importRequestRef.current = null;
@@ -366,6 +387,8 @@ export default function Home() {
       setNotice({ tone: "neutral", text: "已取消导入，当前正文保持不变" });
     }
     setImportOpen(false);
+    importImagesPendingRef.current = false;
+    setImportImagesPending(false);
   }, [setNotice]);
 
   useEffect(() => () => {
@@ -605,6 +628,10 @@ export default function Home() {
   }
 
   function openImportDialog() {
+    if (mainImagesPendingRef.current) {
+      setNotice({ tone: "error", text: "正文图片仍在读取，请等待插入完成后再打开导入窗口" });
+      return;
+    }
     setEditorModuleReady(true);
     setHelpOpen(false);
     setImportOpen(true);
@@ -786,6 +813,10 @@ export default function Home() {
 
   async function generatePosters() {
     if (importRequestRef.current) return;
+    if (mode === "editor" && importImagesPendingRef.current) {
+      setNotice({ tone: "error", text: "图片仍在读取，请等待图片插入完成后再导入" });
+      return;
+    }
     if (mode === "url" && !url.trim()) {
       setNotice({ tone: "error", text: "请先输入文章链接" });
       return;
@@ -826,7 +857,7 @@ export default function Home() {
         if (!canApplyImport()) return;
         applySource(String(convertedHtml), "fragment", true);
       } else {
-        applySource(sourceEditorHtml, "fragment", true);
+        applySource(sourceEditorHtmlRef.current, "fragment", true);
       }
       setImportOpen(false);
     } catch (error) {
@@ -909,7 +940,7 @@ export default function Home() {
           <section className="control-section last">
             <div className="section-title-row">
               <span className="eyebrow">03 · 排版编辑</span>
-              <button className="import-trigger" type="button" onClick={openImportDialog}>＋ 一键导入</button>
+              <button className="import-trigger" type="button" onClick={openImportDialog} disabled={mainImagesPending}>{mainImagesPending ? "图片读取中…" : "＋ 一键导入"}</button>
             </div>
             {editorModuleReady ? <Suspense fallback={<EditorFallback />}><ZhepageEditor
               html={articleHtml}
@@ -922,8 +953,9 @@ export default function Home() {
               onChange={(nextHtml) => {
                 const cleaned = removeEmptyHeadings(nextHtml);
                 setArticleHtml(cleaned);
-                setSourceEditorHtml(cleaned);
+                handleSourceEditorChange(cleaned);
               }}
+              onImageReadPendingChange={handleMainImagesPending}
               onAutoTypeset={applyAutomaticTypeset}
               onNotice={(text, tone = "success") => setNotice({ tone, text })}
             /></Suspense> : <EditorFallback />}
@@ -1208,7 +1240,7 @@ export default function Home() {
           <p className="import-modal-tip">选择一种来源导入。导入完成后请回到“排版编辑”继续修改，当前正文会被替换。</p>
           <div className="segmented import-source-tabs" aria-label="内容输入方式">
             {(["url", "html", "editor", "markdown"] as InputMode[]).map((item) => (
-              <button key={item} className={mode === item ? "active" : ""} disabled={working} onClick={() => {
+              <button key={item} className={mode === item ? "active" : ""} disabled={working || importImagesPending} onClick={() => {
                 setMode(item);
                 if (item === "editor") setEditorModuleReady(true);
                 setNotice({
@@ -1233,7 +1265,8 @@ export default function Home() {
               revision={editorRevision}
               accentColor={accentColor}
               highlightColor={highlightColor}
-              onChange={setSourceEditorHtml}
+              onChange={handleSourceEditorChange}
+              onImageReadPendingChange={handleImportImagesPending}
               onNotice={(text, tone = "success") => setNotice({ tone, text })}
             /></Suspense> : <EditorFallback />}</div>}
             {mode === "markdown" && <div className="field-stack">
@@ -1250,7 +1283,7 @@ export default function Home() {
           </label>
           <div className="import-modal-actions">
             <button type="button" onClick={closeImportDialog}>取消</button>
-            <button className="primary" type="button" onClick={generatePosters} disabled={working}>{working ? "正在导入…" : "导入并替换正文 →"}</button>
+            <button className="primary" type="button" onClick={generatePosters} disabled={working || (mode === "editor" && importImagesPending)}>{working ? "正在导入…" : mode === "editor" && importImagesPending ? "图片读取中…" : "导入并替换正文 →"}</button>
           </div>
           <div className={`inline-notice ${notice.tone}`} role="status" aria-live="polite"><i />{notice.text}</div>
         </section>

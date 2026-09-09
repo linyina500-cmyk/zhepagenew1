@@ -1,4 +1,5 @@
 import { INLINE_RUN_CLASS, RICH_LAYOUT_CLASS, normalizeRichHtmlDocument, richTextHtmlLimitMessage, richTextLimitMessage } from "./normalizeRichHtml";
+import { meaningfulContentNode, VISUAL_CONTENT_SELECTOR } from "./contentNodes";
 
 const MAX_ARTICLE_DOCUMENT_BYTES = 6 * 1024 * 1024;
 
@@ -140,12 +141,20 @@ export function extractRichTextFragment(source: string, preserveStyles: boolean,
   if (!inferTitle) return { title: "", html: sanitized, inferredTitle: false };
 
   const parsed = new DOMParser().parseFromString(sanitized, "text/html");
-  const blocks = [...parsed.body.children].filter((element) => element.textContent?.trim() || element.querySelector("img,table"));
+  // Image-only imports are complete content, including an image inside a
+  // heading. They need a title without removing any part of that content.
+  if (!parsed.body.textContent?.trim() && parsed.body.querySelector("img")) {
+    return { title: "未命名文章", html: sanitized, inferredTitle: true };
+  }
+  const blocks = [...parsed.body.children].filter(meaningfulContentNode);
   const firstBlock = blocks[0] as HTMLElement | undefined;
   const firstText = firstBlock?.textContent?.replace(/\s+/g, " ").trim() || "";
   const remainingTextLength = blocks.slice(1).reduce((total, element) => total + (element.textContent?.trim().length || 0), 0);
-  const explicitHeading = firstBlock?.tagName === "H1";
-  const plainTextTitle = firstBlock?.tagName === "P"
+  // Moving a title into the poster title field must never also discard media.
+  // Mixed text/image blocks stay intact in the body, in their original order.
+  const textOnly = Boolean(firstText) && !firstBlock?.querySelector(VISUAL_CONTENT_SELECTOR);
+  const explicitHeading = textOnly && firstBlock?.tagName === "H1";
+  const plainTextTitle = textOnly && firstBlock?.tagName === "P"
     && Array.from(firstText).length >= 4
     && Array.from(firstText).length <= 72
     && blocks.length >= 3
