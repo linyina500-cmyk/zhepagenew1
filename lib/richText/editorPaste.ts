@@ -30,7 +30,7 @@ export function preparePastedHtml(html: string) {
   return normalized;
 }
 
-export function createPasteHandlers(onNotice: Notice): EditorProps {
+export function createPasteHandlers(onNotice: Notice, insertImages: typeof insertImageFiles = insertImageFiles): EditorProps {
   let prepared: { source: string; html: string } | null = null;
   let rejected = false;
   const report = (error: unknown) => {
@@ -60,7 +60,7 @@ export function createPasteHandlers(onNotice: Notice): EditorProps {
           // preserve the whole selection instead of also inserting file copies.
           if (!html && files.length) {
             event.preventDefault();
-            void insertImageFiles(view, files, onNotice);
+            void insertImages(view, files, onNotice);
             return true;
           }
           if (text.length > RICH_TEXT_LIMITS.textLength * 2 || Array.from(text).length > RICH_TEXT_LIMITS.textLength) throw new Error("正文超过 3 万字，请拆分文章后再导入");
@@ -80,7 +80,7 @@ export function createPasteHandlers(onNotice: Notice): EditorProps {
         if (!files.length) return false;
         event.preventDefault();
         const position = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
-        void insertImageFiles(view, files, onNotice, position);
+        void insertImages(view, files, onNotice, position);
         return true;
       },
     },

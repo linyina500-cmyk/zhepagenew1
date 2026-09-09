@@ -283,3 +283,122 @@ test("an uninterrupted rich-text import still reports successful pagination", { 
   assert.match(document.querySelector(".status-pill.success").textContent, /导入完成，正文已自动排成/);
   assert.equal(workspace.editor.state.doc.textContent, "正常导入正文。");
 });
+
+test("a real image-only rich-text import keeps image bytes and order in the editor and preview", { timeout: 15_000 }, async (context) => {
+  const workspace = await mountWorkspace(context, "<p>即将替换的旧正文。</p>");
+  const finishPagination = holdPaginationTimers(context, workspace.act);
+  const sources = [
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2fZkAAAAASUVORK5CYII=",
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVQIHWP4z8AAAAMBAQAY3Y2wAAAAAElFTkSuQmCC",
+  ];
+  await importRichDraft(workspace, sources.map((src, index) => `<img src="${src}" alt="截图 ${index + 1}" style="width:100%;height:auto;display:block">`).join(""));
+  const editorImages = [...workspace.editor.view.dom.querySelectorAll("img")];
+  assert.deepEqual(editorImages.map((image) => image.getAttribute("src")), sources);
+  assert.equal(workspace.editor.state.doc.textContent, "");
+  assert.equal(document.querySelector("#poster-title").value, "未命名文章");
+  await finishPagination();
+  assert.equal(workspace.bulkExport().disabled, false);
+  const previewImages = [...document.querySelectorAll(".content-page .article-flow img")];
+  assert.deepEqual(previewImages.map((image) => image.getAttribute("src")), sources);
+  assert.deepEqual(previewImages.map((image) => image.alt), ["截图 1", "截图 2"]);
+  assert.doesNotMatch(document.querySelector(".content-page .article-flow").textContent, /旧正文/);
+});
+
+test("pending clipboard image reads block rich-text import until the actual image reaches parent state", { timeout: 15_000 }, async (context) => {
+  const { editor, click, waitFor, act } = await mountWorkspace(context, "<p>必须保留的原有正文。</p>");
+  await click(document.querySelector(".import-trigger"));
+  await click([...document.querySelectorAll(".import-source-tabs button")].find((button) => button.textContent === "富文本"));
+  await waitFor(() => document.querySelector(".import-modal .tiptap-surface")?.editor, "the actual compact editor becomes ready");
+  const compactEditor = document.querySelector(".import-modal .tiptap-surface").editor;
+  compactEditor.view.setProps({ handleScrollToSelection: () => true });
+  await act(async () => {
+    compactEditor.commands.setContent("<h1>待读图标题</h1><p>新稿图前正文。</p><p>新稿图后正文。</p>");
+    compactEditor.commands.setTextSelection(compactEditor.state.doc.content.size - 1);
+  });
+
+  const source = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/tm0AAAAASUVORK5CYII=";
+  const file = new window.File([Buffer.from(source.split(",")[1], "base64")], "pending-clipboard.png", { type: "image/png" });
+  const readAsDataURL = window.FileReader.prototype.readAsDataURL;
+  let releaseRead;
+  context.mock.method(window.FileReader.prototype, "readAsDataURL", function (image) {
+    releaseRead = () => readAsDataURL.call(this, image);
+  });
+  const pasteEvent = new window.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(pasteEvent, "clipboardData", { value: {
+    getData: () => "", files: [file],
+    items: [{ kind: "file", type: file.type, getAsFile: () => file }], types: ["Files"],
+  } });
+  await act(async () => { compactEditor.view.dom.dispatchEvent(pasteEvent); });
+  assert.ok(releaseRead, "the raw clipboard image must use the actual asynchronous file insertion path");
+  assert.equal(compactEditor.view.dom.querySelectorAll("img").length, 0);
+  const importButton = () => document.querySelector(".import-modal-actions .primary");
+  assert.equal(importButton().disabled, true, "import must not consume the source before its pending image is inserted");
+  await click(importButton());
+  assert.ok(document.querySelector(".import-modal"), "clicking while the image is pending must keep the source editor mounted");
+  assert.equal(compactEditor.isDestroyed, false);
+  assert.equal(editor.getText(), "必须保留的原有正文。", "a pending read must not replace the current article");
+
+  await act(async () => { releaseRead(); });
+  await waitFor(() => compactEditor.view.dom.querySelectorAll("img").length === 1 && !importButton().disabled,
+    "the image transaction and parent onChange complete before import becomes available");
+  assert.equal(compactEditor.view.dom.querySelector("img").getAttribute("src"), source);
+  await click(importButton());
+  assert.equal(document.querySelector(".import-modal"), null);
+  assert.equal(editor.view.dom.querySelectorAll("img").length, 1);
+  assert.equal(editor.view.dom.querySelector("img").getAttribute("src"), source);
+  assert.equal(editor.view.dom.querySelector("img").alt, file.name);
+  assert.match(editor.getText(), /新稿图前正文/);
+  assert.match(editor.getText(), /新稿图后正文/);
+  assert.doesNotMatch(editor.getText(), /必须保留的原有正文/);
+});
+
+test("overlapping clipboard image reads keep rich-text import blocked until every batch settles", { timeout: 15_000 }, async (context) => {
+  const { editor, click, waitFor, act } = await mountWorkspace(context, "<p>原有正文。</p>");
+  await click(document.querySelector(".import-trigger"));
+  await click([...document.querySelectorAll(".import-source-tabs button")].find((button) => button.textContent === "富文本"));
+  await waitFor(() => document.querySelector(".import-modal .tiptap-surface")?.editor, "the actual compact editor becomes ready");
+  const compactEditor = document.querySelector(".import-modal .tiptap-surface").editor;
+  compactEditor.view.setProps({ handleScrollToSelection: () => true });
+  await act(async () => {
+    compactEditor.commands.setContent("<h1>重叠读取标题</h1><p>需要图片的新正文。</p>");
+    compactEditor.commands.setTextSelection(compactEditor.state.doc.content.size - 1);
+  });
+
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/tm0AAAAASUVORK5CYII=", "base64");
+  const reads = [];
+  const readAsDataURL = window.FileReader.prototype.readAsDataURL;
+  context.mock.method(window.FileReader.prototype, "readAsDataURL", function (file) {
+    reads.push(() => readAsDataURL.call(this, file));
+  });
+  const pasteFile = (name) => {
+    const file = new window.File([png], name, { type: "image/png" });
+    const event = new window.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: {
+      getData: () => "", files: [file],
+      items: [{ kind: "file", type: file.type, getAsFile: () => file }], types: ["Files"],
+    } });
+    compactEditor.view.dom.dispatchEvent(event);
+  };
+  await act(async () => { pasteFile("first.png"); pasteFile("second.png"); });
+  assert.equal(reads.length, 2);
+  const importButton = () => document.querySelector(".import-modal-actions .primary");
+  assert.equal(importButton().disabled, true);
+
+  await act(async () => { reads[0](); });
+  await waitFor(() => compactEditor.view.dom.querySelectorAll("img").length === 1, "the first read inserts its image");
+  assert.equal(importButton().disabled, true, "the first completed batch must not unlock import while another read is pending");
+  await click(importButton());
+  assert.ok(document.querySelector(".import-modal"));
+  assert.equal(editor.getText(), "原有正文。");
+
+  await act(async () => { reads[1](); });
+  await waitFor(() => !importButton().disabled, "the final pending batch settles and releases the import gate");
+  // The insertion path rejects a read whose original document was changed by
+  // another batch. That rejection must still release its pending-read count.
+  assert.match(document.querySelector(".import-modal .inline-notice").textContent, /图片读取期间正文已更新/);
+  assert.equal(compactEditor.view.dom.querySelectorAll("img").length, 1);
+  await click(importButton());
+  assert.equal(document.querySelector(".import-modal"), null);
+  assert.equal(editor.view.dom.querySelectorAll("img").length, 1);
+  assert.equal(editor.view.dom.querySelector("img").alt, "first.png");
+});

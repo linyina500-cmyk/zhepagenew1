@@ -21,6 +21,7 @@ type ZhepageEditorProps = {
   highlightColor: string;
   onChange: (html: string) => void;
   onNotice: (text: string, tone?: "success" | "error") => void;
+  onImageReadPendingChange?: (pending: boolean) => void;
   onAutoTypeset?: (html: string, numberedDotStyle: boolean) => void;
   numberedDotStyle?: boolean;
   onNumberedDotStyleChange?: (enabled: boolean) => void;
@@ -198,12 +199,35 @@ function BlankLineControl({ onInsert }: { onInsert: (position: "before" | "after
   </div>;
 }
 
-export default function ZhepageEditor({ html, revision, accentColor, highlightColor, onChange, onNotice, onAutoTypeset, numberedDotStyle = true, onNumberedDotStyleChange, compact = false, insertLeadCardRequest = 0 }: ZhepageEditorProps) {
+export default function ZhepageEditor({ html, revision, accentColor, highlightColor, onChange, onNotice, onImageReadPendingChange, onAutoTypeset, numberedDotStyle = true, onNumberedDotStyleChange, compact = false, insertLeadCardRequest = 0 }: ZhepageEditorProps) {
   const imageCaptionRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const applyingExternalContent = useRef(false);
   const lastRevision = useRef(revision);
   const selectedImagePosition = useRef(-1);
+  const pendingImageReads = useRef(0);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      pendingImageReads.current = 0;
+      onImageReadPendingChange?.(false);
+    };
+  }, [onImageReadPendingChange]);
+
+  async function insertEditorImages(...args: Parameters<typeof insertImageFiles>) {
+    pendingImageReads.current += 1;
+    onImageReadPendingChange?.(true);
+    try { return await insertImageFiles(...args); }
+    finally {
+      pendingImageReads.current = Math.max(0, pendingImageReads.current - 1);
+      // insertImageFiles dispatches its transaction and onUpdate synchronously
+      // before it resolves. The parent sees the new HTML before this unlocks.
+      if (mounted.current) onImageReadPendingChange?.(pendingImageReads.current > 0);
+    }
+  }
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -223,7 +247,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     content: html,
     editorProps: {
       attributes: { class: "tiptap-surface", spellcheck: "false" },
-      ...createPasteHandlers(onNotice),
+      ...createPasteHandlers(onNotice, insertEditorImages),
     },
     onUpdate: ({ editor: currentEditor }) => {
       if (applyingExternalContent.current) return;
@@ -387,7 +411,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
   function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
-    if (editor && files.length) void insertImageFiles(editor.view, files, onNotice);
+    if (editor && files.length) void insertEditorImages(editor.view, files, onNotice);
   }
 
   function saveImageCaption() {

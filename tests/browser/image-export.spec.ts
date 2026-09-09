@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test, type Download, type Page, type TestInfo } from "@playwright/test";
 import JSZip from "jszip";
 import { makePng, shortArticleHtml, shortBody, shortTitle } from "./fixtures";
-import { expectPreviewImage, expectPreviewReady, importRichArticle, mainEditor, mainEditorPanel, openWorkbench, pasteImage, uploadImage } from "./helpers";
+import { expectPreviewImage, expectPreviewReady, importRichArticle, mainEditor, mainEditorPanel, openRichTextImport, openWorkbench, pasteImage, uploadImage } from "./helpers";
 
 type Marker = { pageNumber: number; x: number; y: number; red: number; green: number; blue: number };
 const FIRST_COLOR = [17, 193, 137] as const;
@@ -35,6 +35,7 @@ async function largeClipboardPng(page: Page, color: readonly [number, number, nu
 async function downloadOrExportError(page: Page, trigger: () => Promise<unknown>, timeout: number): Promise<Download> {
   const diagnostics = exportDiagnostics.get(page);
   if (diagnostics) diagnostics.active = true;
+  await page.evaluate(() => { (window as Window & { __exportImageCaptureActive?: boolean }).__exportImageCaptureActive = true; });
   const result = Promise.race([
     page.waitForEvent("download", { timeout }),
     page.locator(".status-pill.error").waitFor({ state: "visible", timeout }).then(async () => {
@@ -104,6 +105,36 @@ async function downloadImagePage(page: Page, marker: Marker, testInfo: TestInfo,
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    type DecodeError = { prefix: string; length: number; mime: string; parserError: string; svg?: string };
+    const state = window as Window & { __exportImageCaptureActive?: boolean; __exportImageErrors?: DecodeError[] };
+    state.__exportImageErrors = [];
+    window.Image = new Proxy(window.Image, {
+      construct(target, args) {
+        const image = Reflect.construct(target, args) as HTMLImageElement;
+        image.addEventListener("error", () => {
+          if (!state.__exportImageCaptureActive || state.__exportImageErrors!.length >= 8) return;
+          const source = image.currentSrc || image.src;
+          const entry: DecodeError = { prefix: source.slice(0, 50), length: source.length, mime: /^data:([^;,]+)/.exec(source)?.[1] || "url", parserError: "" };
+          if (entry.mime === "image/svg+xml") {
+            try {
+              const comma = source.indexOf(",");
+              const svg = source.slice(0, comma).includes(";base64")
+                ? new TextDecoder().decode(Uint8Array.from(atob(source.slice(comma + 1)), (character) => character.charCodeAt(0)))
+                : decodeURIComponent(source.slice(comma + 1));
+              const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
+              entry.parserError = parsed.querySelector("parsererror")?.textContent?.slice(0, 1200) || "No XML parser error";
+              // These tests use synthetic fixtures only. Retain one failing
+              // SVG as an artifact, never dump its embedded base64 to console.
+              if (!state.__exportImageErrors!.some((error) => error.svg)) entry.svg = svg;
+            } catch (error) { entry.parserError = String(error).slice(0, 1200); }
+          }
+          state.__exportImageErrors!.push(entry);
+        });
+        return image;
+      },
+    });
+  });
   const diagnostics = { active: false, messages: [] as string[] };
   exportDiagnostics.set(page, diagnostics);
   page.on("console", (message) => {
@@ -119,6 +150,13 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterEach(async ({ page }, testInfo) => {
+  const imageErrors = await page.evaluate(() => (window as Window & { __exportImageErrors?: { prefix: string; length: number; mime: string; parserError: string; svg?: string }[] }).__exportImageErrors || []).catch(() => []);
+  if (imageErrors.length) {
+    for (const [index, error] of imageErrors.entries()) {
+      if (error.svg) await testInfo.attach(`image-decode-failure-${index + 1}`, { body: error.svg, contentType: "image/svg+xml" });
+    }
+    await testInfo.attach("image-decode-errors", { body: JSON.stringify(imageErrors.map(({ prefix, length, mime, parserError }) => ({ prefix, length, mime, parserError })), null, 2), contentType: "application/json" });
+  }
   const diagnostics = exportDiagnostics.get(page);
   if (diagnostics?.messages.length) await testInfo.attach("image-export-console", { body: diagnostics.messages.join("\n\n"), contentType: "text/plain" });
   if (testInfo.status !== testInfo.expectedStatus) {
@@ -151,6 +189,27 @@ test("pasting a PNG into the real editor preserves its pixels in a single-page d
   await expectPreviewImage(page, pngSource(png));
   const marker = await locateMarker(page, pngSource(png), SECOND_COLOR);
   await downloadImagePage(page, marker, testInfo, "pasted-image-page.png");
+});
+
+test("an image-only one-click import retains the pasted PNG and downloads its image page", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  const { dialog, editor } = await openRichTextImport(page);
+  await editor.click();
+  await editor.press("ControlOrMeta+A");
+  await editor.press("Backspace");
+  const png = makePng(...FIRST_COLOR);
+  await pasteImage(editor, png, "image-only-import.png");
+  await expect(editor.locator("img")).toHaveCount(1);
+  await expect(editor.locator("img")).toHaveAttribute("src", pngSource(png));
+  await expect.poll(async () => (await editor.textContent() || "").trim()).toBe("");
+  await dialog.getByRole("button", { name: "导入并替换正文 →", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(mainEditor(page).locator("img")).toHaveCount(1);
+  await expect(mainEditor(page).locator("img")).toHaveAttribute("src", pngSource(png));
+  await expect(page.getByLabel("醒目标题", { exact: true })).toHaveValue("未命名文章");
+  await expectPreviewImage(page, pngSource(png));
+  const marker = await locateMarker(page, pngSource(png), FIRST_COLOR);
+  await downloadImagePage(page, marker, testInfo, "image-only-import-page.png");
 });
 
 test("the batch ZIP opens with all pages and both inserted images intact", async ({ page }, testInfo) => {
@@ -210,4 +269,37 @@ test("an external article image uses the image proxy and remains in the download
   expect(proxyRequests).toBeGreaterThan(0);
   const marker = await locateMarker(page, source, FIRST_COLOR);
   await downloadImagePage(page, marker, testInfo, "proxied-image-page.png");
+});
+
+test("clipboard image metadata that is valid HTML cannot break SVG-based PNG export", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  await importRichArticle(page, shortArticleHtml, shortTitle + shortBody);
+  const png = makePng(...FIRST_COLOR);
+  await pasteImage(mainEditor(page), png, "剪贴板\u000b图片.png");
+  await expectPreviewImage(page, pngSource(png));
+  const originalAlt = await mainEditor(page).locator("img").getAttribute("alt");
+  expect(originalAlt).toContain("\u000b");
+  const marker = await locateMarker(page, pngSource(png), FIRST_COLOR);
+  await downloadImagePage(page, marker, testInfo, "clipboard-metadata-image.png");
+  await expect(mainEditor(page).locator("img")).toHaveAttribute("alt", originalAlt!);
+});
+
+test("an already decoded preview image exports even if a subsequent proxy request fails", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  const png = makePng(...SECOND_COLOR);
+  const remote = "https://images.example.com/preview-only-image.png";
+  const proxy = `/api/image?url=${encodeURIComponent(remote)}`;
+  let unavailable = false;
+  let requestsAfterPreview = 0;
+  await page.route("**/api/image?**", async (route) => {
+    if (unavailable) { requestsAfterPreview++; await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "simulated upstream failure after preview" }) }); }
+    else await route.fulfill({ status: 200, contentType: "image/png", body: png });
+  });
+  await importRichArticle(page, `${shortArticleHtml}<p><img src="${remote}" alt="已加载图片"></p>`, shortTitle + shortBody);
+  const source = new URL(proxy, page.url()).href;
+  await expectPreviewImage(page, source);
+  const marker = await locateMarker(page, source, SECOND_COLOR);
+  unavailable = true;
+  await downloadImagePage(page, marker, testInfo, "image-with-unavailable-proxy.png");
+  expect(requestsAfterPreview).toBe(0);
 });
