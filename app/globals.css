@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./components/DraftSyncDialog.css";
 
 /*
  * The poster fonts are shipped with the site instead of relying on whatever

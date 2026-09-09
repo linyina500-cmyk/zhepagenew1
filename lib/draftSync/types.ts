@@ -1,0 +1,24 @@
+export type DraftPlatform = "xiaohongshu" | "wechat";
+export type DraftContent = { title: string; body: string };
+export type DraftImage = { id: string; name: string; blob: Blob; width: number; height: number };
+export type DraftAccount = { id: string; platform: DraftPlatform; displayName: string; remoteId: string; ready: boolean; syncBlocked?: boolean };
+export type SyncReceipt = {
+  accountId: string;
+  platform: DraftPlatform;
+  status: "saved" | "needs_confirmation" | "failed";
+  message: string;
+  draftId?: string;
+  url?: string;
+};
+export type LocalDraft = {
+  schemaVersion: 1;
+  id: string;
+  updatedAt: string;
+  sourceFormat: string;
+  images: DraftImage[];
+  content: Record<DraftPlatform, DraftContent>;
+  selectedAccountIds: string[];
+  receipts: SyncReceipt[];
+};
+export type ImageMetadata = { id?: string; name: string; width: number; height: number; size: number; mime: string };
+export type DraftIssue = { severity: "error" | "warning"; code: string; message: string; imageId?: string };
