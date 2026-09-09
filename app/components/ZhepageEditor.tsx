@@ -203,7 +203,6 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
   const imageInputRef = useRef<HTMLInputElement>(null);
   const applyingExternalContent = useRef(false);
   const lastRevision = useRef(revision);
-  const updateTimer = useRef<number | null>(null);
   const selectedImagePosition = useRef(-1);
 
   const editor = useEditor({
@@ -228,13 +227,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     },
     onUpdate: ({ editor: currentEditor }) => {
       if (applyingExternalContent.current) return;
-      if (compact) {
-        onChange(currentEditor.getHTML());
-        return;
-      }
-      if (updateTimer.current) window.clearTimeout(updateTimer.current);
-      const delay = currentEditor.state.doc.content.size > 60_000 ? 320 : 180;
-      updateTimer.current = window.setTimeout(() => onChange(currentEditor.getHTML()), delay);
+      onChange(currentEditor.getHTML());
     },
   });
 
@@ -274,21 +267,16 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     };
     rememberImageSelection();
     editor.on("selectionUpdate", rememberImageSelection);
-    return () => editor.off("selectionUpdate", rememberImageSelection);
+    return () => { editor.off("selectionUpdate", rememberImageSelection); };
   }, [editor]);
 
   useEffect(() => {
     if (!editor || revision === lastRevision.current) return;
     lastRevision.current = revision;
-    if (updateTimer.current) window.clearTimeout(updateTimer.current);
     applyingExternalContent.current = true;
     editor.chain().setMeta("richTextExternalContent", true).setContent(html, { emitUpdate: false }).run();
     applyingExternalContent.current = false;
   }, [editor, html, revision]);
-
-  useEffect(() => () => {
-    if (updateTimer.current) window.clearTimeout(updateTimer.current);
-  }, []);
 
   useEffect(() => {
     if (!editor || !insertLeadCardRequest) return;
@@ -297,7 +285,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, insertLeadCardRequest]);
 
-  if (!editor) return <div className="layout-editor editor-loading">正在加载专业编辑器…</div>;
+  if (!editor || !editorState) return <div className="layout-editor editor-loading">正在加载专业编辑器…</div>;
 
   function insertGenericBlock(className: string, label: string) {
     editor!.chain().focus().insertContent([

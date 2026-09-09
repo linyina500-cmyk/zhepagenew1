@@ -3,9 +3,9 @@ import { INLINE_RUN_CLASS, RICH_LAYOUT_CLASS, normalizeRichHtmlDocument, richTex
 const MAX_ARTICLE_DOCUMENT_BYTES = 6 * 1024 * 1024;
 
 const SAFE_ELEMENTS = "script,style,link,meta,base,iframe,object,embed,form,input,button,textarea,select,video,audio,canvas,svg";
-function safeUrl(raw: string) {
+function safeUrl(raw: string, baseUrl = window.location.href) {
   try {
-    const url = new URL(raw, window.location.href);
+    const url = new URL(raw, baseUrl);
     if (!["http:", "https:"].includes(url.protocol)) return "";
     return url.href;
   } catch {
@@ -13,9 +13,18 @@ function safeUrl(raw: string) {
   }
 }
 
-function safeImageUrl(raw: string) {
+function safeImageUrl(raw: string, baseUrl: string) {
   if (/^data:image\/(?:png|jpe?g|webp);base64,/i.test(raw)) return raw;
-  return safeUrl(raw);
+  const resolved = safeUrl(raw, baseUrl);
+  if (!resolved) return "";
+  const url = new URL(resolved);
+  // The rich-text dialog can receive images that were already imported by
+  // this app. Preserve its own proxy URL instead of proxying the proxy again.
+  if (url.origin === window.location.origin && url.pathname === "/api/image" && url.searchParams.has("url")) {
+    return `${url.pathname}${url.search}`;
+  }
+  const source = safeUrl(raw.replace(/^http:\/\//i, "https://"), baseUrl);
+  return `/api/image?url=${encodeURIComponent(source)}`;
 }
 
 function scaleInlineTypography(style: string) {
@@ -36,7 +45,7 @@ function scaleInlineTypography(style: string) {
   });
 }
 
-function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
+function sanitizeHtml(rawHtml: string, preserveStyles: boolean, baseUrl = window.location.href) {
   const sourceLimit = richTextHtmlLimitMessage(rawHtml);
   if (sourceLimit) throw new Error(sourceLimit);
   const documentNode = new DOMParser().parseFromString(rawHtml, "text/html");
@@ -75,9 +84,8 @@ function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
     }
 
     if (element instanceof HTMLImageElement) {
-      const resolved = safeImageUrl(lazyImageSource.replace(/^http:\/\//i, "https://"));
-      if (resolved.startsWith("data:image/")) element.src = resolved;
-      else if (resolved) element.src = `/api/image?url=${encodeURIComponent(resolved)}`;
+      const resolved = safeImageUrl(lazyImageSource, baseUrl);
+      if (resolved) element.src = resolved;
       else element.remove();
       element.removeAttribute("srcset");
       element.removeAttribute("width");
@@ -94,7 +102,7 @@ function sanitizeHtml(rawHtml: string, preserveStyles: boolean) {
   return documentNode.body.innerHTML.trim();
 }
 
-export function extractArticle(source: string, preserveStyles: boolean) {
+export function extractArticle(source: string, preserveStyles: boolean, sourceUrl = window.location.href) {
   // The import endpoint allows a 6 MiB web document. WeChat's scripts alone
   // can exceed the editor's HTML limit, so bound the document separately and
   // apply the rich-text limits only to the extracted article body.
@@ -102,6 +110,8 @@ export function extractArticle(source: string, preserveStyles: boolean) {
     throw new Error("网页源码超过 6 MiB，请粘贴文章正文后导入");
   }
   const parsed = new DOMParser().parseFromString(source, "text/html");
+  const articleUrl = safeUrl(sourceUrl) || window.location.href;
+  const baseUrl = safeUrl(parsed.querySelector("base[href]")?.getAttribute("href") || articleUrl, articleUrl) || articleUrl;
   const title =
     parsed.querySelector('meta[property="og:title"]')?.getAttribute("content") ||
     parsed.querySelector("h1")?.textContent?.trim() ||
@@ -121,7 +131,7 @@ export function extractArticle(source: string, preserveStyles: boolean) {
   return {
     title: title.replace(/\s+/g, " ").trim(),
     subtitle: subtitle.replace(/\s+/g, " ").trim().slice(0, 100),
-    html: sanitizeHtml(article.innerHTML, preserveStyles),
+    html: sanitizeHtml(article.innerHTML, preserveStyles, baseUrl),
   };
 }
 
@@ -150,4 +160,3 @@ export function extractRichTextFragment(source: string, preserveStyles: boolean,
     inferredTitle: true,
   };
 }
-

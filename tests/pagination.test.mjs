@@ -3,8 +3,11 @@ import test from "node:test";
 import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const dom = installDom();
-const { paginateArticle, assertPaginationSemantics } = await loadDomModule("lib/pagination/paginateArticle.ts");
-const { articleBlocks, splitOversizedBlock, TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE } = await loadDomModule("lib/pagination/splitDomBlock.ts");
+const { paginateArticle } = await loadDomModule("lib/pagination/paginateArticle.ts");
+const { assertPaginationSemantics } = await loadDomModule("lib/pagination/semanticIntegrity.ts");
+const { articleBlocks } = await loadDomModule("lib/pagination/articleBlocks.ts");
+const { splitOversizedBlock } = await loadDomModule("lib/pagination/splitDomBlock.ts");
+const { TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE } = await loadDomModule("lib/pagination/splitTable.ts");
 const { connectAdjacentCallouts, connectCalloutsInHtml } = await loadDomModule("lib/beautify/connectCallouts.ts");
 
 test.after(() => dom.window.close());

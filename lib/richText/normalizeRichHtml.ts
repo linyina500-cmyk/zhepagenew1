@@ -1,3 +1,5 @@
+import { meaningfulContentNode as meaningfulNode } from "./contentNodes";
+
 export const RICH_LAYOUT_CLASS = "imported-composite-visual";
 export const INLINE_RUN_CLASS = "imported-inline-run";
 
@@ -54,13 +56,6 @@ const BLOCK_TAGS = new Set([
   "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "HR", "IMG", "LI", "MAIN", "NAV", "OL", "P",
   "PRE", "SECTION", "TABLE", "UL",
 ]);
-
-function meaningfulNode(node: Node) {
-  if (node.nodeType === Node.TEXT_NODE) return Boolean(node.textContent?.trim());
-  if (node.nodeType !== Node.ELEMENT_NODE) return false;
-  const element = node as Element;
-  return Boolean(element.textContent?.trim()) || element.matches("img,table,hr") || Boolean(element.querySelector("img,table,hr"));
-}
 
 function styleValue(style: string, property: string) {
   const match = style.match(new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`, "i"));

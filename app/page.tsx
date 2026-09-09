@@ -3,6 +3,8 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import UnifiedColorPopover from "./components/UnifiedColorPopover";
 import PosterCover from "./components/PosterCover";
+import { usePosterExport, type ExportVersion } from "./hooks/usePosterExport";
+import { withTimeout } from "../lib/async/withTimeout";
 import { beautifyArticle } from "../lib/beautify/beautifyArticle";
 import { layoutClassName } from "../lib/layouts/layoutClasses";
 import { LAYOUT_PRESETS, LAYOUT_STYLE_KEYS } from "../lib/layouts/layoutPresets";
@@ -23,7 +25,6 @@ type ThemeKey = "paper" | "whiteRed" | "butter" | "mistBlue"
   | "verdigris" | "gooseBlue" | "terracotta" | "deepSeaBlue" | "camelliaRed";
 type Notice = { tone: "neutral" | "success" | "error"; text: string };
 type PaginationState = { inputKey: string; version: number; status: "pending" | "ready" | "error"; error: string };
-type ExportVersion = { inputKey: string; paginationVersion: number };
 type CustomThemePreset = {
   id: string;
   name: string;
@@ -183,22 +184,6 @@ async function waitForPosterFonts(fonts: FontKey[]) {
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
-  return new Promise<T>((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise.then(
-      (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        window.clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
 function createLeadCardHtml(publicationName: string, guide: string, qrDataUrl: string) {
   const qrMarkup = qrDataUrl
     ? `<img class="lead-card-qr" src="${escapeHtml(qrDataUrl)}" alt="刊物领取二维码">`
@@ -240,47 +225,8 @@ function removeEmptyHeadings(html: string) {
   return parsed.body.innerHTML;
 }
 
-function downloadDataUrl(dataUrl: string, filename: string) {
-  const anchor = document.createElement("a");
-  anchor.download = filename;
-  anchor.href = dataUrl;
-  anchor.click();
-}
-
 function EditorFallback() {
   return <div className="layout-editor editor-loading">正在加载专业编辑器…</div>;
-}
-
-function formatExportLabel(formatKey: FormatKey) {
-  if (formatKey === "xiaohongshu") return "小红书";
-  if (formatKey === "portrait") return "公众号";
-  return "竖屏";
-}
-
-function formatExportTitle(title: string) {
-  const safeTitle = title
-    .normalize("NFKC")
-    .replace(/\s+/g, "")
-    .replace(/[\\/:*?"<>|]/g, "");
-  return Array.from(safeTitle).slice(0, 8).join("") || "未命名";
-}
-
-function assertExportSemantics(node: HTMLElement, expectedHtml: string) {
-  const expected = new DOMParser().parseFromString(expectedHtml, "text/html").body;
-  const preview = node.querySelector<HTMLElement>(".article-flow");
-  const clone = (node.cloneNode(true) as HTMLElement).querySelector<HTMLElement>(".article-flow");
-  if (!preview || !clone) throw new Error("导出正文节点缺失，请刷新页面后重试");
-  const selectors = ["h1", "h2", "h3", "strong", "b", "em", "i", "u", "s", "strike", "span[style]", "mark", "blockquote", "ul", "ol", "img", "table"];
-  for (const selector of selectors) {
-    const expectedCount = expected.querySelectorAll(selector).length;
-    if (preview.querySelectorAll(selector).length !== expectedCount || clone.querySelectorAll(selector).length !== expectedCount) {
-      throw new Error(`导出前检查失败：${selector} 格式节点未完整保留`);
-    }
-  }
-  const normalizeText = (value: string | null) => (value || "").replace(/\s+/g, "");
-  if (normalizeText(preview.textContent) !== normalizeText(expected.textContent) || normalizeText(clone.textContent) !== normalizeText(expected.textContent)) {
-    throw new Error("导出前检查失败：分页正文存在缺字或重复");
-  }
 }
 
 export default function Home() {
@@ -331,11 +277,12 @@ export default function Home() {
   const [previewZoom, setPreviewZoom] = useState<PreviewZoom>("fit");
   const [notice, setNotice] = useState<Notice>({ tone: "neutral", text: "示例内容已排版，可直接预览导出" });
   const [working, setWorking] = useState(false);
-  const [exporting, setExporting] = useState(false);
   const [sourceEditorHtml, setSourceEditorHtml] = useState(DEFAULT_HTML);
   const [leadCardInsertRequest, setLeadCardInsertRequest] = useState(0);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const importPendingRef = useRef(false);
+  const importRequestRef = useRef<AbortController | null>(null);
+  const currentArticleHtmlRef = useRef(articleHtml);
   const paginationOptimizationRef = useRef<{ pageCount: number; usage: number[] } | null>(null);
   const [editorRevision, setEditorRevision] = useState(0);
   const [showAllPreviewPages, setShowAllPreviewPages] = useState(false);
@@ -348,9 +295,6 @@ export default function Home() {
   const paginationVersionRef = useRef(0);
   const paginationFailedRef = useRef(false);
   const exportVersionRef = useRef<ExportVersion | null>(null);
-  const htmlToImageModuleRef = useRef<Promise<typeof import("html-to-image")> | null>(null);
-  const jsZipModuleRef = useRef<Promise<typeof import("jszip")> | null>(null);
-  const fontEmbedCssRef = useRef<{ key: string; promise: Promise<string> } | null>(null);
   const format = FORMATS[formatKey];
   const layoutPreset = LAYOUT_PRESETS[layoutStyle];
   const layoutClass = layoutClassName(layoutStyle);
@@ -387,6 +331,12 @@ export default function Home() {
   const exportInputKey = useMemo(() => JSON.stringify([
     paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor,
   ]), [paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor]);
+  const { exporting, exportOne, exportAll } = usePosterExport({
+    exportVersionRef, pageRefs, contentPages, pageOffset, totalPages,
+    format, formatKey, title, paperColor, fontKey: `${titleFont}:${bodyFont}`,
+    waitForFonts: () => waitForPosterFonts([titleFont, bodyFont]),
+    setShowAllPreviewPages, onNotice: setNotice,
+  });
   const leadCardCount = (articleHtml.match(/lead-card-placeholder/g) || []).length;
   const selectedCustomTheme = customThemePresets.find((preset) => themeKey === null
     && paperColor === preset.paperColor
@@ -394,6 +344,26 @@ export default function Home() {
     && textColor === preset.textColor
     && highlightColor === preset.highlightColor);
   const activeThemeName = themeKey ? THEMES[themeKey].name : selectedCustomTheme?.name || "自定义配色";
+
+  useLayoutEffect(() => {
+    currentArticleHtmlRef.current = articleHtml;
+  }, [articleHtml]);
+
+  const closeImportDialog = useCallback(() => {
+    const request = importRequestRef.current;
+    importRequestRef.current = null;
+    if (request) {
+      request.abort();
+      setWorking(false);
+      setNotice({ tone: "neutral", text: "已取消导入，当前正文保持不变" });
+    }
+    setImportOpen(false);
+  }, []);
+
+  useEffect(() => () => {
+    importRequestRef.current?.abort();
+    importRequestRef.current = null;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -413,10 +383,6 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [titleFont, bodyFont]);
-
-  useEffect(() => {
-    fontEmbedCssRef.current = null;
   }, [titleFont, bodyFont]);
 
   useLayoutEffect(() => {
@@ -588,13 +554,13 @@ export default function Home() {
   useEffect(() => {
     if (!importOpen && !helpOpen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || working) return;
-      setImportOpen(false);
+      if (event.key !== "Escape") return;
+      closeImportDialog();
       setHelpOpen(false);
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [helpOpen, importOpen, working]);
+  }, [helpOpen, importOpen, closeImportDialog]);
 
   useEffect(() => {
     if (!workspaceReady) return;
@@ -623,9 +589,9 @@ export default function Home() {
     window.requestAnimationFrame(() => document.querySelector(".section-title-row")?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
-  const applySource = useCallback((source: string, sourceKind: "document" | "fragment", inferTitle = false) => {
+  const applySource = useCallback((source: string, sourceKind: "document" | "fragment", inferTitle = false, sourceUrl?: string) => {
     const result = sourceKind === "document"
-      ? { ...extractArticle(source, preserveStyles), inferredTitle: true }
+      ? { ...extractArticle(source, preserveStyles, sourceUrl), inferredTitle: true }
       : extractRichTextFragment(source, preserveStyles, inferTitle);
     if (!result.html.replace(/<[^>]+>/g, "").trim() && !result.html.includes("<img")) throw new Error("没有识别到可排版的正文内容");
     if (sourceKind === "document" || result.inferredTitle) {
@@ -797,6 +763,7 @@ export default function Home() {
   }
 
   async function generatePosters() {
+    if (importRequestRef.current) return;
     if (mode === "url" && !url.trim()) {
       setNotice({ tone: "error", text: "请先输入文章链接" });
       return;
@@ -804,6 +771,14 @@ export default function Home() {
     setWorking(true);
     setNotice({ tone: "neutral", text: "正在读取并整理内容…" });
     const controller = new AbortController();
+    importRequestRef.current = controller;
+    const originalArticleHtml = articleHtml;
+    const canApplyImport = () => {
+      if (importRequestRef.current !== controller) return false;
+      if (controller.signal.aborted) throw new DOMException("Import timed out", "AbortError");
+      if (currentArticleHtmlRef.current !== originalArticleHtml) throw new Error("正文已更新，已停止本次导入，请确认当前内容后重新导入");
+      return true;
+    };
     const timeout = window.setTimeout(() => controller.abort(), 45000);
     try {
       if (mode === "url") {
@@ -813,158 +788,39 @@ export default function Home() {
           body: JSON.stringify({ url }),
           signal: controller.signal,
         });
-        const payload = await response.json().catch(() => ({})) as { html?: string; error?: string };
+        const payload = await response.json().catch(() => ({})) as { html?: string; error?: string; finalUrl?: string };
+        if (!canApplyImport()) return;
         if (!response.ok || !payload.html) throw new Error(payload.error || "文章读取失败");
-        applySource(payload.html, "document");
+        applySource(payload.html, "document", false, payload.finalUrl || url);
       } else if (mode === "html") {
         const isDocument = rawHtml.includes("<html") || rawHtml.includes("<head");
         applySource(rawHtml, isDocument ? "document" : "fragment", !isDocument);
       } else if (mode === "markdown") {
         if (!markdownInput.trim()) throw new Error("请先粘贴 Markdown 内容");
         const { marked } = await withTimeout(import("marked"), 20000, "Markdown 转换组件加载超时，请刷新后重试");
+        if (!canApplyImport()) return;
         const markdownWithHighlights = markdownInput.replace(/==([^=\n]+)==/g, '<mark data-highlight-style="marker">$1</mark>');
         const convertedHtml = await marked.parse(markdownWithHighlights, { gfm: true, breaks: true });
+        if (!canApplyImport()) return;
         applySource(String(convertedHtml), "fragment", true);
       } else {
         applySource(sourceEditorHtml, "fragment", true);
       }
       setImportOpen(false);
     } catch (error) {
+      if (importRequestRef.current !== controller) return;
       const message = error instanceof DOMException && error.name === "AbortError"
         ? "读取超时，请重试或改用 HTML 粘贴"
         : error instanceof Error ? error.message : "生成失败，请检查内容";
       setNotice({ tone: "error", text: message });
     } finally {
       window.clearTimeout(timeout);
-      setWorking(false);
-    }
-  }
-
-  async function getHtmlToImageModule() {
-    htmlToImageModuleRef.current ||= import("html-to-image");
-    try {
-      return await withTimeout(htmlToImageModuleRef.current, 20000, "导出组件加载超时，请刷新页面后重试");
-    } catch (error) {
-      htmlToImageModuleRef.current = null;
-      throw error;
-    }
-  }
-
-  async function getPosterFontEmbedCss(node: HTMLElement, imageModule: typeof import("html-to-image")) {
-    const key = `${titleFont}:${bodyFont}`;
-    if (fontEmbedCssRef.current?.key !== key) {
-      fontEmbedCssRef.current = {
-        key,
-        promise: imageModule.getFontEmbedCSS(node, {
-          cacheBust: false,
-          preferredFontFormat: "woff2",
-          fetchRequestInit: { cache: "force-cache" },
-        }),
-      };
-    }
-    try {
-      return await withTimeout(fontEmbedCssRef.current.promise, 90000, "导出字体准备超时，请刷新页面后重试");
-    } catch (error) {
-      fontEmbedCssRef.current = null;
-      throw error;
-    }
-  }
-
-  function requireCurrentExport(expected?: ExportVersion) {
-    const current = exportVersionRef.current;
-    if (expected && current !== expected) throw new Error("内容或样式已更新，已停止本次导出。请等待排版完成后重新导出");
-    if (!current) throw new Error("当前内容尚未完成排版，请等待排版成功后再导出");
-    return current;
-  }
-
-  async function renderPage(index: number, version: ExportVersion) {
-    requireCurrentExport(version);
-    await withTimeout(waitForPosterFonts([titleFont, bodyFont]), 20000, "字体加载超时，请刷新页面后重试");
-    requireCurrentExport(version);
-    if (!pageRefs.current[index]) {
-      setShowAllPreviewPages(true);
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
-      requireCurrentExport(version);
-    }
-    const node = pageRefs.current[index];
-    if (!node) throw new Error("页面尚未准备好");
-    const contentIndex = index - pageOffset;
-    if (contentIndex >= 0 && contentPages[contentIndex]) assertExportSemantics(node, contentPages[contentIndex]);
-    const imageModule = await getHtmlToImageModule();
-    const fontEmbedCSS = await getPosterFontEmbedCss(node, imageModule);
-    requireCurrentExport(version);
-    const controller = new AbortController();
-    const renderTimer = window.setTimeout(() => controller.abort(), 90000);
-    try {
-      const blob = await withTimeout(imageModule.toBlob(node, {
-        width: format.width,
-        height: format.height,
-        pixelRatio: 1,
-        cacheBust: false,
-        includeQueryParams: true,
-        preferredFontFormat: "woff2",
-        fontEmbedCSS,
-        fetchRequestInit: { cache: "force-cache", signal: controller.signal },
-        backgroundColor: paperColor,
-        filter: (capturedNode) => !(capturedNode instanceof HTMLElement && capturedNode.classList.contains("page-export")),
-        style: { transform: "none", transformOrigin: "top left" },
-      }), 95000, `第 ${index + 1} 页转换超时`);
-      requireCurrentExport(version);
-      if (!blob) throw new Error(`第 ${index + 1} 页图片生成失败`);
-      return blob;
-    } finally {
-      window.clearTimeout(renderTimer);
-    }
-  }
-
-  async function exportOne(index: number) {
-    setExporting(true);
-    setNotice({ tone: "neutral", text: `正在导出第 ${index + 1} 页…` });
-    try {
-      const version = requireCurrentExport();
-      const blob = await renderPage(index, version);
-      requireCurrentExport(version);
-      const platform = formatExportLabel(formatKey);
-      const downloadUrl = URL.createObjectURL(blob);
-      downloadDataUrl(downloadUrl, `折页-${platform}-${String(index + 1).padStart(2, "0")}.png`);
-      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-      setNotice({ tone: "success", text: `第 ${index + 1} 页已导出为高清 PNG` });
-    } catch (error) {
-      setNotice({ tone: "error", text: error instanceof Error ? error.message : "导出失败，请刷新页面后重试" });
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  async function exportAll() {
-    setExporting(true);
-    try {
-      const version = requireCurrentExport();
-      jsZipModuleRef.current ||= import("jszip");
-      const { default: JSZip } = await withTimeout(jsZipModuleRef.current, 20000, "压缩组件加载超时，请刷新页面后重试");
-      requireCurrentExport(version);
-      const zip = new JSZip();
-      for (let index = 0; index < totalPages; index += 1) {
-        setNotice({ tone: "neutral", text: index === 0 ? "正在准备导出字体（首次约需数秒）…" : `正在打包 ${index + 1} / ${totalPages}…` });
-        const blob = await renderPage(index, version);
-        const platform = formatExportLabel(formatKey);
-        zip.file(`折页-${platform}-${String(index + 1).padStart(2, "0")}.png`, blob);
+      if (importRequestRef.current === controller) {
+        importRequestRef.current = null;
+        setWorking(false);
       }
-      setNotice({ tone: "neutral", text: "图片已生成，正在压缩下载包…" });
-      const blob = await withTimeout(zip.generateAsync({ type: "blob" }), 60000, "压缩图片超时，请尝试单张导出");
-      requireCurrentExport(version);
-      const downloadUrl = URL.createObjectURL(blob);
-      downloadDataUrl(downloadUrl, `${formatExportTitle(title)}-${formatExportLabel(formatKey)}-全部贴图.zip`);
-      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-      setNotice({ tone: "success", text: `${totalPages} 张贴图已打包下载` });
-    } catch (error) {
-      jsZipModuleRef.current = null;
-      setNotice({ tone: "error", text: error instanceof Error ? error.message : "批量导出失败，请尝试单张导出" });
-    } finally {
-      setExporting(false);
     }
   }
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -975,7 +831,7 @@ export default function Home() {
         <div className="top-actions">
           <span className={`status-pill ${notice.tone}`}><i />{notice.text}</span>
           <button className="help-trigger" type="button" onClick={() => {
-            setImportOpen(false);
+            closeImportDialog();
             setHelpOpen(true);
           }}><i aria-hidden="true">?</i><span>使用说明</span></button>
           <button className="primary compact" onClick={exportAll} disabled={exporting || !paginationReady}>{exporting ? "处理中…" : !posterFontsReady ? "字体加载中…" : paginationError ? "排版失败" : paginationReady ? `批量导出 ${totalPages} 张` : "正在排版…"}</button>
@@ -1297,17 +1153,17 @@ export default function Home() {
       </div>
 
       {importOpen && <div className="import-modal-backdrop" role="presentation" onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !working) setImportOpen(false);
+        if (event.target === event.currentTarget) closeImportDialog();
       }}>
         <section className="import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
           <header>
             <div><span className="eyebrow">正文来源</span><h2 id="import-modal-title">一键导入并替换正文</h2></div>
-            <button type="button" className="modal-close" onClick={() => setImportOpen(false)} disabled={working} aria-label="关闭导入窗口">×</button>
+            <button type="button" className="modal-close" onClick={closeImportDialog} aria-label="关闭导入窗口">×</button>
           </header>
           <p className="import-modal-tip">选择一种来源导入。导入完成后请回到“排版编辑”继续修改，当前正文会被替换。</p>
           <div className="segmented import-source-tabs" aria-label="内容输入方式">
             {(["url", "html", "editor", "markdown"] as InputMode[]).map((item) => (
-              <button key={item} className={mode === item ? "active" : ""} onClick={() => {
+              <button key={item} className={mode === item ? "active" : ""} disabled={working} onClick={() => {
                 setMode(item);
                 if (item === "editor") setEditorModuleReady(true);
                 setNotice({
@@ -1324,8 +1180,8 @@ export default function Home() {
           </div>
 
           <div className="import-modal-content">
-            {mode === "url" && <div className="field-stack"><label htmlFor="article-url">公开文章地址</label><textarea id="article-url" className="url-input" value={url} onChange={(event) => setUrl(event.target.value)} spellCheck={false} /><small>已重点适配微信公众号；其他公开 article / main 页面也可尝试。</small></div>}
-            {mode === "html" && <div className="field-stack"><label htmlFor="article-html">HTML 源码</label><textarea id="article-html" className="code-input" value={rawHtml} onChange={(event) => setRawHtml(event.target.value)} spellCheck={false} /></div>}
+            {mode === "url" && <div className="field-stack"><label htmlFor="article-url">公开文章地址</label><textarea id="article-url" className="url-input" value={url} onChange={(event) => setUrl(event.target.value)} spellCheck={false} disabled={working} /><small>已重点适配微信公众号；其他公开 article / main 页面也可尝试。</small></div>}
+            {mode === "html" && <div className="field-stack"><label htmlFor="article-html">HTML 源码</label><textarea id="article-html" className="code-input" value={rawHtml} onChange={(event) => setRawHtml(event.target.value)} spellCheck={false} disabled={working} /></div>}
             {mode === "editor" && <div className="field-stack"><div className="field-label">粘贴富文本</div>{editorModuleReady ? <Suspense fallback={<EditorFallback />}><ZhepageEditor
               compact
               html={sourceEditorHtml}
@@ -1337,18 +1193,18 @@ export default function Home() {
             /></Suspense> : <EditorFallback />}</div>}
             {mode === "markdown" && <div className="field-stack">
               <label htmlFor="article-markdown">Markdown 内容</label>
-              <textarea id="article-markdown" className="code-input markdown-import-input" value={markdownInput} onChange={(event) => setMarkdownInput(event.target.value)} placeholder={'# 标题\n\n支持 **粗体**、*斜体*、==高亮==、引用、列表和表格。'} spellCheck={false} />
+              <textarea id="article-markdown" className="code-input markdown-import-input" value={markdownInput} onChange={(event) => setMarkdownInput(event.target.value)} placeholder={'# 标题\n\n支持 **粗体**、*斜体*、==高亮==、引用、列表和表格。'} spellCheck={false} disabled={working} />
               <small>Markdown 仅在导入时单向转换为富文本；导入后请在“排版编辑”中继续修改，不会再发生模式往返丢失。</small>
             </div>}
           </div>
 
           <label className="switch-row import-style-switch" aria-label="保留原文样式">
             <span><b>保留原文样式（推荐）</b><small>{preserveStyles ? "保留颜色、边框、卡片结构与图片" : "使用当前主题重新排版"}</small></span>
-            <input type="checkbox" checked={preserveStyles} onChange={(event) => setPreserveStyles(event.target.checked)} />
+            <input type="checkbox" checked={preserveStyles} onChange={(event) => setPreserveStyles(event.target.checked)} disabled={working} />
             <i aria-hidden="true" />
           </label>
           <div className="import-modal-actions">
-            <button type="button" onClick={() => setImportOpen(false)} disabled={working}>取消</button>
+            <button type="button" onClick={closeImportDialog}>取消</button>
             <button className="primary" type="button" onClick={generatePosters} disabled={working}>{working ? "正在导入…" : "导入并替换正文 →"}</button>
           </div>
           <div className={`inline-notice ${notice.tone}`} role="status" aria-live="polite"><i />{notice.text}</div>

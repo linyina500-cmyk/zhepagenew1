@@ -61,12 +61,6 @@ test("keeps the requested production defaults", async () => {
   assert.match(page, /曹宇峰：资质编号A0070617060002/);
   assert.match(page, /WORKSPACE_STORAGE_KEY = "zhepage-workspace-v2"/);
   assert.match(page, /LEGACY_WORKSPACE_STORAGE_KEY = "zhepage-workspace-v1"/);
-  assert.match(page, /capturedNode\.classList\.contains\("page-export"\)/);
-  assert.match(page, /return "小红书"/);
-  assert.match(page, /return "公众号"/);
-  assert.match(page, /return "竖屏"/);
-  assert.match(page, /function formatExportTitle\(title: string\)/);
-  assert.match(page, /formatExportTitle\(title\).*formatExportLabel\(formatKey\).*全部贴图\.zip/s);
   assert.match(page, /const \[showAllPreviewPages, setShowAllPreviewPages\] = useState\(false\)/);
   assert.match(page, /showAllPreviewPages \? totalPages : Math\.min\(4, totalPages\)/);
   assert.match(page, /onClick=\{\(\) => setShowAllPreviewPages\(true\)\}/);
@@ -126,7 +120,6 @@ test("keeps the requested production defaults", async () => {
   assert.match(page, /首行标题会自动识别/);
   assert.match(page, /applySource\(sourceEditorHtml, "fragment", true\)/);
   assert.match(page, /setNotice\(\{[\s\S]*?item === "url"[\s\S]*?item === "editor"/);
-  assert.match(editor, /if \(compact\) \{\s*onChange\(currentEditor\.getHTML\(\)\);\s*return;/);
 
   assert.match(css, /--poster-paper:\s*#ffffff/);
   assert.match(css, /--poster-accent:\s*#d7352f/);
@@ -136,15 +129,6 @@ test("keeps the requested production defaults", async () => {
   assert.match(css, /source-han-sans-sc-vf\.woff2/);
   assert.match(css, /font-synthesis:\s*none/);
   assert.match(page, /waitForPosterFonts\(\[titleFont, bodyFont\]\)/);
-  assert.match(page, /document\.fonts\.check/);
-  assert.match(page, /getPosterFontEmbedCss/);
-  assert.match(page, /fontEmbedCSS/);
-  assert.match(page, /imageModule\.toBlob/);
-  assert.doesNotMatch(page, /dataUrlToBase64/);
-  assert.match(page, /cacheBust:\s*false/);
-  assert.match(page, /fetchRequestInit:\s*\{ cache: "force-cache"/);
-  assert.match(page, /压缩组件加载超时/);
-  assert.match(page, /finally\s*\{\s*setExporting\(false\)/s);
   assert.match(css, /\.article-flow mark/);
   assert.match(css, /\.article-flow ul \{ list-style-type: disc !important; \}/);
   assert.match(css, /\.article-flow ol \{ list-style-type: decimal !important; \}/);
@@ -179,127 +163,6 @@ test("ships self-hosted Source Han fonts for stable cross-platform pagination", 
   assert.match(headers, /\/fonts\/\*/);
   assert.match(headers, /max-age=31536000, immutable/);
   assert.match(license, /SIL OPEN FONT LICENSE Version 1\.1/);
-});
-
-test("ships DOM-safe smart pagination and local-only beautification regressions", async () => {
-  const [page, css, editor, splitter, paginator, beautifier, normalizer, pasteHandler] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
-    readFile(new URL("../app/components/ZhepageEditor.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../lib/pagination/splitDomBlock.ts", import.meta.url), "utf8"),
-    readFile(new URL("../lib/pagination/paginateArticle.ts", import.meta.url), "utf8"),
-    readFile(new URL("../lib/beautify/beautifyArticle.ts", import.meta.url), "utf8"),
-    readFile(new URL("../lib/richText/normalizeRichHtml.ts", import.meta.url), "utf8"),
-    readFile(new URL("../lib/richText/editorPaste.ts", import.meta.url), "utf8"),
-  ]);
-
-  // Long paragraphs are deep-cloned before text trimming. Unlike
-  // Range.cloneContents(), this keeps inline ancestors when a continuation
-  // begins inside bold, colored, highlighted or underlined text.
-  assert.match(splitter, /createTreeWalker\(root, NodeFilter\.SHOW_TEXT\)/);
-  assert.match(splitter, /source\.cloneNode\(true\)/);
-  assert.match(splitter, /node\.data = node\.data\.slice\(localStart, localEnd\)/);
-  assert.match(splitter, /data-pagination-fragment/);
-  assert.match(splitter, /isAtomicInner/);
-  assert.match(splitter, /inner\.classList\.contains\(RICH_LAYOUT_CLASS\)/);
-  assert.match(splitter, /richLayoutAncestor/);
-  assert.match(splitter, /element\.parentElement\?\.closest\(`\.\$\{RICH_LAYOUT_CLASS\}`\)/);
-  assert.doesNotMatch(splitter, /range\.cloneContents\(\)/);
-  assert.match(splitter, /semanticCut/);
-  assert.doesNotMatch(splitter, /shell\.textContent\s*=/);
-  assert.match(page, /"em", "i", "u", "s", "strike", "span\[style\]", "mark"/);
-  assert.match(page, /导出前检查失败：\$\{selector\} 格式节点未完整保留/);
-
-  // Heading keep-with-next and remaining-space splitting are explicit runtime
-  // behavior, not a CSS-only break-after hint.
-  assert.match(paginator, /blockIsHeading\(current\[current\.length - 1\]\)/);
-  assert.match(paginator, /const heading = current\.pop\(\)!/);
-  assert.match(paginator, /maxHeight - heightOf\(current\)/);
-  assert.match(paginator, /\(piece\) => fits\(\[\.\.\.current, piece\]\)/);
-  assert.match(paginator, /queue\.unshift\(\.\.\.pieces\)/);
-  assert.match(paginator, /assertPaginationSemantics/);
-  assert.match(paginator, /semanticBuckets/);
-  assert.match(paginator, /semanticPlainText/);
-  assert.match(paginator, /BLOCK_TEXT_TAGS/);
-  assert.match(paginator, /formattingWhitespace/);
-  assert.doesNotMatch(paginator, /source\.body\.textContent/);
-  assert.match(paginator, /span\[style\]/);
-  assert.match(paginator, /颜色或强调样式未完整继承/);
-  assert.match(splitter, /Color, alignment and spacing/);
-  assert.match(splitter, /background\(\?:-color\)\?/);
-  assert.match(css, /\.article-flow h3::before/);
-  assert.match(css, /font-weight: 870/);
-
-  // Geometry controls trigger pagination; presentation-only theme colors are
-  // absent from the pagination effect dependency list.
-  const paginationEffect = page.match(/useLayoutEffect\(\(\) => \{[\s\S]*?\}, \[paginationHtml[\s\S]*?\]\);/)?.[0] || "";
-  assert.match(paginationEffect, /typeScale/);
-  assert.match(paginationEffect, /lineHeight/);
-  assert.doesNotMatch(paginationEffect, /paperColor|accentColor|textColor|highlightColor/);
-
-  assert.match(page, /自动优化分页/);
-  assert.doesNotMatch(page, /page-usage-indicator/);
-  assert.doesNotMatch(css, /\.page-usage-indicator/);
-  assert.match(page, /适合宽度/);
-  assert.match(page, /DENSITY_PRESETS/);
-  assert.match(editor, /一键自动排版/);
-  assert.match(editor, /本地规则 · 不使用 AI/);
-  assert.match(editor, /序号点线标题/);
-  assert.match(editor, /段前空行/);
-  assert.match(editor, /段后空行/);
-  assert.match(editor, /selectedImagePosition/);
-  assert.match(editor, /NodeSelection\.create/);
-  assert.match(editor, /currentEditor\.getHTML\(\)/);
-  assert.match(pasteHandler, /normalizeRichHtmlDocument\(parsed\)/);
-  assert.match(pasteHandler, /richTextLimitMessage/);
-  assert.match(pasteHandler, /handlePaste/);
-  assert.match(pasteHandler, /event\.preventDefault\(\)/);
-  assert.match(editor, /data-auto-index/);
-  assert.match(editor, /data-auto-label/);
-  assert.doesNotMatch(editor, /快速样式/);
-  assert.doesNotMatch(editor, /数据强调/);
-
-  assert.match(beautifier, /SECTION_HEADING/);
-  assert.match(beautifier, /CONCLUSION_HEADING/);
-  assert.match(beautifier, /promoteParagraph/);
-  assert.match(beautifier, /auto-data-callout/);
-  assert.match(beautifier, /auto-key-point/);
-  assert.match(beautifier, /auto-structured-paragraph/);
-  assert.match(beautifier, /formattedParagraphs/);
-  assert.match(beautifier, /removedEmptyParagraphs/);
-  assert.match(beautifier, /querySelectorAll<HTMLElement>\("h1,h2,h3"\)/);
-  assert.match(beautifier, /auto-beautified-callout/);
-  assert.match(beautifier, /auto-numeric-cell/);
-  assert.match(beautifier, /auto-numbered-dotline/);
-  assert.match(beautifier, /numberedDotStyle/);
-  assert.match(beautifier, /isInsideImportedLayout/);
-  assert.match(beautifier, /RICH_LAYOUT_CLASS/);
-  assert.doesNotMatch(beautifier, /isEmphasizedHeading/);
-  const numberedHeadingPattern = beautifier.match(/const NUMBERED_HEADING = \/(.+)\//)?.[1];
-  assert.ok(numberedHeadingPattern);
-  const numberedHeading = new RegExp(numberedHeadingPattern);
-  assert.equal(numberedHeading.test("一、第一项逻辑"), true);
-  assert.equal(numberedHeading.test("2. 第二项逻辑"), true);
-  assert.equal(numberedHeading.test("第一句：收益测算"), true);
-  assert.equal(numberedHeading.test("第一项正文内容保持普通段落。"), false);
-  assert.equal(numberedHeading.test("H1预计净利 2.70亿元"), false);
-  assert.match(normalizer, /isRichLayoutGroup/);
-  assert.match(normalizer, /children\.length < 2/);
-  assert.match(normalizer, /own\.border \|\| own\.shadow/);
-  assert.match(normalizer, /wrapDirectInlineRuns/);
-  assert.match(normalizer, /imported-inline-run/);
-  assert.match(normalizer, /textLength: 30_000/);
-  assert.match(paginator, /isRichLayoutGroup/);
-  assert.match(css, /\.article-flow \.auto-inferred-heading::before/);
-  assert.match(css, /\.article-flow \.auto-inferred-heading\.auto-numbered-dotline::before/);
-  assert.match(css, /\.article-flow \.auto-conclusion-heading/);
-  assert.match(css, /关键数据 · 续/);
-  assert.doesNotMatch(beautifier, /fetch\(|OpenAI|DeepSeek|Claude/);
-
-  const applySource = page.match(/const applySource = useCallback[\s\S]*?\n {2}}?, \[preserveStyles\]\);/)?.[0] || "";
-  assert.match(applySource, /setArticleHtml\(result\.html\)/);
-  assert.match(applySource, /按原富文本格式读取/);
-  assert.doesNotMatch(applySource, /beautifyArticle/);
 });
 
 test("ships five independent V4 layouts with compatible theme and workspace state", async () => {

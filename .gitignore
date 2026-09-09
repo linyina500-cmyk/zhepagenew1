@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-pages/
+.next/
+.wrangler/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+.env.*.local
