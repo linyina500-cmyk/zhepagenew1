@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadDomModule } from "./helpers/load-dom-module.mjs";
 
-const { normalizeLocalDraft } = loadDomModule("lib/draftSync/localDraftStore.ts");
+const { normalizeLocalDraft, encodeLocalDraft, decodeLocalDraft, saveLocalDraft } = loadDomModule("lib/draftSync/localDraftStore.ts");
 const { validateDraft, readDraftImage } = loadDomModule("lib/draftSync/validation.ts");
-const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64");
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGMQPNj5HwAEnQJbj/CYfgAAAABJRU5ErkJggg==", "base64");
+const jpeg = Buffer.from("/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAT/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAgf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCgAkgf/9k=", "base64");
 const metadata = { id: "image-1", name: "poster.png", width: 1080, height: 1440, size: png.length, mime: "image/png" };
 const makeDraft = () => ({
   schemaVersion: 1, id: "draft-1", sourceFormat: "xiaohongshu", updatedAt: "2026-09-09T12:00:00.000Z",
@@ -15,27 +16,73 @@ const makeDraft = () => ({
 
 test("local archive preserves original image bytes, order, separate copy and user-confirmed receipts", async () => {
   const source = makeDraft();
-  source.images.push({ ...source.images[0], id: "image-2", name: "second.png" });
+  source.images.push({ ...source.images[0], id: "image-2", name: "second.jpg", blob: new Blob([jpeg], { type: "image/jpeg" }) });
   source.receipts.push({ accountId: "account-1", platform: "xiaohongshu", status: "confirmed_by_user", message: "用户已在平台核对" });
-  const restored = normalizeLocalDraft(source);
+  const stored = await encodeLocalDraft(source);
+  assert.deepEqual(stored.images.map(({ id, name, mime }) => ({ id, name, mime })), [
+    { id: "image-1", name: "poster.png", mime: "image/png" }, { id: "image-2", name: "second.jpg", mime: "image/jpeg" },
+  ]);
+  for (const image of stored.images) { assert.ok(image.bytes instanceof ArrayBuffer); assert.equal("blob" in image, false); }
+  const restored = decodeLocalDraft(structuredClone(stored));
   assert.deepEqual(restored, source);
   assert.notEqual(restored.images, source.images);
   assert.notEqual(restored.content, source.content);
   assert.deepEqual(Buffer.from(await restored.images[0].blob.arrayBuffer()), png);
+  assert.deepEqual(Buffer.from(await restored.images[1].blob.arrayBuffer()), jpeg);
+  assert.deepEqual(restored.images.map(({ blob }) => blob.type), ["image/png", "image/jpeg"]);
   assert.equal(restored.receipts[0].status, "confirmed_by_user");
 });
 
-test("archive writes only draft fields and strips platform URL query credentials", () => {
+test("archive writes only draft fields and omits temporary URLs and credentials", async () => {
   const source = makeDraft();
   source.token = "must-not-persist";
   source.appSecret = "must-not-persist";
   source.images[0].cookie = "must-not-persist";
+  source.images[0].previewUrl = "blob:http://localhost/must-not-persist";
   source.content.wechat.connection = { token: "must-not-persist" };
   source.receipts.push({ accountId: "account-1", platform: "wechat", status: "saved", draftId: "verified-draft", message: "已核对", url: "https://mp.weixin.qq.com/cgi-bin/home?token=must-not-persist#secret", appSecret: "must-not-persist" });
-  const archive = normalizeLocalDraft(source);
+  const archive = await encodeLocalDraft(source);
   assert.equal(JSON.stringify(archive).includes("must-not-persist"), false);
-  assert.equal(archive.receipts[0].url, "https://mp.weixin.qq.com/cgi-bin/home");
+  assert.equal("url" in archive.receipts[0], false);
+  assert.equal("previewUrl" in archive.images[0], false);
+  assert.equal("blob" in archive.images[0], false);
+  assert.equal(normalizeLocalDraft(source).receipts[0].url, "https://mp.weixin.qq.com/cgi-bin/home");
   assert.equal(source.token, "must-not-persist");
+});
+
+test("binary archives reject missing, empty or invalid bytes and still validate restored metadata", async () => {
+  const archive = await encodeLocalDraft(makeDraft());
+  const changes = [
+    (draft) => { delete draft.images[0].bytes; },
+    (draft) => { draft.images[0].bytes = "blob:http://localhost/old-image"; },
+    (draft) => { draft.images[0].bytes = new Blob([png]); },
+    (draft) => { draft.images[0].bytes = new Uint8Array(png); },
+    (draft) => { draft.images[0].bytes = new ArrayBuffer(0); },
+    (draft) => { draft.images[0].mime = "image/svg+xml"; },
+    (draft) => { draft.images[0].mime = null; },
+    (draft) => { draft.images[0].width = Infinity; },
+    (draft) => { draft.images.push({ ...draft.images[0] }); },
+    (draft) => { draft.receipts = [{ accountId: "account-1", platform: "wechat", status: "saved", message: "missing evidence" }]; },
+  ];
+  for (const change of changes) { const draft = structuredClone(archive); change(draft); assert.throws(() => decodeLocalDraft(draft), /本机存档不完整/); }
+  assert.throws(() => decodeLocalDraft(makeDraft()), /本机存档不完整/);
+});
+
+test("image read failure rejects saving before IndexedDB can open or replace an existing archive", async (context) => {
+  const previousIndexedDB = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+  let opens = 0;
+  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: { open() { opens++; throw new Error("unexpected database access"); } } });
+  context.after(() => { if (previousIndexedDB) Object.defineProperty(globalThis, "indexedDB", previousIndexedDB); else delete globalThis.indexedDB; });
+  const source = makeDraft();
+  let failRead;
+  context.mock.method(source.images[0].blob, "arrayBuffer", () => new Promise((_resolve, reject) => { failRead = reject; }));
+  const pending = saveLocalDraft(source);
+  const checked = assert.rejects(pending, /simulated byte read failure/);
+  await Promise.resolve();
+  assert.equal(opens, 0);
+  failRead(new Error("simulated byte read failure"));
+  await checked;
+  assert.equal(opens, 0);
 });
 
 test("unfinished copy and image counts can be archived before platform validation is resolved", () => {

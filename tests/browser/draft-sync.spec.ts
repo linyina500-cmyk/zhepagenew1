@@ -36,7 +36,7 @@ async function uploadDraftFile(page: Page, button: Locator, name: string, png: B
 
 async function savedDraftSummary(page: Page) {
   return page.evaluate(async () => {
-    type Stored = { content: Record<string, { title: string; body: string }>; images: { name: string; blob: Blob; width: number; height: number }[]; selectedAccountIds: string[]; receipts: { accountId: string; status: string }[] };
+    type Stored = { content: Record<string, { title: string; body: string }>; images: { name: string; mime: string; bytes: ArrayBuffer; width: number; height: number }[]; selectedAccountIds: string[]; receipts: { accountId: string; status: string }[] };
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("zhepage-local-draft-sync", 1);
       request.onsuccess = () => resolve(request.result);
@@ -54,10 +54,10 @@ async function savedDraftSummary(page: Page) {
         content: value.content,
         selectedAccountIds: value.selectedAccountIds,
         receipts: value.receipts,
-        images: await Promise.all(value.images.map(async (image) => ({
-          name: image.name, width: image.width, height: image.height, size: image.blob.size,
-          signature: Array.from(new Uint8Array(await image.blob.slice(0, 8).arrayBuffer())),
-        }))),
+        images: value.images.map((image) => ({
+          name: image.name, width: image.width, height: image.height, size: image.bytes.byteLength,
+          signature: Array.from(new Uint8Array(image.bytes.slice(0, 8))),
+        })),
       };
     } finally { database.close(); }
   });
@@ -298,6 +298,21 @@ test("mobile draft controls stay usable and a denied local save never reports su
   expect(clippedControls, "Narrow-screen controls must remain inside the dialog").toEqual([]);
   await dialog.getByRole("button", { name: "关闭草稿同步", exact: true }).focus();
   await page.keyboard.press("Shift+Tab");
+  // Native dialogs may move focus to browser chrome at a tab boundary (W3C
+  // H102). The page behind the modal must remain inert, and Tab must return.
+  const boundaryFocus = await dialog.evaluate((element) => {
+    const active = document.activeElement;
+    return {
+      modal: element.matches(":modal"),
+      backgroundFocused: Boolean(active && active !== document.body && active !== document.documentElement && !element.contains(active)),
+      activeTag: active?.tagName,
+    };
+  });
+  expect(boundaryFocus).toMatchObject({ modal: true, backgroundFocused: false });
+  const backgroundTrigger = page.locator(".draft-sync-trigger");
+  await backgroundTrigger.evaluate((button) => (button as HTMLButtonElement).focus());
+  await expect(backgroundTrigger).not.toBeFocused();
+  await page.keyboard.press("Tab");
   await expect.poll(() => dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
   let accountReply = 0;
   await page.route("http://127.0.0.1:47831/api/accounts", async (route) => {

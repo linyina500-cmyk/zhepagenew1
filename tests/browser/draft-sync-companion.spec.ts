@@ -34,5 +34,6 @@ test("the real loopback helper receives generated PNGs and returns a per-account
   const persistence = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }));
   expect(persistence).not.toContain("synthetic-test-secret-only");
   expect(persistence).not.toContain("browser-test-pairing-code-only-not-a-real-secret");
+  await dialog.getByText("草稿编号：test-only-verified-draft", { exact: true }).scrollIntoViewIfNeeded();
   await testInfo.attach("draft-sync-account-result", { body: await page.screenshot(), contentType: "image/png" });
 });

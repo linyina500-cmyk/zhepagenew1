@@ -4,6 +4,9 @@ const DATABASE = "zhepage-local-draft-sync";
 const STORE = "drafts";
 const KEY = "current";
 
+type StoredDraftImage = Omit<LocalDraft["images"][number], "blob"> & { mime: string; bytes: ArrayBuffer };
+type StoredLocalDraft = Omit<LocalDraft, "images" | "receipts"> & { images: StoredDraftImage[]; receipts: Omit<SyncReceipt, "url">[] };
+
 const invalidArchive = () => new Error("本机存档不完整，请清除存档后重新准备素材");
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidArchive();
@@ -66,6 +69,25 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
   };
 }
 
+export async function encodeLocalDraft(draft: LocalDraft): Promise<StoredLocalDraft> {
+  const snapshot = normalizeLocalDraft(draft);
+  // Private WebKit sessions cannot persist Blob/File values in IndexedDB.
+  const images = await Promise.all(snapshot.images.map(async ({ blob, ...metadata }) => ({ ...metadata, mime: blob.type, bytes: await blob.arrayBuffer() })));
+  const receipts = snapshot.receipts.map(({ accountId, platform, status, message, draftId }) => ({ accountId, platform, status, message, ...(draftId ? { draftId } : {}) }));
+  return { ...snapshot, images, receipts };
+}
+
+export function decodeLocalDraft(value: unknown): LocalDraft {
+  const draft = record(value);
+  if (draft.schemaVersion !== 1 || !Array.isArray(draft.images) || draft.images.length > 250) throw invalidArchive();
+  const images = draft.images.map((value) => {
+    const image = record(value);
+    if (!(image.bytes instanceof ArrayBuffer) || !image.bytes.byteLength || typeof image.mime !== "string" || !["image/png", "image/jpeg"].includes(image.mime)) throw invalidArchive();
+    return { id: image.id, name: image.name, width: image.width, height: image.height, blob: new Blob([image.bytes], { type: image.mime }) };
+  });
+  return normalizeLocalDraft({ ...draft, images });
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE, 1);
@@ -93,12 +115,13 @@ async function withStore<T>(mode: IDBTransactionMode, operation: (store: IDBObje
 export async function loadLocalDraft(): Promise<LocalDraft | null> {
   const draft = await withStore<unknown>("readonly", (store) => store.get(KEY));
   if (draft === undefined) return null;
-  try { return normalizeLocalDraft(draft); }
+  try { return decodeLocalDraft(draft); }
   catch { throw invalidArchive(); }
 }
 
 export async function saveLocalDraft(draft: LocalDraft): Promise<void> {
-  const snapshot = normalizeLocalDraft(draft);
+  // Finish asynchronous reads before creating the single write transaction.
+  const snapshot = await encodeLocalDraft(draft);
   await withStore("readwrite", (store) => store.put(snapshot, KEY));
 }
 

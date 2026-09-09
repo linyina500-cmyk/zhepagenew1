@@ -314,6 +314,7 @@ export default function Home() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [draftSyncMounted, setDraftSyncMounted] = useState(false);
   const [draftSyncOpen, setDraftSyncOpen] = useState(false);
+  const draftSyncTriggerRef = useRef<HTMLButtonElement>(null);
   const [posterFontsReady, setPosterFontsReady] = useState(false);
   const measureRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Array<HTMLElement | null>>([]);
@@ -887,7 +888,7 @@ export default function Home() {
             closeImportDialog();
             setHelpOpen(true);
           }}><i aria-hidden="true">?</i><span>使用说明</span></button>
-          <button className="draft-sync-trigger" type="button" onClick={() => {
+          <button ref={draftSyncTriggerRef} className="draft-sync-trigger" type="button" onClick={() => {
             closeImportDialog();
             setHelpOpen(false);
             setDraftSyncMounted(true);
@@ -1214,6 +1215,7 @@ export default function Home() {
 
       {draftSyncMounted && <Suspense fallback={draftSyncOpen ? <div className="draft-sync-loading" role="status">正在打开草稿同步…</div> : null}><DraftSyncDialog
         open={draftSyncOpen}
+        openerRef={draftSyncTriggerRef}
         title={title}
         sourceFormat={formatKey}
         canCollect={paginationReady && !exporting}

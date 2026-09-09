@@ -61,6 +61,11 @@
 .draft-sync-connection > summary span { display: inline-block; margin-left: 14px; color: var(--muted); font-size: 10px; font-weight: 450; }
 .draft-sync-connection-content { padding: 0 18px 18px; }
 .draft-sync-connection-content > p { margin-top: 0; }
+.draft-sync-start-help { margin: 12px 0 18px; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.draft-sync-start-help > summary { color: var(--ink); cursor: pointer; }
+.draft-sync-start-help ol { margin: 8px 0; padding-left: 20px; }
+.draft-sync-start-help p { margin: 8px 0 0; }
+.draft-sync-start-help code { overflow-wrap: anywhere; }
 .draft-sync-connect-form { max-width: 650px; }
 .draft-sync-connect-form > label { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 760; }
 .draft-sync-connect-form > div { display: flex; gap: 8px; }

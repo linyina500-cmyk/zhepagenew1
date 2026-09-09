@@ -4,7 +4,7 @@
 
 ## 启动与使用
 
-需要 Node.js 22.13 或更高版本。在本项目目录安装依赖；需要连接小红书时再安装助手使用的独立 Chromium：
+需要 Node.js 22.18+（22.x）或 24+。助手复用页面的素材校验规则，所需的 TypeScript 直接执行能力从这些版本起默认可用，见 [Node.js 官方说明](https://nodejs.org/api/typescript.html)。在本项目目录安装依赖；需要连接小红书时再安装助手使用的独立 Chromium：
 
 ```bash
 npm ci

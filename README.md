@@ -36,7 +36,7 @@
 
 ## 本地运行
 
-需要 Node.js `>=22.13.0`。
+需要 Node.js 22.18+（22.x）或 24+。
 
 ```bash
 npm install

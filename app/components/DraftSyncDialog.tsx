@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type RefObject } from "react";
 import { acknowledgeUnconfirmed, addWechatAccount, addXiaohongshuAccount, listAccounts, removeAccount, syncDraft, type CompanionConnection } from "../../lib/draftSync/companionClient";
 import { clearLocalDraft, loadLocalDraft, saveLocalDraft } from "../../lib/draftSync/localDraftStore";
 import type { DraftAccount, DraftImage, DraftPlatform, LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
@@ -8,6 +8,7 @@ import { countCharacters, DRAFT_LIMITS, imageMetadata, readDraftImage, validateD
 
 type DraftSyncDialogProps = {
   open: boolean;
+  openerRef: RefObject<HTMLButtonElement | null>;
   title: string;
   sourceFormat: string;
   canCollect: boolean;
@@ -34,7 +35,7 @@ function DraftThumbnail({ image, index }: { image: DraftImage; index: number }) 
   return <img ref={imageRef} alt={`草稿图片 ${index + 1}：${image.name}`} width={image.width} height={image.height} />;
 }
 
-export default function DraftSyncDialog({ open, title, sourceFormat, canCollect, collectAssets, onClose, onReturnToEditor }: DraftSyncDialogProps) {
+export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, canCollect, collectAssets, onClose, onReturnToEditor }: DraftSyncDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replacementIdRef = useRef<string | null>(null);
@@ -63,7 +64,9 @@ export default function DraftSyncDialog({ open, title, sourceFormat, canCollect,
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog || !open) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Pointer activation does not focus buttons in every browser. Retain the
+    // explicit trigger instead of guessing it from document.activeElement.
+    const opener = openerRef.current;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     dialog.showModal();
@@ -72,7 +75,7 @@ export default function DraftSyncDialog({ open, title, sourceFormat, canCollect,
       document.body.style.overflow = previousOverflow;
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     };
-  }, [open]);
+  }, [open, openerRef]);
 
   async function readStoredDraft() {
     setStorageState("loading");
@@ -392,7 +395,12 @@ export default function DraftSyncDialog({ open, title, sourceFormat, canCollect,
         <details className="draft-sync-connection" open={!connection || accounts.length === 0}>
           <summary>{connection ? "本机助手已连接 · 管理账号" : "连接本机助手"}<span>凭证保留在本机</span></summary>
           <div className="draft-sync-connection-content">
-            <p className="draft-sync-small">先启动随项目提供的本机助手，将启动时显示的配对码填入下方。需要时允许浏览器连接本地网络。</p>
+            <p className="draft-sync-small">本机助手是在电脑上运行的同步程序，负责连接平台账号；登录资料留在本机。</p>
+            <details className="draft-sync-start-help">
+              <summary>开发版如何启动</summary>
+              <ol><li>在项目目录打开终端，运行 <code>npm run draft:helper</code>。</li><li>保持该窗口打开，复制启动时显示的配对码，粘贴到下方并连接。</li></ol>
+              <p>当前开发版只允许本机开发页连接。需要时允许浏览器访问本地网络。</p>
+            </details>
             <form onSubmit={connectAssistant} className="draft-sync-connect-form"><label htmlFor="draft-pairing-code">本机助手配对码</label><div><input id="draft-pairing-code" type="password" autoComplete="off" value={pairingCode} disabled={Boolean(busy)} onChange={(event) => setPairingCode(event.target.value)} placeholder="仅在当前窗口使用" /><button type="submit" disabled={Boolean(busy) || !pairingCode.trim()}>{connection ? "重新连接" : "连接助手"}</button></div></form>
             {connection && <div className="draft-sync-add-account"><h3>添加{limit.label}账号</h3><div className="field-stack"><label htmlFor="draft-account-name">账号备注</label><input id="draft-account-name" value={accountName} disabled={Boolean(busy)} onChange={(event) => setAccountName(event.target.value)} placeholder="例如：品牌主账号" /></div>{platform === "wechat" ? <><div className="field-stack"><label htmlFor="draft-wechat-app-id">公众号 AppID</label><input id="draft-wechat-app-id" autoComplete="off" value={appId} disabled={Boolean(busy)} onChange={(event) => setAppId(event.target.value)} /></div><div className="field-stack"><label htmlFor="draft-wechat-secret">公众号 AppSecret</label><input id="draft-wechat-secret" type="password" autoComplete="new-password" value={appSecret} disabled={Boolean(busy)} onChange={(event) => setAppSecret(event.target.value)} /><small>仅交给本机助手进程使用，提交后清空输入框；助手重启后需重新添加。</small></div></> : <p className="draft-sync-small">会打开独立的小红书登录窗口，请在窗口内扫码。每个账号使用独立会话。</p>}<button type="button" disabled={Boolean(busy) || !accountName.trim() || (platform === "wechat" && (!appId.trim() || !appSecret.trim()))} onClick={addAccount}>{platform === "wechat" ? "验证并添加公众号" : "扫码添加小红书账号"}</button></div>}
           </div>
