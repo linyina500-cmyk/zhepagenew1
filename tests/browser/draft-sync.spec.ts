@@ -17,6 +17,9 @@ async function prepareRealImages(page: Page) {
   await importRichArticle(page, shortArticleHtml, shortTitle + shortBody);
   await expectPreviewReady(page);
   const dialog = await openDraftDialog(page);
+  await expect(dialog.getByText("本机页面已打开，但尚未连接同步工具", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "下载 Mac 启动工具", exact: true })).toHaveCount(0);
+  await expect(dialog.locator('a[href^="http://127.0.0.1:"], a[href^="http://localhost:"]')).toHaveCount(0);
   await dialog.getByRole("button", { name: "用当前海报开始", exact: true }).click();
   await expect(dialog.locator(".draft-sync-image-card").first()).toBeVisible({ timeout: 110_000 });
   await expect(dialog.locator(".draft-sync-footer-status")).toContainText("已准备");
@@ -36,6 +39,9 @@ async function chooseStep(dialog: Locator, step: "确认内容" | "选择账号"
 
 async function connectManually(dialog: Locator, token: string) {
   await chooseStep(dialog, "选择账号");
+  await expect(dialog.getByText("本机页面已打开，但尚未连接同步工具", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "下载 Mac 启动工具", exact: true })).toHaveCount(0);
+  await expect(dialog.locator('a[href^="http://127.0.0.1:"], a[href^="http://localhost:"]')).toHaveCount(0);
   await dialog.locator(".draft-sync-troubleshooting > summary").click();
   await dialog.getByLabel("本机助手配对码", { exact: true }).fill(token);
   await dialog.getByRole("button", { name: "连接助手", exact: true }).click();

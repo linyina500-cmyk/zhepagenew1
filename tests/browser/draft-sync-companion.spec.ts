@@ -17,7 +17,7 @@ test("the real loopback helper receives generated PNGs and returns a per-account
   await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("本机 HTTP 整链路");
   await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("测试素材仅交给回环地址上的模拟平台适配器。");
   await dialog.getByRole("button", { name: "下一步：选择账号", exact: true }).click();
-  await expect(dialog.getByText("先打开本机版，才能连接账号", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("本机页面已打开，但尚未连接同步工具", { exact: true })).toBeVisible();
   // Launchers may reopen an existing tab with a fragment instead of reloading
   // its document. The existing dialog must accept the handoff without losing edits.
   await page.evaluate(() => { location.hash = "zhepage-pairing=browser-test-pairing-code-only-not-a-real-secret"; });

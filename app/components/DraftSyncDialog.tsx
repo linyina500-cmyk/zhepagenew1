@@ -498,7 +498,7 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   const nextHint = step === "content"
     ? !draft ? "先用当前海报开始，或继续已有的本机存档。" : !draft.images.length ? "请先添加至少一张图片。" : "检查完内容后，下一步选择账号。"
     : step === "accounts"
-      ? accountProgress ? "账号连接尚未结束。你可以继续编辑；添加、移除和保存到平台草稿需等本次连接结束。" : !connection ? "请先用 Mac 启动工具打开本机版。" : unknownAccounts.length ? "请重新连接存档中的账号，或清除不可用选择。" : unresolvedSelection ? "所选账号有待核实结果，请先查看并核对。" : !selectedAccounts.length ? "请至少勾选一个要保存的账号。" : selectedAccounts.some((account) => !account.ready) ? "所选账号需要重新登录。" : errors.length ? "请返回确认内容，修改检查中提示的问题。" : warnings.length && acceptedWarnings !== warningsKey ? "请先核对下方图片尺寸提示。" : `将 ${draft?.images.length || 0} 张图片保存到 ${selectedAccounts.length} 个账号草稿，之后仍需到平台发布。`
+      ? accountProgress ? "账号连接尚未结束。你可以继续编辑；添加、移除和保存到平台草稿需等本次连接结束。" : !connection ? isLocalPage ? "请重新双击“启动折页.command”，使用工具自动打开的页面连接。" : "请下载并解压 Mac 启动工具，然后双击启动。" : unknownAccounts.length ? "请重新连接存档中的账号，或清除不可用选择。" : unresolvedSelection ? "所选账号有待核实结果，请先查看并核对。" : !selectedAccounts.length ? "请至少勾选一个要保存的账号。" : selectedAccounts.some((account) => !account.ready) ? "所选账号需要重新登录。" : errors.length ? "请返回确认内容，修改检查中提示的问题。" : warnings.length && acceptedWarnings !== warningsKey ? "请先核对下方图片尺寸提示。" : `将 ${draft?.images.length || 0} 张图片保存到 ${selectedAccounts.length} 个账号草稿，之后仍需到平台发布。`
       : allReceipts.some((receipt) => receipt.status === "needs_confirmation" && (pendingChecks[receipt.accountId] || accounts.find((account) => account.id === receipt.accountId)?.syncBlocked)) ? "待核实的账号请先到平台检查，再记录实际结果。" : "已保存的草稿可在对应平台继续编辑和发布。未保存的账号可返回选择后重试。";
   const platformTabs = <div className="draft-sync-platforms" role="group" aria-label={step === "content" ? "选择文案平台" : "选择账号平台"}>{PLATFORMS.map((target) => <button type="button" key={target} aria-pressed={platform === target} disabled={Boolean(busy)} onClick={() => { setPlatform(target); setAppSecret(""); }}>{DRAFT_LIMITS[target].label}<span>{step === "content" ? "独立填写标题与文案" : `已选 ${selectedAccounts.filter((account) => account.platform === target).length} 个账号`}</span></button>)}</div>;
 
@@ -527,7 +527,7 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
             {storageError && <div className="draft-sync-message error" role="alert">{storageError}<button type="button" disabled={Boolean(busy)} onClick={() => void readStoredDraft()}>重新读取</button></div>}
             {!canCollect && <p>海报正在处理，排版完成后即可开始；也可继续已有存档。</p>}
           </section>
-          {!draft ? <div className="draft-sync-empty"><span aria-hidden="true">01</span><h3>先把当前海报带进来</h3><p>点击“用当前海报开始”，生成可单独编辑的图片副本。你可以替换图片、调整顺序，再给两个平台分别写文案。</p>{!connection && <div className="draft-sync-initial-start"><p>首次连接平台账号，需要先下载工具，在本机版继续操作。</p><div className="draft-sync-inline-actions"><a className="draft-sync-startup-link" href="/downloads/zhepage-draft-helper.zip" download>下载 Mac 启动工具</a><a className="draft-sync-startup-link secondary" href="http://127.0.0.1:5173/" target="_blank" rel="noopener noreferrer">打开本机版</a></div><p>下载解压后双击“启动折页.command”，按提示完成准备；本网页内容不会自动带入本机版。</p></div>}</div> : <div className="draft-sync-columns">
+          {!draft ? <div className="draft-sync-empty"><span aria-hidden="true">01</span><h3>先把当前海报带进来</h3><p>点击“用当前海报开始”，生成可单独编辑的图片副本。你可以替换图片、调整顺序，再给两个平台分别写文案。</p>{!connection && <div className="draft-sync-initial-start">{isLocalPage ? <><p><strong>本机页面已打开，但尚未连接同步工具</strong></p><p>请重新双击已解压的“启动折页.command”，使用它自动打开的页面继续，并保持启动窗口打开。</p></> : <><p>连接平台账号需要先下载启动工具，由工具自动打开并连接本机页面。</p><a className="draft-sync-startup-link" href="/downloads/zhepage-draft-helper.zip" download>下载 Mac 启动工具</a><p>下载并解压后，双击“启动折页.command”，按提示完成准备；本网页内容不会自动带入本机版。</p></>}</div>}</div> : <div className="draft-sync-columns">
           <section className="draft-sync-assets" aria-labelledby="draft-sync-assets-title">
             <div className="draft-sync-section-title"><div><h3 id="draft-sync-assets-title">图片素材 <span>{draft.images.length} 张</span></h3><p>首图作为封面，两平台使用同一组图片。可替换、增删和调整顺序。</p></div><button type="button" disabled={Boolean(busy)} onClick={() => selectFiles(null)}>＋ 添加图片</button></div>
             <input ref={fileInputRef} type="file" accept="image/png,image/jpeg" hidden onChange={onFilesSelected} aria-label="草稿图片文件" />
@@ -560,13 +560,14 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
         {step === "accounts" && draft && <>
           <section className={`draft-sync-startup ${connection ? "connected" : ""}`} aria-label="本机同步连接">
             {connection ? <><div className="draft-sync-connection-status"><span aria-hidden="true">✓</span><div><strong>本机同步已就绪</strong><p>账号登录资料保存在这台电脑上。可添加多个账号，勾选本次要保存的账号。</p></div></div></> : <>
-              <h3>{connectionState === "connecting" ? "正在自动连接本机版…" : connectionState === "error" ? "暂时没有连接成功" : "先打开本机版，才能连接账号"}</h3>
-              <p>本机版是在你的电脑上运行的排版和同步工具，负责打开平台登录窗口、保存草稿。下载后双击启动即可。</p>
-              <ol className="draft-sync-startup-instructions"><li>下载并解压 Mac 启动工具。</li><li>双击“启动折页.command”，按窗口提示完成首次准备。</li><li>工具会自动打开本机版；在打开的页面继续这三步。</li></ol>
-              <div className="draft-sync-inline-actions"><a className="draft-sync-startup-link" href="/downloads/zhepage-draft-helper.zip" download>下载 Mac 启动工具</a><a className="draft-sync-startup-link secondary" href="http://127.0.0.1:5173/" target="_blank" rel="noopener noreferrer">打开本机版</a></div>
-              <p className="draft-sync-small">首次准备需要联网，请保持启动窗口打开。“打开本机版”适用于已启动的电脑。</p>
-              {!isLocalPage && <p className="draft-sync-transfer-note">此网页中准备的内容不会自动带到本机版。请在本机版重新导入原文或图片，再继续保存草稿。</p>}
-              {isLocalPage && <p className="draft-sync-small">已经启动但未连接时，请重新双击启动工具，并使用它自动打开的页面。</p>}
+              <h3>{connectionState === "connecting" ? "正在自动连接同步工具…" : isLocalPage ? "本机页面已打开，但尚未连接同步工具" : "用 Mac 启动工具连接账号"}</h3>
+              {isLocalPage ? <><p>请重新双击已解压的“启动折页.command”，使用它自动打开的页面继续。启动工具会为该页面连接账号同步功能。</p><p className="draft-sync-small">请保持启动窗口打开；若浏览器询问是否允许访问本地网络，请选择允许。</p></> : <>
+                <p>启动工具在你的电脑上运行，负责打开平台登录窗口、保存草稿。</p>
+                <ol className="draft-sync-startup-instructions"><li>下载并解压 Mac 启动工具。</li><li>双击“启动折页.command”，按窗口提示完成首次准备。</li><li>工具会自动打开并连接本机页面；在自动打开的页面继续这三步。</li></ol>
+                <a className="draft-sync-startup-link" href="/downloads/zhepage-draft-helper.zip" download>下载 Mac 启动工具</a>
+                <p className="draft-sync-small">首次准备需要联网，请保持启动窗口打开。</p>
+                <p className="draft-sync-transfer-note">此网页中准备的内容不会自动带到本机版。请在本机版重新导入原文或图片，再继续保存草稿。</p>
+              </>}
             </>}
             {isLocalPage && <details className="draft-sync-troubleshooting"><summary>连接有问题？</summary><p>日常使用请重新双击启动工具，并允许浏览器访问本地网络。如果已有本次连接码，可在此手动连接。</p><form onSubmit={connectAssistant} className="draft-sync-connect-form"><label htmlFor="draft-pairing-code">本机助手配对码</label><div><input id="draft-pairing-code" type="password" autoComplete="off" value={pairingCode} disabled={Boolean(busy) || Boolean(accountProgress)} onChange={(event) => setPairingCode(event.target.value)} placeholder="粘贴已有的本次连接码" /><button type="submit" disabled={Boolean(busy) || Boolean(accountProgress) || !pairingCode.trim()}>{connection ? "重新连接" : "连接助手"}</button></div></form></details>}
           </section>
