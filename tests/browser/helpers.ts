@@ -40,10 +40,48 @@ export async function openWorkbench(page: Page) {
   await expect(mainEditor(page)).toBeVisible();
 }
 
+export async function expectFullEditorSelection(editor: Locator) {
+  const selection = await editor.evaluate((element) => {
+    const current = element.ownerDocument.getSelection();
+    const path = (node: Node | null) => {
+      const indices: number[] = [];
+      while (node && node !== element) {
+        const parent = node.parentNode;
+        if (!parent) return null;
+        indices.unshift([...parent.childNodes].indexOf(node as ChildNode));
+        node = parent;
+      }
+      return node === element ? indices : null;
+    };
+    return {
+      focused: element.ownerDocument.activeElement === element,
+      collapsed: current?.isCollapsed ?? true,
+      anchor: path(current?.anchorNode || null),
+      anchorOffset: current?.anchorOffset,
+      focus: path(current?.focusNode || null),
+      focusOffset: current?.focusOffset,
+      selectedText: current?.rangeCount ? current.getRangeAt(0).cloneContents().textContent : null,
+      editorText: element.textContent,
+    };
+  });
+  expect(selection, "Replacing the article requires the editor's complete DOM selection").toMatchObject({
+    focused: true, collapsed: false, selectedText: selection.editorText,
+  });
+  expect(selection.anchor, "The selection anchor must belong to the editor").not.toBeNull();
+  expect(selection.focus, "The selection focus must belong to the editor").not.toBeNull();
+  return selection;
+}
+
+export async function pasteHtmlAtSelection(editor: Locator, html: string, text: string) {
+  await editor.evaluate(dispatchClipboardPaste, { html, text });
+}
+
 export async function pasteHtml(editor: Locator, html: string, text: string, replace = true) {
   await editor.click();
   if (replace) await editor.press("ControlOrMeta+A");
-  await editor.evaluate(dispatchClipboardPaste, { html, text });
+  const selection = replace ? await expectFullEditorSelection(editor) : undefined;
+  await pasteHtmlAtSelection(editor, html, text);
+  return selection;
 }
 
 export async function pasteImage(editor: Locator, png: Buffer, name: string) {

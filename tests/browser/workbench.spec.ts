@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import { articleBody, articleTitle, compactText, makePng, originalArticle, originalArticleHtml, shortArticleHtml, shortBody, shortTitle } from "./fixtures";
-import { expectCompletePreview, expectPreviewImage, expectPreviewReady, importRichArticle, mainEditor, mainEditorPanel, openRichTextImport, openWorkbench, pasteHtml, pasteImage, uploadImage } from "./helpers";
+import { expectCompletePreview, expectFullEditorSelection, expectPreviewImage, expectPreviewReady, importRichArticle, mainEditor, mainEditorPanel, openRichTextImport, openWorkbench, pasteHtml, pasteHtmlAtSelection, pasteImage, uploadImage } from "./helpers";
 
 const uncaughtErrors = new WeakMap<Page, string[]>();
 
@@ -107,12 +107,15 @@ test("the image upload button works in both the import dialog and the main edito
 
 test("a rejected oversized paste preserves the selected article and the next valid paste succeeds", async ({ page }) => {
   await importRichArticle(page, shortArticleHtml, shortTitle + shortBody);
-  await pasteHtml(mainEditor(page), "", "文".repeat(30_001));
+  const selectedArticle = await pasteHtml(mainEditor(page), "", "文".repeat(30_001));
   await expect(page.locator(".status-pill.error")).toContainText("3 万字");
   await expect.poll(async () => compactText(await mainEditor(page).textContent() || "")).toBe(compactText(shortBody));
+  expect(await expectFullEditorSelection(mainEditor(page)), "Rejecting a paste must preserve the original selection").toEqual(selectedArticle);
 
   const replacement = "恢复后正文完整。";
-  await pasteHtml(mainEditor(page), `<p>${replacement}</p>`, replacement);
+  // Paste into the selection that survived rejection; clicking or selecting
+  // again here would conceal a lost-selection regression.
+  await pasteHtmlAtSelection(mainEditor(page), `<p>${replacement}</p>`, replacement);
   await expectCompletePreview(page, replacement);
 });
 
