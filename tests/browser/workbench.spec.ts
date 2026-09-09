@@ -52,10 +52,16 @@ test("changing page format, layout, font size, and theme preserves every line wi
   await fontSize.focus();
   await fontSize.press("End");
   await expect(fontSize).toHaveValue("1.24");
-  await page.getByLabel("正文字体", { exact: true }).selectOption("sans");
+  const bodyFont = page.locator(".font-grid label")
+    .filter({ has: page.getByText("正文字体", { exact: true }) })
+    .getByRole("combobox");
+  await bodyFont.selectOption("sans");
+  await expect(bodyFont).toHaveValue("sans");
   await expectCompletePreview(page, articleBody);
   await page.locator(".theme-selector > summary").click();
-  await page.getByRole("button", { name: /^雾蓝珊瑚/ }).click();
+  const theme = page.locator(".theme-selector-panel").getByRole("button", { name: /^雾蓝珊瑚/ });
+  await theme.click();
+  await expect(theme).toHaveClass(/selected/);
   await expectCompletePreview(page, articleBody);
 });
 
@@ -68,9 +74,9 @@ test("pasting a PNG into the main editor inserts a decoded image and supports un
   await expectPreviewImage(page, source);
   await expectCompletePreview(page, shortBody);
 
-  await mainEditorPanel(page).getByRole("button", { name: "↶", exact: true }).click();
+  await mainEditorPanel(page).locator('button[data-tooltip^="撤销上一步"]').click();
   await expect(mainEditor(page).locator("img")).toHaveCount(0);
-  await mainEditorPanel(page).getByRole("button", { name: "↷", exact: true }).click();
+  await mainEditorPanel(page).locator('button[data-tooltip^="重做，也可按"]').click();
   await expect(mainEditor(page).locator("img")).toHaveCount(1);
   await expectPreviewImage(page, source);
   await expectCompletePreview(page, shortBody);

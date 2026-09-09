@@ -4,6 +4,34 @@ import { compactText } from "./fixtures";
 export const mainEditor = (page: Page) => page.locator(".professional-editor:not(.compact) .tiptap-surface");
 export const mainEditorPanel = (page: Page) => page.locator(".professional-editor:not(.compact)");
 
+type ClipboardPayload = { html?: string; text?: string; file?: { base64: string; name: string } };
+
+// This function is serialized by Locator.evaluate, so keep its browser-side
+// dependencies inside it. Both text and image paste use the actual DOM event.
+function dispatchClipboardPaste(element: Element, payload: ClipboardPayload) {
+  const transfer = new DataTransfer();
+  if (payload.html) transfer.setData("text/html", payload.html);
+  if (payload.text !== undefined) transfer.setData("text/plain", payload.text);
+  if (payload.file) {
+    const bytes = Uint8Array.from(atob(payload.file.base64), (character) => character.charCodeAt(0));
+    transfer.items.add(new File([bytes], payload.file.name, { type: "image/png" }));
+  }
+  const event = new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true });
+  // Firefox can ignore the constructor's clipboardData (Mozilla bug 2027025).
+  // Preserve the real DataTransfer for the editor's normal paste handlers.
+  if (event.clipboardData !== transfer) Object.defineProperty(event, "clipboardData", { value: transfer });
+  const actual = event.clipboardData;
+  if (!actual || actual.getData("text/html") !== (payload.html || "") || actual.getData("text/plain") !== (payload.text || "")) {
+    throw new Error("Synthetic paste setup failed: ClipboardEvent did not preserve the supplied HTML/plain text.");
+  }
+  const expectedFiles = [...transfer.files];
+  const actualFiles = [...actual.files];
+  if (expectedFiles.length !== (payload.file ? 1 : 0) || actualFiles.length !== expectedFiles.length || actualFiles.some((file, index) => file !== expectedFiles[index])) {
+    throw new Error("Synthetic paste setup failed: ClipboardEvent did not preserve the supplied image files.");
+  }
+  element.dispatchEvent(event);
+}
+
 export async function openWorkbench(page: Page) {
   // Each Playwright test has a fresh context. Skip only the first-visit guide;
   // the actual draft is created and restored through the application's UI.
@@ -15,24 +43,14 @@ export async function openWorkbench(page: Page) {
 export async function pasteHtml(editor: Locator, html: string, text: string, replace = true) {
   await editor.click();
   if (replace) await editor.press("ControlOrMeta+A");
-  await editor.evaluate((element, clipboard) => {
-    const transfer = new DataTransfer();
-    if (clipboard.html) transfer.setData("text/html", clipboard.html);
-    transfer.setData("text/plain", clipboard.text);
-    element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
-  }, { html, text });
+  await editor.evaluate(dispatchClipboardPaste, { html, text });
 }
 
 export async function pasteImage(editor: Locator, png: Buffer, name: string) {
   await editor.click();
   await editor.press("ControlOrMeta+End");
   await editor.press("Enter");
-  await editor.evaluate((element, file) => {
-    const bytes = Uint8Array.from(atob(file.base64), (character) => character.charCodeAt(0));
-    const transfer = new DataTransfer();
-    transfer.items.add(new File([bytes], file.name, { type: "image/png" }));
-    element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
-  }, { base64: png.toString("base64"), name });
+  await editor.evaluate(dispatchClipboardPaste, { file: { base64: png.toString("base64"), name } });
 }
 
 export async function openRichTextImport(page: Page) {
@@ -54,7 +72,9 @@ export async function importRichArticle(page: Page, html: string, text: string) 
 
 export async function uploadImage(page: Page, panel: Locator, png: Buffer, name: string) {
   const chooserPromise = page.waitForEvent("filechooser");
-  await panel.getByRole("button", { name: "＋图片", exact: true }).click();
+  // CSS tooltip text participates in the button's accessible name. Use the
+  // existing tooltip attribute to identify the actual upload control.
+  await panel.locator('button[data-tooltip^="插入 PNG、JPG 或 WebP 图片"]').click();
   const chooser = await chooserPromise;
   await chooser.setFiles({ name, mimeType: "image/png", buffer: png });
 }
