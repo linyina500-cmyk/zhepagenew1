@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent,
 import { acknowledgeUnconfirmed, addWechatAccount, addXiaohongshuAccount, cancelXiaohongshuLogin, getStartupConnection, listAccounts, removeAccount, syncDraft, type CompanionConnection } from "../../lib/draftSync/companionClient";
 import { clearLocalDraft, loadLocalDraft, saveLocalDraft } from "../../lib/draftSync/localDraftStore";
 import type { DraftAccount, DraftImage, DraftPlatform, LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
-import { countCharacters, DRAFT_LIMITS, imageMetadata, readDraftImage, validateDraft } from "../../lib/draftSync/validation";
+import { countCharacters, countHashtags, DRAFT_LIMITS, imageMetadata, readDraftImage, validateDraft } from "../../lib/draftSync/validation";
 
 type DraftSyncDialogProps = {
   open: boolean;
@@ -550,8 +550,8 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
 
           <section className="draft-sync-editor" aria-label="平台文案">
             {platformTabs}
-            <div className="field-stack"><label htmlFor="draft-platform-title">{limit.label}标题</label><input id="draft-platform-title" value={draft.content[platform].title} disabled={Boolean(busy)} onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], title: event.target.value } } }))} /><small>{countCharacters(draft.content[platform].title)} / {limit.title} 字（本工具上限）</small></div>
-            <div className="field-stack"><label htmlFor="draft-platform-body">{limit.label}文案</label><textarea id="draft-platform-body" rows={6} value={draft.content[platform].body} disabled={Boolean(busy)} placeholder="为这个平台写一段配文" onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], body: event.target.value } } }))} /><small>{countCharacters(draft.content[platform].body)} / {limit.body} 字{platform === "wechat" ? " · 约680个汉字以内（表情也占用长度）" : ""}；两个平台分别保存文案</small></div>
+            <div className="field-stack"><label htmlFor="draft-platform-title">{limit.label}标题</label><input id="draft-platform-title" value={draft.content[platform].title} disabled={Boolean(busy)} onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], title: event.target.value } } }))} /><small>{countCharacters(draft.content[platform].title)} / {limit.title} 个字符（本工具上限）</small></div>
+            <div className="field-stack"><label htmlFor="draft-platform-body">{limit.label}文案</label><textarea id="draft-platform-body" rows={6} value={draft.content[platform].body} disabled={Boolean(busy)} placeholder="为这个平台写一段配文" onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], body: event.target.value } } }))} /><small>{countCharacters(draft.content[platform].body)} / {limit.body} 字{platform === "wechat" ? " · 约680个汉字以内（表情也占用长度）" : ""}；两个平台分别保存文案</small><small>话题 {countHashtags(draft.content[platform].body)} / {limit.topics} 个；每个话题以 # 开头，用空格分隔</small></div>
             <p className="draft-sync-small">只用一个平台时，检查对应平台的内容即可。账号在下一步选择。</p>
           </section>
           </div>}

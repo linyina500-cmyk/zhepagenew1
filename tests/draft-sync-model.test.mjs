@@ -3,7 +3,7 @@ import test from "node:test";
 import { loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const { normalizeLocalDraft, encodeLocalDraft, decodeLocalDraft, saveLocalDraft } = loadDomModule("lib/draftSync/localDraftStore.ts");
-const { validateDraft, readDraftImage } = loadDomModule("lib/draftSync/validation.ts");
+const { countCharacters, countHashtags, DRAFT_LIMITS, validateDraft, readDraftImage } = loadDomModule("lib/draftSync/validation.ts");
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGMQPNj5HwAEnQJbj/CYfgAAAABJRU5ErkJggg==", "base64");
 const jpeg = Buffer.from("/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAT/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAgf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCgAkgf/9k=", "base64");
 const metadata = { id: "image-1", name: "poster.png", width: 1080, height: 1440, size: png.length, mime: "image/png" };
@@ -111,8 +111,14 @@ test("corrupted archive metadata is rejected before it can crash the dialog or c
 });
 
 test("platform validation counts Unicode characters and distinguishes size advice from blocking limits", () => {
-  assert.equal(validateDraft("xiaohongshu", { title: "🌿".repeat(20), body: "" }, [metadata]).filter((issue) => issue.severity === "error").length, 0);
-  assert.ok(validateDraft("xiaohongshu", { title: "🌿".repeat(21), body: "" }, [metadata]).some((issue) => issue.code === "title-long"));
+  for (const platform of ["xiaohongshu", "wechat"]) {
+    assert.equal(DRAFT_LIMITS[platform].title, 20);
+    const title = "🌿中文A".repeat(5);
+    assert.equal(countCharacters(title), 20);
+    assert.equal(validateDraft(platform, { title, body: "" }, [metadata]).filter((issue) => issue.severity === "error").length, 0);
+    const issues = validateDraft(platform, { title: `${title}🌿`, body: "" }, [metadata]);
+    assert.ok(issues.some((issue) => issue.code === "title-long" && issue.severity === "error" && issue.message.includes("20 个字符")));
+  }
   const wechat = validateDraft("wechat", { title: "标题", body: "中".repeat(683) }, [metadata]);
   assert.ok(wechat.some((issue) => issue.code === "body-bytes" && issue.severity === "error"));
   assert.ok(wechat.some((issue) => issue.code === "image-ratio" && issue.severity === "warning"));
@@ -120,6 +126,37 @@ test("platform validation counts Unicode characters and distinguishes size advic
   const mixed = validateDraft("xiaohongshu", { title: "标题", body: "" }, [metadata, { ...metadata, id: "image-2", width: 640, height: 640 }]);
   assert.ok(mixed.some((issue) => issue.code === "mixed-ratios"));
   assert.ok(mixed.some((issue) => issue.code === "image-resolution"));
+});
+
+test("hashtag counting supports whitespace-separated Chinese and English topics without counting closing hashes or Markdown headings", () => {
+  for (const [body, expected] of [
+    ["", 0], ["普通文案", 0], ["#", 0], ["# \n#\t#", 0],
+    ["# 标题\n## 二级标题\n### 三级标题 ###", 0],
+    ["#中文 #English #2026", 3],
+    ["第一行文案\n#生活记录\t#Daily_life\r\n#中English混合", 3],
+    ["#中文# #English#\n#旅行##", 3],
+    ["#中文##English##旅行#", 3],
+    ["#旅行 #旅行", 2],
+    ["#旅行\u3000#美食\u00a0#Daily", 3],
+    ["https://example.test/page#fragment ordinary#word #真正话题", 1],
+    ["# 标题里的 #真正话题", 1],
+    ["#话题1#话题2", 1],
+  ]) assert.equal(countHashtags(body), expected, body);
+});
+
+test("both platforms accept ten body topics and block eleven before submission", () => {
+  const tenTopics = Array.from({ length: 10 }, (_, index) => `#话题${index + 1}#`).join("\n");
+  for (const platform of ["xiaohongshu", "wechat"]) {
+    assert.equal(DRAFT_LIMITS[platform].topics, 10);
+    const accepted = validateDraft(platform, { title: "标题", body: `${tenTopics}\n#\n## 普通标题` }, [metadata]);
+    assert.equal(accepted.filter((issue) => issue.severity === "error").length, 0);
+    const blocked = validateDraft(platform, { title: "标题", body: `${tenTopics} #English` }, [metadata]);
+    assert.ok(blocked.some((issue) => issue.code === "topics-long" && issue.severity === "error" && issue.message.includes("10 个话题")));
+    const repeated = validateDraft(platform, { title: "标题", body: Array(11).fill("#重复").join(" ") }, [metadata]);
+    assert.ok(repeated.some((issue) => issue.code === "topics-long"));
+    const adjacent = validateDraft(platform, { title: "标题", body: Array(11).fill("#连续话题#").join("") }, [metadata]);
+    assert.ok(adjacent.some((issue) => issue.code === "topics-long"));
+  }
 });
 
 test("image reading preserves the file and always releases the temporary URL", async (context) => {

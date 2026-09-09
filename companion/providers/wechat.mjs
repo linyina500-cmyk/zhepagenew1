@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { countCharacters, countHashtags, DRAFT_LIMITS } from "../../lib/draftSync/validation.ts";
 
 const API_ORIGIN = "https://api.weixin.qq.com";
 const DRAFTS_URL = "https://mp.weixin.qq.com/";
@@ -50,12 +51,14 @@ function snapshotDraft(draft) {
   }
   const title = draft.title.trim();
   const body = draft.body.replace(/\r\n?/g, "\n");
-  if (!title || [...title].length > 32) throw new WechatProviderError("公众号草稿标题须为 1–32 字。");
+  const limit = DRAFT_LIMITS.wechat;
+  if (!title || countCharacters(draft.title) > limit.title) throw new WechatProviderError(`公众号草稿标题须为 1–${limit.title} 个字符。`);
   // The official content field has conflicting byte/character descriptions.
   // These conservative product limits are shared with the editor validation.
-  if ([...body].length > 1000 || Buffer.byteLength(body, "utf8") > 2048) {
+  if (countCharacters(body) > limit.body || Buffer.byteLength(body, "utf8") > 2048) {
     throw new WechatProviderError("本工具的公众号正文上限为 1,000 字且不超过 2,048 UTF-8 字节。");
   }
+  if (countHashtags(body) > limit.topics) throw new WechatProviderError(`公众号文案最多 ${limit.topics} 个话题，请减少 #话题 后同步。`);
   if (!Array.isArray(draft.images) || draft.images.length < 1 || draft.images.length > 20) {
     throw new WechatProviderError("公众号图片草稿需要 1–20 张图片。");
   }

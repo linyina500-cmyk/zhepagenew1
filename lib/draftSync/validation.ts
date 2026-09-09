@@ -2,12 +2,18 @@ import type { DraftContent, DraftImage, DraftIssue, DraftPlatform, ImageMetadata
 
 // These are conservative limits of this tool. Platform responses remain authoritative.
 export const DRAFT_LIMITS = {
-  xiaohongshu: { label: "小红书", title: 20, body: 1000, images: 18, ratio: 3 / 4, sizeLabel: "3:4（1080 × 1440）" },
-  wechat: { label: "公众号贴图", title: 32, body: 1000, images: 20, ratio: 4 / 5, sizeLabel: "4:5（1080 × 1350）" },
+  xiaohongshu: { label: "小红书", title: 20, body: 1000, topics: 10, images: 18, ratio: 3 / 4, sizeLabel: "3:4（1080 × 1440）" },
+  wechat: { label: "公众号贴图", title: 20, body: 1000, topics: 10, images: 20, ratio: 4 / 5, sizeLabel: "4:5（1080 × 1350）" },
 } as const;
 export const MAX_IMAGE_BYTES = 10_000_000;
 export const MAX_TOTAL_IMAGE_BYTES = 60 * 1024 * 1024;
 export const countCharacters = (value: string) => Array.from(value).length;
+// Topics start at a whitespace boundary; closed topics may touch (#one##two#).
+// Requiring content immediately after # excludes ordinary Markdown headings.
+export function countHashtags(value: string): number {
+  const groups = value.match(/(?:^|\s)(?:#[^\s#]+#?)+/gu) ?? [];
+  return groups.reduce((count, group) => count + (group.match(/#[^\s#]+#?/gu)?.length ?? 0), 0);
+}
 export const imageMetadata = (image: DraftImage): ImageMetadata => ({
   id: image.id, name: image.name, width: image.width, height: image.height, size: image.blob.size, mime: image.blob.type,
 });
@@ -16,8 +22,9 @@ export function validateDraft(platform: DraftPlatform, content: DraftContent, im
   const limit = DRAFT_LIMITS[platform];
   const issues: DraftIssue[] = [];
   if (!content.title.trim()) issues.push({ severity: "error", code: "title-empty", message: "请填写同步标题" });
-  if (countCharacters(content.title) > limit.title) issues.push({ severity: "error", code: "title-long", message: `本工具的${limit.label}标题最多 ${limit.title} 字，请缩短后同步` });
+  if (countCharacters(content.title) > limit.title) issues.push({ severity: "error", code: "title-long", message: `本工具的${limit.label}标题最多 ${limit.title} 个字符，请缩短后同步` });
   if (countCharacters(content.body) > limit.body) issues.push({ severity: "error", code: "body-long", message: `本工具的${limit.label}文案最多 ${limit.body} 字，请缩短后同步` });
+  if (countHashtags(content.body) > limit.topics) issues.push({ severity: "error", code: "topics-long", message: `${limit.label}文案最多 ${limit.topics} 个话题，请减少 #话题 后同步` });
   if (platform === "wechat" && new TextEncoder().encode(content.body).length > 2048) issues.push({ severity: "error", code: "body-bytes", message: "这段公众号文案太长，请缩短后再保存。本次可填写约 680 个汉字，表情和标点也占用长度。" });
   if (!images.length || images.length > limit.images) issues.push({ severity: "error", code: "image-count", message: `${limit.label}本次同步需要 1–${limit.images} 张图片，当前 ${images.length} 张` });
   if (images.reduce((sum, image) => sum + image.size, 0) > MAX_TOTAL_IMAGE_BYTES) issues.push({ severity: "error", code: "total-size", message: "本次图片总大小超过 60 MB，请减少图片或压缩后再同步" });

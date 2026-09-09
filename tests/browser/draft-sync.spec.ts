@@ -210,6 +210,34 @@ test("size acknowledgement and per-account receipts govern real PNG submissions 
   expect(jobs).toHaveLength(0);
   await dialog.getByRole("checkbox", { name: "我已核对图片，沿用当前尺寸和比例", exact: true }).check();
   await expect(submit).toBeEnabled();
+  for (const [target, label, title, body] of [
+    ["xiaohongshu", "小红书", "小红书同步标题", "小红书同步配文"],
+    ["wechat", "公众号贴图", "公众号同步标题", "公众号同步配文"],
+  ] as const) {
+    await chooseStep(dialog, "确认内容");
+    await choosePlatform(dialog, target);
+    await dialog.getByLabel(`${label}标题`, { exact: true }).fill("甲".repeat(21));
+    await expect(dialog.getByText("21 / 20 个字符（本工具上限）", { exact: true })).toBeVisible();
+    await chooseStep(dialog, "选择账号");
+    await expect(submit).toBeDisabled();
+    await expect(dialog.getByRole("region", { name: "同步前检查" })).toContainText(`${label}标题最多 20 个字符`);
+    await chooseStep(dialog, "确认内容");
+    await dialog.getByLabel(`${label}标题`, { exact: true }).fill(title);
+    await dialog.getByLabel(`${label}文案`, { exact: true }).fill(Array.from({ length: 11 }, (_, index) => `#话题${index + 1}`).join(" "));
+    await expect(dialog.getByText("话题 11 / 10 个；每个话题以 # 开头，用空格分隔", { exact: true })).toBeVisible();
+    await chooseStep(dialog, "选择账号");
+    await expect(submit).toBeDisabled();
+    await expect(dialog.getByRole("region", { name: "同步前检查" })).toContainText(`${label}文案最多 10 个话题`);
+    expect(jobs).toHaveLength(0);
+    await chooseStep(dialog, "确认内容");
+    await dialog.getByLabel(`${label}文案`, { exact: true }).fill(Array.from({ length: 10 }, (_, index) => `#话题${index + 1}`).join(" "));
+    await expect(dialog.getByText("话题 10 / 10 个；每个话题以 # 开头，用空格分隔", { exact: true })).toBeVisible();
+    await chooseStep(dialog, "选择账号");
+    await expect(submit).toBeEnabled();
+    await chooseStep(dialog, "确认内容");
+    await dialog.getByLabel(`${label}文案`, { exact: true }).fill(body);
+    await chooseStep(dialog, "选择账号");
+  }
   await submit.click();
   try {
     await expect.poll(() => jobs.length).toBe(1);

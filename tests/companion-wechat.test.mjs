@@ -146,7 +146,11 @@ test("readback failure or changed content requires confirmation while retaining 
 
 test("account mismatch and invalid drafts never make network requests", async (t) => {
   const invalidDrafts = [
-    { ...makeDraft(), title: "字".repeat(33) },
+    { ...makeDraft(), title: "字".repeat(21) },
+    { ...makeDraft(), title: "🌿".repeat(21) },
+    { ...makeDraft(), title: `${"字".repeat(20)} ` },
+    { ...makeDraft(), body: Array(11).fill("#话题").join(" ") },
+    { ...makeDraft(), body: Array(11).fill("#话题#").join("") },
     { ...makeDraft(), body: "中".repeat(683) },
     { ...makeDraft(), body: "a".repeat(1001) },
     { ...makeDraft(), images: [] },
@@ -168,6 +172,20 @@ test("account mismatch and invalid drafts never make network requests", async (t
   assert.equal(mismatch.status, "failed");
   assert.match(mismatch.message, /不一致/);
   assert.equal(api.calls.length, 0);
+});
+
+test("direct Wechat saves accept twenty Unicode title characters and ten topics without treating Markdown or closing hashes as topics", async () => {
+  const api = mockApi();
+  const draft = {
+    ...makeDraft(),
+    title: "🌿中文A".repeat(5),
+    body: `${Array.from({ length: 10 }, (_, index) => `#话题${index + 1}#`).join("\n")}\n#\n## 普通标题`,
+  };
+  const result = await saveWechatDraft({ account, draft, fetchImpl: api.fetchImpl });
+  assert.equal(result.status, "saved");
+  const article = api.calls.find(({ url }) => url.pathname === "/cgi-bin/draft/add").json.articles[0];
+  assert.equal(article.title, draft.title);
+  assert.equal(article.content, draft.body);
 });
 
 test("the submitted content is a snapshot even if caller state changes during upload", async () => {

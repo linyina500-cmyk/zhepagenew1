@@ -148,8 +148,34 @@ test("same job is idempotent, changed payload cannot reuse an id, and invalid jo
   assert.equal((await request("/jobs", input)).status, 200);
   assert.equal(calls.length, 1);
   assert.equal((await request("/jobs", { ...input, content: { title: "changed", body: "" } })).status, 409);
-  for (const change of [{ accountId: randomUUID() }, { requestId: "../../etc" }, { content: { title: "x".repeat(33), body: "" } }, { images: [{ ...image, width: 900 }] }]) assert.notEqual((await request("/jobs", { ...job(account.id), ...change })).status, 200);
+  for (const change of [{ accountId: randomUUID() }, { requestId: "../../etc" }, { content: { title: "x".repeat(21), body: "" } }, { images: [{ ...image, width: 900 }] }]) assert.notEqual((await request("/jobs", { ...job(account.id), ...change })).status, 200);
   assert.equal(calls.length, 1);
+});
+
+test("HTTP submissions enforce twenty title characters and ten topics for both platforms before providers run", async (context) => {
+  const writes = [];
+  const save = async (args) => { writes.push(args); return { status: "saved", draftId: "confirmed-draft", message: "mock confirmed" }; };
+  const f = await fixture(context, { saveWechatDraft: save, saveXiaohongshuDraft: save });
+  const wechat = await f.add();
+  const xiaohongshu = (await f.request("/accounts/xiaohongshu", { displayName: "creator", loginRequestId: randomUUID() })).data.account;
+  const tenTopics = Array.from({ length: 10 }, (_, index) => `#话题${index + 1}`).join(" ");
+  for (const account of [wechat, xiaohongshu]) {
+    const before = writes.length;
+    for (const [invalid, message] of [
+      [{ title: "🌿".repeat(21), body: "正常文案" }, /20 个字符/],
+      [{ title: "正常标题", body: `${tenTopics} #English` }, /10 个话题/],
+    ]) {
+      const result = await f.request("/jobs", { ...f.job(account.id), content: invalid });
+      assert.equal(result.status, 400);
+      assert.match(result.data.error, message);
+      assert.equal(writes.length, before);
+      assert.equal((await f.request("/accounts")).data.accounts.find((item) => item.id === account.id).syncBlocked, false);
+    }
+    const accepted = { ...f.job(account.id), content: { title: "🌿".repeat(20), body: tenTopics } };
+    assert.equal((await f.request("/jobs", accepted)).status, 200);
+    assert.equal((await f.waitJob(accepted.requestId)).data.receipt.status, "saved");
+    assert.equal(writes.length, before + 1);
+  }
 });
 
 test("ambiguous and interrupted writes remain blocked after restart until explicit review", async (context) => {
