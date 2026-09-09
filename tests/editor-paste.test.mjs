@@ -5,27 +5,36 @@ import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const dom = installDom();
 const require = createRequire(import.meta.url);
-const { Editor } = require("@tiptap/core");
+const { Editor, Extension } = require("@tiptap/core");
+const { Plugin } = require("@tiptap/pm/state");
 const { default: StarterKit } = require("@tiptap/starter-kit");
+const { default: Image } = require("@tiptap/extension-image");
 const { createPasteHandlers, createContentLimitExtension, preparePastedHtml } = loadDomModule("lib/richText/editorPaste.ts");
-const { RICH_TEXT_LIMITS } = loadDomModule("lib/richText/normalizeRichHtml.ts");
+const { RICH_TEXT_LIMITS, IMAGE_LIMITS } = loadDomModule("lib/richText/normalizeRichHtml.ts");
+const { insertImageFiles } = loadDomModule("lib/richText/editorImages.ts");
 
-function setup(t, content = "<p>原有正文</p>") {
+function setup(t, content = "<p>原有正文</p>", extensions = []) {
   const notices = [];
-  const onNotice = (text) => notices.push(text);
+  const noticeEvents = [];
+  const onNotice = (text, tone) => { notices.push(text); noticeEvents.push({ text, tone }); };
   const editor = new Editor({
     element: document.body.appendChild(document.createElement("div")),
-    extensions: [StarterKit, createContentLimitExtension(onNotice)],
+    extensions: [StarterKit, Image.configure({ allowBase64: true }), createContentLimitExtension(onNotice), ...extensions],
     content,
     editorProps: { ...createPasteHandlers(onNotice), handleScrollToSelection: () => true },
   });
   t.after(() => editor.destroy());
-  return { editor, notices };
+  return { editor, notices, noticeEvents, onNotice };
 }
 
-function paste(editor, html, text = "") {
+function paste(editor, html, text = "", files = []) {
   const event = new dom.window.Event("paste", { bubbles: true, cancelable: true });
-  Object.defineProperty(event, "clipboardData", { value: { getData: (type) => type === "text/html" ? html : text } });
+  Object.defineProperty(event, "clipboardData", { value: {
+    getData: (type) => type === "text/html" ? html : type === "text/plain" ? text : "",
+    files,
+    items: files.map((file) => ({ kind: "file", type: file.type, getAsFile: () => file })),
+    types: [...(html ? ["text/html"] : []), ...(text ? ["text/plain"] : []), ...(files.length ? ["Files"] : [])],
+  } });
   editor.view.dom.dispatchEvent(event);
   return event;
 }
@@ -128,4 +137,249 @@ test("clipboard normalization keeps emphasis, tables and backgrounds", () => {
   assert.equal(parsed.querySelector("span").style.fontSize, "");
   assert.equal(parsed.querySelector("td p").textContent, "数据");
   assert.ok(parsed.querySelector("section").style.background);
+});
+
+const PNG_HEADER = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/tm0AAAAASUVORK5CYII=", "base64");
+function pngFile(size = PNG_HEADER.length, name = "screenshot.png") {
+  return new dom.window.File([PNG_HEADER, new Uint8Array(Math.max(0, size - PNG_HEADER.length))], name, { type: "image/png" });
+}
+function imageDataUrl(size) {
+  return `data:image/png;base64,${Buffer.concat([PNG_HEADER, Buffer.alloc(Math.max(0, size - PNG_HEADER.length))]).toString("base64")}`;
+}
+function readImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new dom.window.FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+function imageNodes(doc) {
+  const images = [];
+  doc.descendants((node) => { if (node.type.name === "image") images.push(node); });
+  return images;
+}
+async function waitFor(predicate, message) {
+  const deadline = Date.now() + 3_000;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(predicate(), message);
+}
+function assertRejectedImage(noticeEvents) {
+  assert.ok(noticeEvents.some(({ tone }) => tone === "error"), "an unsuccessful image insertion must explain the failure");
+  assert.equal(noticeEvents.some(({ tone }) => tone === "success"), false, "a rejected insertion must never report success");
+}
+
+test("an 800 KiB FileReader image can be inserted without consuming the article markup budget", async (t) => {
+  const { editor, notices } = setup(t);
+  const src = await readImage(pngFile(800 * 1024));
+  assert.ok(src.length > RICH_TEXT_LIMITS.htmlLength, "the fixture must reproduce the former million-character rejection");
+  editor.commands.setImage({ src, alt: "截图" });
+  await Promise.resolve();
+  const images = imageNodes(editor.state.doc);
+  assert.equal(images.length, 1);
+  assert.ok(images[0].attrs.src === src, "the inserted image source must remain complete");
+  assert.equal(editor.state.doc.textContent, "原有正文");
+  assert.equal(notices.length, 0);
+});
+
+test("mixed rich HTML keeps embedded images external images and surrounding text without duplicating clipboard files", (t) => {
+  const { editor, noticeEvents } = setup(t);
+  editor.commands.selectAll();
+  const src = imageDataUrl(800 * 1024);
+  const html = `<p>图前<strong>重点</strong></p><img src="${src}" alt="截图">`
+    + '<p>两图之间</p><img src="https://example.com/chart.png" alt="外链图"><p>图后正文</p>';
+  assert.equal(paste(editor, html, "图前重点两图之间图后正文", [pngFile(800 * 1024)]).defaultPrevented, true);
+  const images = imageNodes(editor.state.doc);
+  assert.equal(images.length, 2);
+  assert.ok(images[0].attrs.src === src, "the base64 image must not be dropped or truncated");
+  assert.equal(images[1].attrs.src, "https://example.com/chart.png");
+  assert.equal(editor.state.doc.textContent, "图前重点两图之间图后正文");
+  assert.ok(editor.view.dom.querySelector("strong"));
+  assert.equal(noticeEvents.length, 0);
+});
+
+test("lazy data-src images are normalized before the Image extension parses pasted HTML", (t) => {
+  const { editor, notices } = setup(t);
+  editor.commands.selectAll();
+  const src = imageDataUrl(800 * 1024);
+  paste(editor, `<p>懒加载图前</p><img data-src="${src}"><p>懒加载图后</p>`);
+  const images = imageNodes(editor.state.doc);
+  assert.equal(images.length, 1);
+  assert.ok(images[0].attrs.src === src, "the lazy source must become a complete src attribute");
+  assert.equal(editor.state.doc.textContent, "懒加载图前懒加载图后");
+  assert.equal(notices.length, 0);
+});
+
+test("image payload exemptions do not weaken text markup or non-image attribute limits", (t) => {
+  const { editor, notices } = setup(t);
+  const original = editor.state.doc;
+  const src = imageDataUrl(800 * 1024);
+  editor.commands.selectAll();
+  paste(editor, `<img src="${src}"><p>${"字".repeat(RICH_TEXT_LIMITS.textLength + 1)}</p>`);
+  assert.equal(editor.state.doc, original);
+  assert.match(notices.at(-1), /3 万字/);
+  paste(editor, `<img src="${src}" data-note="${"x".repeat(RICH_TEXT_LIMITS.htmlLength)}">`);
+  assert.equal(editor.state.doc, original);
+  assert.match(notices.at(-1), /100 万字符/);
+  paste(editor, `<div data-test="${src}">这不是图片</div>`);
+  assert.equal(editor.state.doc, original);
+  assert.match(notices.at(-1), /100 万字符/);
+  paste(editor, `<p>${src}</p>`);
+  assert.equal(editor.state.doc, original);
+  assert.match(notices.at(-1), /100 万字符|3 万字/);
+});
+
+test("the document transaction guard enforces single-image total-image and image-count limits", async (t) => {
+  const tooLarge = setup(t);
+  const original = tooLarge.editor.state.doc;
+  tooLarge.editor.commands.setImage({ src: imageDataUrl(IMAGE_LIMITS.fileBytes + 1) });
+  await Promise.resolve();
+  assert.equal(tooLarge.editor.state.doc, original);
+  assert.match(tooLarge.notices.at(-1), /单张图片/);
+
+  const total = setup(t);
+  const src = imageDataUrl(8 * 1024 * 1024);
+  total.editor.commands.setImage({ src });
+  total.editor.commands.setTextSelection(total.editor.state.doc.content.size - 1);
+  total.editor.commands.setImage({ src });
+  assert.equal(imageNodes(total.editor.state.doc).length, 2);
+  total.editor.commands.setTextSelection(total.editor.state.doc.content.size - 1);
+  const accepted = total.editor.state.doc;
+  total.editor.commands.setImage({ src });
+  await Promise.resolve();
+  assert.equal(total.editor.state.doc, accepted);
+  assert.match(total.notices.at(-1), /图片总量/);
+
+  const count = setup(t);
+  const before = count.editor.state.doc;
+  count.editor.commands.insertContent(Array.from({ length: IMAGE_LIMITS.count + 1 }, () => ({ type: "image", attrs: { src: imageDataUrl(PNG_HEADER.length) } })));
+  await Promise.resolve();
+  assert.equal(count.editor.state.doc, before);
+  assert.match(count.notices.at(-1), /图片超过/);
+});
+
+test("a native PNG clipboard file is handled once even when both files and items expose it", async (t) => {
+  const { editor, noticeEvents } = setup(t);
+  const event = paste(editor, "", "", [pngFile(800 * 1024)]);
+  assert.equal(event.defaultPrevented, true);
+  await waitFor(() => noticeEvents.length > 0, "binary image paste did not finish");
+  assert.equal(imageNodes(editor.state.doc).length, 1);
+  assert.equal(editor.state.doc.textContent, "原有正文");
+  assert.equal(noticeEvents.filter(({ tone }) => tone === "success").length, 1);
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+});
+
+test("a browser that exposes a screenshot only through clipboard items can paste it", async (t) => {
+  const { editor, noticeEvents } = setup(t);
+  const file = pngFile();
+  const event = new dom.window.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: {
+    getData: () => "", files: [], types: ["Files"],
+    items: [{ kind: "file", type: file.type, getAsFile: () => file }],
+  } });
+  editor.view.dom.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true);
+  await waitFor(() => noticeEvents.length > 0, "clipboard item insertion did not finish");
+  assert.equal(imageNodes(editor.state.doc).length, 1);
+  assert.equal(noticeEvents.filter(({ tone }) => tone === "success").length, 1);
+});
+
+test("an external PNG file drop inserts at the drop position and internal editor drags remain native", async (t) => {
+  const { editor, onNotice, noticeEvents } = setup(t, "<p>第一段</p><p>第二段</p>");
+  const firstBlockEnd = editor.state.doc.firstChild.nodeSize;
+  const previousPosAtCoords = editor.view.posAtCoords;
+  editor.view.posAtCoords = () => ({ pos: firstBlockEnd, inside: -1 });
+  t.after(() => { editor.view.posAtCoords = previousPosAtCoords; });
+  const file = pngFile();
+  const event = new dom.window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    clientX: { value: 10 }, clientY: { value: 20 },
+    dataTransfer: { value: { files: [file], items: [], types: ["Files"], getData: () => "" } },
+  });
+  editor.view.dom.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true);
+  await waitFor(() => noticeEvents.length > 0, "binary image drop did not finish");
+  assert.equal(editor.state.doc.child(0).textContent, "第一段");
+  assert.equal(editor.state.doc.child(1).type.name, "image");
+  assert.equal(editor.state.doc.child(2).textContent, "第二段");
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+
+  const handlers = createPasteHandlers(onNotice);
+  editor.view.dragging = { slice: editor.state.doc.slice(0, firstBlockEnd), move: true };
+  try {
+    const internal = new dom.window.Event("drop", { cancelable: true });
+    assert.equal(handlers.handleDOMEvents.drop(editor.view, internal), false);
+    assert.equal(internal.defaultPrevented, false);
+  } finally { editor.view.dragging = null; }
+});
+
+test("multiple image files form one document transaction and one undo step", async (t) => {
+  const { editor, onNotice, noticeEvents } = setup(t);
+  const original = editor.getHTML();
+  let edits = 0;
+  editor.on("transaction", ({ transaction }) => { if (transaction.docChanged) edits += 1; });
+  const inserted = await insertImageFiles(editor.view, [pngFile(PNG_HEADER.length, "first.png"), pngFile(PNG_HEADER.length, "second.png")], onNotice);
+  assert.equal(inserted, true);
+  assert.equal(imageNodes(editor.state.doc).length, 2);
+  assert.equal(edits, 1);
+  assert.equal(noticeEvents.filter(({ tone }) => tone === "success").length, 1);
+  editor.commands.undo();
+  assert.equal(editor.getHTML(), original);
+});
+
+test("image insertion aborts if the document changes while files are being read", async (t) => {
+  const { editor, onNotice, noticeEvents } = setup(t);
+  const pending = insertImageFiles(editor.view, [pngFile(800 * 1024)], onNotice);
+  editor.commands.insertContent("读取期间新写的文字");
+  const edited = editor.state.doc;
+  assert.equal(await pending, false);
+  assert.equal(editor.state.doc, edited);
+  assert.equal(imageNodes(editor.state.doc).length, 0);
+  assertRejectedImage(noticeEvents);
+});
+
+test("a transaction rejected by another editor rule cannot produce an image success notice", async (t) => {
+  const rejectImageChanges = Extension.create({
+    name: "rejectImagesForTest",
+    addProseMirrorPlugins() {
+      return [new Plugin({ filterTransaction: (transaction, state) => imageNodes(transaction.doc).length <= imageNodes(state.doc).length })];
+    },
+  });
+  const { editor, onNotice, noticeEvents } = setup(t, "<p>原有正文</p>", [rejectImageChanges]);
+  const original = editor.state.doc;
+  assert.equal(await insertImageFiles(editor.view, [pngFile()], onNotice), false);
+  assert.equal(editor.state.doc, original);
+  assertRejectedImage(noticeEvents);
+});
+
+test("a failed FileReader does not erase the selection or report image insertion success", async (t) => {
+  const { editor, onNotice, noticeEvents } = setup(t);
+  editor.commands.selectAll();
+  const original = editor.state.doc;
+  const RealReader = dom.window.FileReader;
+  dom.window.FileReader = class extends RealReader {
+    readAsDataURL() { queueMicrotask(() => this.dispatchEvent(new dom.window.Event("error"))); }
+  };
+  try {
+    assert.equal(await insertImageFiles(editor.view, [pngFile()], onNotice), false);
+    assert.equal(editor.state.doc, original);
+    assertRejectedImage(noticeEvents);
+  } finally { dom.window.FileReader = RealReader; }
+});
+
+test("invalid signatures and oversized file batches leave the selected content unchanged", async (t) => {
+  const batches = [
+    [new dom.window.File(["not a PNG"], "fake.png", { type: "image/png" })],
+    [pngFile(IMAGE_LIMITS.fileBytes + 1)],
+    Array.from({ length: 3 }, () => pngFile(7 * 1024 * 1024)),
+    Array.from({ length: IMAGE_LIMITS.count + 1 }, () => pngFile()),
+  ];
+  for (const files of batches) {
+    const { editor, onNotice, noticeEvents } = setup(t);
+    editor.commands.selectAll();
+    const original = editor.state.doc;
+    assert.equal(await insertImageFiles(editor.view, files, onNotice), false);
+    assert.equal(editor.state.doc, original);
+    assertRejectedImage(noticeEvents);
+  }
 });

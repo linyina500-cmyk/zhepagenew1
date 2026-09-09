@@ -8,6 +8,46 @@ export const RICH_TEXT_LIMITS = {
   depth: 64,
 } as const;
 
+export const IMAGE_LIMITS = {
+  fileBytes: 10 * 1024 * 1024,
+  totalBytes: 20 * 1024 * 1024,
+  count: 80,
+} as const;
+
+export function embeddedImageByteLength(src: string): number | null {
+  const prefix = /^data:image\/(?:png|jpe?g|webp);base64,/i.exec(src);
+  if (!prefix) return null;
+  const encoded = src.slice(prefix[0].length);
+  if (encoded.length % 4 || !/^[a-z0-9+/]*={0,2}$/i.test(encoded)) return null;
+  return encoded.length / 4 * 3 - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0);
+}
+
+export function imageLimitMessage(stats: { imageBytes: number; imageMaxBytes: number; imageCount: number }) {
+  if (stats.imageMaxBytes > IMAGE_LIMITS.fileBytes) return "单张图片超过 10 MiB，请换用较小的图片";
+  if (stats.imageBytes > IMAGE_LIMITS.totalBytes) return "内嵌图片总量超过 20 MiB，请减少图片或拆分文章";
+  if (stats.imageCount > IMAGE_LIMITS.count) return "图片超过 80 张，请拆分文章后再导入";
+  return "";
+}
+
+function imagePayloadStats(root: ParentNode) {
+  let payloadLength = 0;
+  let imageBytes = 0;
+  let imageMaxBytes = 0;
+  const images = [...root.querySelectorAll("img")];
+  for (const image of images) {
+    // Lazy sources are counted before sanitization as well as normal src.
+    for (const attribute of ["src", "data-src"]) {
+      const value = image.getAttribute(attribute) || "";
+      const bytes = embeddedImageByteLength(value);
+      if (bytes === null) continue;
+      payloadLength += value.length;
+      imageBytes += bytes;
+      imageMaxBytes = Math.max(imageMaxBytes, bytes);
+    }
+  }
+  return { payloadLength, imageBytes, imageMaxBytes, imageCount: images.length };
+}
+
 const STRUCTURAL_SELECTOR = "section,div,article,aside";
 const BLOCK_TAGS = new Set([
   "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DIV", "DL", "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER",
@@ -164,12 +204,37 @@ export function richTextStats(root: ParentNode) {
 }
 
 export function richTextHtmlLimitMessage(html: string) {
-  return html.length > RICH_TEXT_LIMITS.htmlLength ? "HTML 源码超过 100 万字符，请拆分文章后再导入" : "";
+  if (html.length <= RICH_TEXT_LIMITS.htmlLength) return "";
+  const message = "HTML 源码超过 100 万字符，请拆分文章后再导入";
+  // Bound the entire input before parsing. Image bytes have a separate budget;
+  // a screenshot's base64 is not a million characters of article markup.
+  const maximum = RICH_TEXT_LIMITS.htmlLength + Math.ceil(IMAGE_LIMITS.totalBytes / 3) * 4 + IMAGE_LIMITS.count * 40;
+  if (html.length > maximum) return "正文与内嵌图片总量过大，请减少图片或拆分文章";
+  let payloadLength = 0;
+  let imageBytes = 0;
+  let imageMaxBytes = 0;
+  let imageCount = 0;
+  for (const match of html.matchAll(/data:image\/(?:png|jpe?g|webp);base64,[a-z0-9+/]*={0,2}/gi)) {
+    const bytes = embeddedImageByteLength(match[0]);
+    if (bytes === null) continue;
+    payloadLength += match[0].length;
+    imageBytes += bytes;
+    imageMaxBytes = Math.max(imageMaxBytes, bytes);
+    imageCount += 1;
+  }
+  // This is only a cheap preflight. After parsing, only actual img attributes
+  // are exempted, so data-looking text or style attributes cannot bypass limits.
+  return imageLimitMessage({ imageBytes, imageMaxBytes, imageCount })
+    || (html.length - payloadLength > RICH_TEXT_LIMITS.htmlLength ? message : "");
 }
 
 export function richTextLimitMessage(html: string, root: ParentNode) {
   const htmlMessage = richTextHtmlLimitMessage(html);
   if (htmlMessage) return htmlMessage;
+  const images = imagePayloadStats(root);
+  const imageMessage = imageLimitMessage(images);
+  if (imageMessage) return imageMessage;
+  if (html.length - images.payloadLength > RICH_TEXT_LIMITS.htmlLength) return "HTML 源码超过 100 万字符，请拆分文章后再导入";
   const stats = richTextStats(root);
   if (stats.textLength > RICH_TEXT_LIMITS.textLength) return "正文超过 3 万字，请拆分文章后再导入";
   if (stats.elementCount > RICH_TEXT_LIMITS.elementCount) return "富文本节点超过 2500 个，请简化装饰或拆分文章后再导入";

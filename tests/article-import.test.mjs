@@ -100,3 +100,17 @@ test("fragment imports still reject excessive body text and preserve normal titl
   assert.equal(article.querySelector("h1"), null);
   assert.equal(article.querySelector("span")?.style.color, "rgb(204, 34, 68)");
 });
+
+test("the rich-text import dialog accepts an embedded image over the old HTML limit without losing surrounding content", () => {
+  const imageSource = `data:image/png;base64,${Buffer.alloc(800 * 1024).toString("base64")}`;
+  const source = `<h1>带图片的文章</h1><p><strong>图片前的正文。</strong></p><img src="${imageSource}" alt="插入的配图"><p>图片后的正文。</p>`;
+  assert.ok(source.length > 1_000_000);
+  const result = extractRichTextFragment(source, true, true);
+  const article = parse(result.html);
+  assert.equal(result.title, "带图片的文章");
+  assert.equal(article.querySelectorAll("img").length, 1);
+  assert.ok(article.querySelector("img").getAttribute("src") === imageSource);
+  assert.equal(article.querySelector("img").alt, "插入的配图");
+  assert.equal(article.querySelector("strong").textContent, "图片前的正文。");
+  assert.equal(article.body.textContent, "图片前的正文。图片后的正文。");
+});

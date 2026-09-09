@@ -12,6 +12,7 @@ import { Extension, Mark, Node, getStyleProperty, mergeAttributes } from "@tipta
 import { NodeSelection } from "@tiptap/pm/state";
 import UnifiedColorPopover from "./UnifiedColorPopover";
 import { createContentLimitExtension, createPasteHandlers } from "../../lib/richText/editorPaste";
+import { IMAGE_FILE_ACCEPT, insertImageFiles } from "../../lib/richText/editorImages";
 
 type ZhepageEditorProps = {
   html: string;
@@ -396,25 +397,9 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
   }
 
   function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!/^image\/(png|jpe?g|webp)$/i.test(file.type)) {
-      onNotice("请上传 PNG、JPG 或 WebP 图片");
-      event.target.value = "";
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      editor!.chain().focus().setImage({
-        src: String(reader.result),
-        alt: file.name,
-        style: "width:100%;height:auto;max-width:100%;display:block;margin-left:auto;margin-right:auto",
-      }).run();
-      onNotice("图片已插入，可继续调整尺寸、对齐、圆角和图注");
-    };
-    reader.onerror = () => onNotice("图片读取失败，请重新选择");
-    reader.readAsDataURL(file);
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
+    if (editor && files.length) void insertImageFiles(editor.view, files, onNotice);
   }
 
   function saveImageCaption() {
@@ -454,7 +439,7 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     </div>
 
     <>
-      <input ref={imageInputRef} className="editor-image-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageUpload} />
+      <input ref={imageInputRef} className="editor-image-input" type="file" accept={IMAGE_FILE_ACCEPT} multiple onChange={handleImageUpload} />
       {!compact && onAutoTypeset && <div className="auto-typeset-bar" aria-label="自动排版">
         <button type="button" className="editor-auto-typeset" onClick={() => onAutoTypeset(editor.getHTML(), numberedDotStyle)}>
           <span><b>一键自动排版</b><small>整理导语、章节标题、重点段落和图表</small></span>
