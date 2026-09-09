@@ -152,3 +152,65 @@ test("the rich-text import dialog accepts an embedded image over the old HTML li
   assert.equal(article.querySelector("strong").textContent, "图片前的正文。");
   assert.equal(article.body.textContent, "图片前的正文。图片后的正文。");
 });
+
+const screenshot = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2fZkAAAAASUVORK5CYII=";
+const imageMarkup = `<img src="${screenshot}" alt="截图" style="width:100%;height:auto;display:block">`;
+
+test("image-only fragments retain every image and use a default title, including images inside headings", () => {
+  for (const preserveStyles of [true, false]) {
+    for (const source of [
+      imageMarkup,
+      `<p></p>${imageMarkup}<p></p>`,
+      `<h1>${imageMarkup}</h1>`,
+      `<h1><span style="color:red">${imageMarkup}</span></h1>`,
+      `<h1>${imageMarkup}</h1><p>${imageMarkup.replace('alt="截图"', 'alt="第二张截图"')}</p>`,
+    ]) {
+      const before = parse(source);
+      const result = extractRichTextFragment(source, preserveStyles, true);
+      const after = parse(result.html);
+      assert.equal(result.title, "未命名文章");
+      assert.equal(result.inferredTitle, true);
+      assert.equal(after.body.textContent.trim(), "");
+      assert.deepEqual([...after.images].map((image) => [image.getAttribute("src"), image.alt]),
+        [...before.images].map((image) => [image.getAttribute("src"), image.alt]));
+      assert.equal(after.images[0].getAttribute("style") !== null, preserveStyles);
+    }
+  }
+});
+
+test("title inference never removes a heading or candidate title paragraph containing an image", () => {
+  for (const heading of [
+    `<h1>图片标题${imageMarkup}</h1>`,
+    `<h1><strong>图片标题</strong><span>${imageMarkup}</span></h1>`,
+    `<p>这是一段候选标题${imageMarkup}</p>`,
+  ]) {
+    const source = `${heading}<p>${"需要保留的后续正文。".repeat(5)}</p><p>最后一段。</p>`;
+    const result = extractRichTextFragment(source, true, true);
+    const after = parse(result.html);
+    assert.equal(result.inferredTitle, false);
+    assert.equal(after.images.length, 1);
+    assert.equal(after.images[0].getAttribute("src"), screenshot);
+    assert.equal(after.body.textContent, parse(source).body.textContent);
+  }
+});
+
+test("a leading image remains the first content block rather than making a later heading the title", () => {
+  const source = `${imageMarkup}<h1>图片后的说明标题</h1><p>图片后的正文。</p>`;
+  const result = extractRichTextFragment(source, true, true);
+  const after = parse(result.html);
+  assert.equal(result.inferredTitle, false);
+  assert.equal(after.body.firstElementChild.tagName, "IMG");
+  assert.equal(after.querySelector("h1").textContent, "图片后的说明标题");
+  assert.equal(after.body.textContent, parse(source).body.textContent);
+});
+
+test("a text-only title can still be inferred before an image-only body without changing image order", () => {
+  const secondImageUrl = "https://images.example.com/second.png";
+  const result = extractRichTextFragment(`<h1>两张图片的文章</h1>${imageMarkup}<img src="${secondImageUrl}" alt="第二张">`, true, true);
+  const after = parse(result.html);
+  assert.equal(result.title, "两张图片的文章");
+  assert.equal(result.inferredTitle, true);
+  assert.deepEqual([...after.images].map((image) => image.getAttribute("src")), [screenshot, `/api/image?url=${encodeURIComponent(secondImageUrl)}`]);
+  assert.equal(after.querySelector("h1"), null);
+  assert.equal(after.body.textContent, "");
+});

@@ -76,6 +76,10 @@ export async function pasteHtmlAtSelection(editor: Locator, html: string, text: 
   await editor.evaluate(dispatchClipboardPaste, { html, text });
 }
 
+export async function pasteHtmlAndImageAtSelection(editor: Locator, html: string, text: string, png: Buffer, name: string) {
+  await editor.evaluate(dispatchClipboardPaste, { html, text, file: { base64: png.toString("base64"), name } });
+}
+
 export async function pasteHtml(editor: Locator, html: string, text: string, replace = true) {
   await editor.click();
   if (replace) await editor.press("ControlOrMeta+A");

@@ -4,7 +4,7 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { Mark } from "@tiptap/pm/model";
 import type { EditorProps } from "@tiptap/pm/view";
 import { IMAGE_LIMITS, RICH_TEXT_LIMITS, embeddedImageByteLength, imageLimitMessage, normalizeRichHtmlDocument, richTextHtmlLimitMessage, richTextLimitMessage } from "./normalizeRichHtml";
-import { insertImageFiles } from "./editorImages";
+import { insertImageFiles, isTemporaryImageUrl } from "./editorImages";
 
 type Notice = (text: string, tone?: "success" | "error") => void;
 
@@ -30,7 +30,7 @@ export function preparePastedHtml(html: string) {
   return normalized;
 }
 
-export function createPasteHandlers(onNotice: Notice): EditorProps {
+export function createPasteHandlers(onNotice: Notice, insertImages: typeof insertImageFiles = insertImageFiles): EditorProps {
   let prepared: { source: string; html: string } | null = null;
   let rejected = false;
   const report = (error: unknown) => {
@@ -60,11 +60,23 @@ export function createPasteHandlers(onNotice: Notice): EditorProps {
           // preserve the whole selection instead of also inserting file copies.
           if (!html && files.length) {
             event.preventDefault();
-            void insertImageFiles(view, files, onNotice);
+            void insertImages(view, files, onNotice);
             return true;
           }
           if (text.length > RICH_TEXT_LIMITS.textLength * 2 || Array.from(text).length > RICH_TEXT_LIMITS.textLength) throw new Error("正文超过 3 万字，请拆分文章后再导入");
-          if (html) prepared = { source: html, html: preparePastedHtml(html) };
+          if (html) {
+            prepared = { source: html, html: preparePastedHtml(html) };
+            const parsed = new DOMParser().parseFromString(prepared.html, "text/html");
+            if ([...parsed.images].some((image) => isTemporaryImageUrl(image.getAttribute("src") || ""))) {
+              event.preventDefault();
+              if (!files.length) throw new Error("剪贴板图片只有临时地址，没有可读取的图片文件，原内容已保留。请单独复制图片或使用“插入图片”");
+              // Keep text, formatting and all image positions in one insertion.
+              // The supplied callback also holds the existing import read lock.
+              void insertImages(view, files, onNotice, undefined, prepared.html);
+              prepared = null;
+              return true;
+            }
+          }
           return false;
         } catch (error) {
           event.preventDefault();
@@ -80,7 +92,7 @@ export function createPasteHandlers(onNotice: Notice): EditorProps {
         if (!files.length) return false;
         event.preventDefault();
         const position = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
-        void insertImageFiles(view, files, onNotice, position);
+        void insertImages(view, files, onNotice, position);
         return true;
       },
     },

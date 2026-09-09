@@ -383,3 +383,147 @@ test("invalid signatures and oversized file batches leave the selected content u
     assertRejectedImage(noticeEvents);
   }
 });
+
+test("a blob HTML image is restored from its PNG clipboard file and survives article import", async (t) => {
+  const { editor, noticeEvents } = setup(t);
+  const { extractRichTextFragment } = loadDomModule("lib/richText/importArticle.ts");
+  const file = pngFile(PNG_HEADER.length, "clipboard.png");
+  const expectedSource = await readImage(file);
+  editor.commands.selectAll();
+
+  const event = paste(editor, '<img src="blob:https://example.com/temporary-clipboard-image" alt="截图">', "", [file]);
+  assert.equal(event.defaultPrevented, true);
+  await waitFor(() => noticeEvents.length > 0, "the temporary HTML image did not finish reading its clipboard file");
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.src), [expectedSource]);
+  assert.equal(editor.state.doc.textContent, "");
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+
+  const imported = extractRichTextFragment(editor.getHTML(), true, true);
+  const parsed = new DOMParser().parseFromString(imported.html, "text/html");
+  assert.equal(parsed.querySelectorAll("img").length, 1);
+  assert.equal(parsed.querySelector("img").getAttribute("src"), expectedSource);
+  assert.equal(parsed.querySelector("img").getAttribute("alt"), "截图");
+  assert.doesNotMatch(imported.html, /blob:|file:/);
+});
+
+test("a file URI clipboard image preserves surrounding rich text and the entire paste undoes once", async (t) => {
+  const { editor, noticeEvents } = setup(t, "<p>将被替换的<strong>原有内容</strong>。</p>");
+  const file = pngFile(PNG_HEADER.length, "word-image.png");
+  const expectedSource = await readImage(file);
+  editor.commands.selectAll();
+  const original = editor.getHTML();
+  let edits = 0;
+  editor.on("transaction", ({ transaction }) => { if (transaction.docChanged) edits += 1; });
+
+  paste(editor, '<p>图前<strong>重点</strong>正文。</p><img src="file:///private/tmp/word/media/image1.png" alt="原图说明"><p>图后正文。</p>', "图前重点正文。图后正文。", [file]);
+  await waitFor(() => noticeEvents.length > 0, "the mixed temporary-image paste did not finish");
+  assert.equal(editor.state.doc.textContent, "图前重点正文。图后正文。");
+  assert.equal(editor.view.dom.querySelector("strong").textContent, "重点");
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.src), [expectedSource]);
+  assert.equal(editor.view.dom.querySelector("img").alt, "原图说明");
+  assert.equal(edits, 1, "HTML text and restored images must enter one document transaction");
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+  assert.equal(editor.commands.undo(), true);
+  assert.equal(editor.getHTML(), original, "one undo must restore all selected content, not leave pasted text behind");
+});
+
+test("temporary file URI images match filenames and preserve HTML order when clipboard files are reversed", async (t) => {
+  const { editor, noticeEvents } = setup(t);
+  const first = pngFile(PNG_HEADER.length, "first.png");
+  const second = pngFile(PNG_HEADER.length + 7, "second.png");
+  const expectedSources = await Promise.all([readImage(first), readImage(second)]);
+  editor.commands.selectAll();
+  paste(editor, '<p>第一张之前</p><img src="file:///tmp/export/first.png" alt="第一张"><p>两张之间</p><img src="file:///C:/Temp/export/second.png" alt="第二张"><p>第二张之后</p>', "", [second, first]);
+  await waitFor(() => noticeEvents.length > 0, "filename-matched temporary images did not finish");
+
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.src), expectedSources);
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.alt), ["第一张", "第二张"]);
+  assert.equal(editor.state.doc.textContent, "第一张之前两张之间第二张之后");
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+});
+
+test("opaque blob images can match unique alt filenames without relying on clipboard file order", async (t) => {
+  const { editor, noticeEvents } = setup(t);
+  const first = pngFile(PNG_HEADER.length, "alpha.png");
+  const second = pngFile(PNG_HEADER.length + 11, "beta.png");
+  const expectedSources = await Promise.all([readImage(first), readImage(second)]);
+  editor.commands.selectAll();
+  paste(editor, '<img src="blob:https://example.com/opaque-a" alt="alpha.png"><img src="blob:https://example.com/opaque-b" alt="beta.png">', "", [second, first]);
+  await waitFor(() => noticeEvents.length > 0, "alt-matched temporary images did not finish");
+
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.src), expectedSources);
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.alt), ["alpha.png", "beta.png"]);
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+});
+
+test("repeated occurrences of the same temporary image URL reuse its one clipboard file", async (t) => {
+  const { editor, noticeEvents } = setup(t);
+  const file = pngFile();
+  const expectedSource = await readImage(file);
+  editor.commands.selectAll();
+  paste(editor, '<img src="blob:https://example.com/shared-image" alt="第一次"><p>重复引用之间</p><img src="blob:https://example.com/shared-image" alt="第二次">', "", [file]);
+  await waitFor(() => noticeEvents.length > 0, "the repeated temporary image did not finish");
+
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.src), [expectedSource, expectedSource]);
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.alt), ["第一次", "第二次"]);
+  assert.equal(editor.state.doc.textContent, "重复引用之间");
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+});
+
+test("restoring a temporary image preserves adjacent data and HTTPS images without adding file duplicates", async (t) => {
+  const { editor, noticeEvents } = setup(t);
+  const embeddedSource = imageDataUrl(PNG_HEADER.length + 5);
+  const file = pngFile(PNG_HEADER.length + 13, "restored.png");
+  const restoredSource = await readImage(file);
+  const remoteSource = "https://example.com/existing-chart.png";
+  editor.commands.selectAll();
+  paste(editor, `<p>保留<strong>重点</strong></p><img src="${embeddedSource}" alt="已嵌入"><img src="blob:https://example.com/needs-bytes" alt="需恢复"><img src="${remoteSource}" alt="外链"><p>末尾正文</p>`, "", [file]);
+  await waitFor(() => noticeEvents.length > 0, "the mixed image-source paste did not finish");
+
+  assert.deepEqual(imageNodes(editor.state.doc).map((image) => image.attrs.src), [embeddedSource, restoredSource, remoteSource]);
+  assert.equal(editor.view.dom.querySelector("strong").textContent, "重点");
+  assert.equal(editor.state.doc.textContent, "保留重点末尾正文");
+  assert.equal(noticeEvents.some(({ tone }) => tone === "error"), false);
+});
+
+test("unresolved temporary HTML image mappings reject the whole paste and preserve the selected document", async (t) => {
+  const cases = [
+    { name: "blob image without a clipboard file", html: '<img src="blob:https://example.com/missing">', files: [] },
+    { name: "file URI image without a clipboard file", html: '<img src="file:///tmp/missing.png">', files: [] },
+    { name: "two distinct temporary URLs with only one file", html: '<img src="blob:https://example.com/a"><img src="blob:https://example.com/b">', files: [pngFile()] },
+    { name: "one anonymous temporary URL with two possible files", html: '<img src="blob:https://example.com/a">', files: [pngFile(PNG_HEADER.length, "first.png"), pngFile(PNG_HEADER.length + 1, "second.png")] },
+    { name: "two opaque images without a filename mapping", html: '<img src="blob:https://example.com/a"><img src="blob:https://example.com/b">', files: [pngFile(PNG_HEADER.length, "first.png"), pngFile(PNG_HEADER.length + 1, "second.png")] },
+    { name: "duplicate clipboard filenames make a match ambiguous", html: '<img src="file:///tmp/duplicate.png">', files: [pngFile(PNG_HEADER.length, "duplicate.png"), pngFile(PNG_HEADER.length + 1, "duplicate.png")] },
+    { name: "one unmatched filename must not leave a partial paste", html: '<img src="file:///tmp/first.png"><img src="file:///tmp/missing.png">', files: [pngFile(PNG_HEADER.length, "first.png"), pngFile(PNG_HEADER.length + 1, "second.png")] },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async (context) => {
+      const { editor, noticeEvents } = setup(context, "<p>选中但必须保留的<strong>正文</strong>。</p>");
+      editor.commands.selectAll();
+      const original = editor.state.doc;
+      const selection = editor.state.selection;
+      const event = paste(editor, `<p>不得部分插入</p>${scenario.html}<p>也不得留下结尾</p>`, "", scenario.files);
+      assert.equal(event.defaultPrevented, true);
+      await waitFor(() => noticeEvents.length > 0, `${scenario.name} did not report an error`);
+      assert.equal(editor.state.doc, original, "an unresolved image must not erase or partially replace the selected document");
+      assert.ok(editor.state.selection.eq(selection), "the original selection must remain available for retry");
+      assertRejectedImage(noticeEvents);
+      assert.match(noticeEvents.find(({ tone }) => tone === "error").text, /图片|文件|匹配|对应|来源|临时|读取/);
+    });
+  }
+});
+
+test("temporary HTML image restoration aborts without partial text insertion when the document changes during reading", async (t) => {
+  const { editor, noticeEvents } = setup(t, "<p>保留原有正文。</p>");
+  editor.commands.selectAll();
+  paste(editor, '<p>不能插入的旧剪贴板正文</p><img src="blob:https://example.com/pending">', "", [pngFile(800 * 1024)]);
+  editor.commands.insertContentAt(1, "读取期间新写的文字。");
+  const edited = editor.state.doc;
+  await waitFor(() => noticeEvents.length > 0, "the stale temporary-image paste did not settle");
+
+  assert.equal(editor.state.doc, edited);
+  assert.equal(imageNodes(editor.state.doc).length, 0);
+  assert.match(editor.state.doc.textContent, /读取期间新写的文字/);
+  assert.doesNotMatch(editor.state.doc.textContent, /旧剪贴板正文/);
+  assertRejectedImage(noticeEvents);
+});

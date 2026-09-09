@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { withTimeout } from "../../lib/async/withTimeout";
+import { preparePosterSnapshot } from "../../lib/export/preparePosterSnapshot";
 
 export type ExportVersion = { inputKey: string; paginationVersion: number };
 type ExportNotice = { tone: "neutral" | "success" | "error"; text: string };
@@ -45,7 +46,9 @@ function formatExportTitle(title: string) {
 function assertExportSemantics(node: HTMLElement, expectedHtml: string) {
   const expected = new DOMParser().parseFromString(expectedHtml, "text/html").body;
   const preview = node.querySelector<HTMLElement>(".article-flow");
-  const clone = (node.cloneNode(true) as HTMLElement).querySelector<HTMLElement>(".article-flow");
+  const template = node.ownerDocument.createElement("template");
+  template.innerHTML = node.outerHTML;
+  const clone = template.content.querySelector<HTMLElement>(".article-flow");
   if (!preview || !clone) throw new Error("导出正文节点缺失，请刷新页面后重试");
   const selectors = ["h1", "h2", "h3", "strong", "b", "em", "i", "u", "s", "strike", "span[style]", "mark", "blockquote", "ul", "ol", "img", "table"];
   for (const selector of selectors) {
@@ -127,10 +130,11 @@ export function usePosterExport({
     const imageModule = await getHtmlToImageModule();
     const fontEmbedCSS = await getPosterFontEmbedCss(node, imageModule);
     requireCurrentExport(version);
+    const snapshot = await preparePosterSnapshot(node, format, () => { requireCurrentExport(version); });
     const controller = new AbortController();
     const renderTimer = window.setTimeout(() => controller.abort(), 90000);
     try {
-      const blob = await withTimeout(imageModule.toBlob(node, {
+      const blob = await withTimeout(imageModule.toBlob(snapshot.node, {
         width: format.width,
         height: format.height,
         pixelRatio: 1,
@@ -148,6 +152,7 @@ export function usePosterExport({
       return blob;
     } finally {
       window.clearTimeout(renderTimer);
+      snapshot.dispose();
     }
   }
 
