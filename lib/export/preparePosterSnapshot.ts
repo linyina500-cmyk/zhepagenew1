@@ -96,6 +96,9 @@ export async function preparePosterSnapshot(node: HTMLElement, format: { width: 
       target.removeAttribute("sizes");
       target.removeAttribute("crossorigin");
       target.loading = "eager";
+      // WebKit may otherwise defer large-image painting inside the exported
+      // SVG even when the original preview image has already decoded.
+      target.setAttribute("decoding", "sync");
       target.src = localImagePixels(sources[index], index, format.width, format.height);
     }
     removeInvalidExportXml(snapshot);

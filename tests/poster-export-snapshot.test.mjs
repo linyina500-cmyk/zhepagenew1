@@ -42,6 +42,7 @@ test("snapshot captures decoded source pixels at full export resolution and clea
   assert.equal(snapshot.node.closest(".poster-grid").style.getPropertyValue("--poster-paper"), "#fff");
   assert.equal(snapshot.node.querySelector("img").src, "data:image/png;base64,ZmFrZQ==");
   assert.equal(snapshot.node.querySelector("img").style.objectFit, "cover");
+  assert.equal(snapshot.node.querySelector("img").getAttribute("decoding"), "sync");
   assert.equal(drawn[0].args[0], node.querySelector("img"));
   assert.equal(drawn[0].width, 1600);
   assert.equal(drawn[0].height, 900);
