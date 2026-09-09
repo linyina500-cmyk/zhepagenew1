@@ -33,7 +33,8 @@ jobs:
 
   browser:
     name: Browser (${{ matrix.browser }})
-    runs-on: ubuntu-latest
+    # Run Safari's engine on macOS. Linux WebKit uses a different font backend.
+    runs-on: ${{ matrix.browser == 'webkit' && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false

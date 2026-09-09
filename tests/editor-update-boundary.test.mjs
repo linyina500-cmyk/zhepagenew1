@@ -402,3 +402,41 @@ test("overlapping clipboard image reads keep rich-text import blocked until ever
   assert.equal(editor.view.dom.querySelectorAll("img").length, 1);
   assert.equal(editor.view.dom.querySelector("img").alt, "first.png");
 });
+
+test("temporary HTML image replacement holds the same import gate until its complete rich text is inserted", { timeout: 15_000 }, async (context) => {
+  const { editor, click, waitFor, act } = await mountWorkspace(context, "<p>原有已排版正文。</p>");
+  await click(document.querySelector(".import-trigger"));
+  await click([...document.querySelectorAll(".import-source-tabs button")].find((button) => button.textContent === "富文本"));
+  await waitFor(() => document.querySelector(".import-modal .tiptap-surface")?.editor, "the compact editor is ready");
+  const compactEditor = document.querySelector(".import-modal .tiptap-surface").editor;
+  compactEditor.view.setProps({ handleScrollToSelection: () => true });
+  await act(async () => { compactEditor.commands.setContent("<p>读取完成前的导入草稿。</p>"); compactEditor.commands.selectAll(); });
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/tm0AAAAASUVORK5CYII=", "base64");
+  const file = new window.File([png], "clipboard.png", { type: "image/png" });
+  const readAsDataURL = window.FileReader.prototype.readAsDataURL;
+  let release;
+  context.mock.method(window.FileReader.prototype, "readAsDataURL", function (image) { release = () => readAsDataURL.call(this, image); });
+  const html = '<p>图前<strong>强调</strong></p><img src="blob:http://localhost/temporary-clipboard" alt="保留图注"><p>图后正文</p>';
+  const event = new window.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { value: {
+    getData: (type) => type === "text/html" ? html : "", files: [file],
+    items: [{ kind: "file", type: file.type, getAsFile: () => file }], types: ["text/html", "Files"],
+  } });
+  await act(async () => { compactEditor.view.dom.dispatchEvent(event); });
+  assert.ok(release, "temporary HTML sources must read the actual clipboard file");
+  const importButton = () => document.querySelector(".import-modal-actions .primary");
+  assert.equal(importButton().disabled, true);
+  assert.equal(compactEditor.getText(), "读取完成前的导入草稿。");
+  await click(importButton());
+  assert.ok(document.querySelector(".import-modal"));
+  assert.equal(editor.getText(), "原有已排版正文。");
+  await act(async () => { release(); });
+  await waitFor(() => !importButton().disabled && compactEditor.view.dom.querySelectorAll("img").length === 1,
+    "the full rich-text transaction reaches parent state before the gate opens");
+  await click(importButton());
+  assert.equal(document.querySelector(".import-modal"), null);
+  assert.equal(editor.state.doc.textContent, "图前强调图后正文");
+  assert.equal(editor.view.dom.querySelector("strong").textContent, "强调");
+  assert.equal(editor.view.dom.querySelector("img").getAttribute("src"), `data:image/png;base64,${png.toString("base64")}`);
+  assert.equal(editor.view.dom.querySelector("img").alt, "保留图注");
+});

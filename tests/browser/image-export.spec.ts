@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Download, type Page, type TestInfo } from "@playwright/test";
 import JSZip from "jszip";
-import { makePng, shortArticleHtml, shortBody, shortTitle } from "./fixtures";
-import { expectPreviewImage, expectPreviewReady, importRichArticle, mainEditor, mainEditorPanel, openRichTextImport, openWorkbench, pasteImage, uploadImage } from "./helpers";
+import { compactText, makePng, shortArticleHtml, shortBody, shortTitle } from "./fixtures";
+import { expectCompletePreview, expectPreviewImage, expectPreviewReady, importRichArticle, mainEditor, mainEditorPanel, openRichTextImport, openWorkbench, pasteHtmlAndImageAtSelection, pasteImage, uploadImage } from "./helpers";
 
 type Marker = { pageNumber: number; x: number; y: number; red: number; green: number; blue: number };
 const FIRST_COLOR = [17, 193, 137] as const;
@@ -220,6 +220,37 @@ test("an image-only one-click import retains the pasted PNG and downloads its im
   await expectPreviewImage(page, pngSource(png));
   const marker = await locateMarker(page, pngSource(png), FIRST_COLOR);
   await downloadImagePage(page, marker, testInfo, "image-only-import-page.png");
+});
+
+test("one clipboard paste imports surrounding HTML and its temporary image file into a downloadable PNG", async ({ page }, testInfo) => {
+  test.setTimeout(180_000);
+  const { dialog, editor } = await openRichTextImport(page);
+  await editor.click();
+  await editor.press("ControlOrMeta+A");
+  await editor.press("Backspace");
+  const png = makePng(...SECOND_COLOR);
+  const temporarySource = await page.evaluate((base64) => {
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    return URL.createObjectURL(new File([bytes], "mixed-clipboard.png", { type: "image/png" }));
+  }, png.toString("base64"));
+  const before = "图片前的正文必须保留。";
+  const after = "图片后的正文也必须完整保留。";
+  const html = `<h1>${shortTitle}</h1><p>${before}</p><p><img src="${temporarySource}" alt="剪贴板原图"></p><p>${after}</p>`;
+  await pasteHtmlAndImageAtSelection(editor, html, shortTitle + before + after, png, "mixed-clipboard.png");
+  await expect(editor.locator("img")).toHaveCount(1);
+  await expect(editor.locator("img")).toHaveAttribute("src", pngSource(png));
+  await expect.poll(async () => compactText(await editor.textContent() || "")).toBe(compactText(shortTitle + before + after));
+  // The imported file must survive after the clipboard's temporary URL expires.
+  await page.evaluate((source) => URL.revokeObjectURL(source), temporarySource);
+  await dialog.getByRole("button", { name: "导入并替换正文 →", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(mainEditor(page).locator("img")).toHaveCount(1);
+  await expect(mainEditor(page).locator("img")).toHaveAttribute("src", pngSource(png));
+  await expect(page.getByLabel("醒目标题", { exact: true })).toHaveValue(shortTitle);
+  await expectCompletePreview(page, before + after);
+  await expectPreviewImage(page, pngSource(png));
+  const marker = await locateMarker(page, pngSource(png), SECOND_COLOR);
+  await downloadImagePage(page, marker, testInfo, "mixed-clipboard-import-page.png");
 });
 
 test("the batch ZIP opens with all pages and both inserted images intact", async ({ page }, testInfo) => {
