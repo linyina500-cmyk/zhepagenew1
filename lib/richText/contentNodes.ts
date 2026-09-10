@@ -1,5 +1,25 @@
 export const VISUAL_CONTENT_SELECTOR = "img,table,hr";
-export const EXPLICIT_SPACING_SELECTOR = ".manual-page-break,.manual-empty-line";
+export const EXPLICIT_SPACING_SELECTOR = ".manual-page-break,.manual-empty-line,br:not(.ProseMirror-trailingBreak)";
+
+/** Empty editor paragraphs are authored space. The extra caret-support BR in
+ * ProseMirror's live DOM is not part of the document and adds no extra line. */
+export function normalizeContentSpacing(root: ParentNode) {
+  root.querySelectorAll("br.ProseMirror-trailingBreak").forEach((lineBreak) => lineBreak.remove());
+  root.querySelectorAll("p").forEach((paragraph) => {
+    if (paragraph.classList.contains("manual-empty-line")
+      && (paragraph.textContent?.trim() || paragraph.querySelector(VISUAL_CONTENT_SELECTOR))) {
+      paragraph.classList.remove("manual-empty-line");
+      if (!paragraph.className) paragraph.removeAttribute("class");
+    }
+    if (paragraph.textContent?.trim() || paragraph.matches(EXPLICIT_SPACING_SELECTOR)
+      || paragraph.querySelector(`${VISUAL_CONTENT_SELECTOR},${EXPLICIT_SPACING_SELECTOR}`)
+      || paragraph.hasAttribute("data-pagination-fragment")) return;
+    // Whitespace-only marks carry no text, but their paragraph still occupies
+    // one line. Reuse the same rendering contract as the explicit blank button.
+    paragraph.replaceChildren();
+    paragraph.classList.add("manual-empty-line");
+  });
+}
 
 /** Shared by import normalization and pagination: empty formatting may be
  * cleaned up, but the user's images and explicit spacing are content. */

@@ -4,43 +4,49 @@ import type { FragmentEdges } from "./blockStructure";
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-function collectTextNodes(root: Element) {
-  const nodes: Text[] = [];
-  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+function collectContentNodes(root: Element) {
+  const nodes: Array<{ node: Text | Element; text: string }> = [];
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   let current = walker.nextNode();
   while (current) {
-    nodes.push(current as Text);
+    if (current.nodeType === Node.TEXT_NODE) nodes.push({ node: current as Text, text: current.textContent || "" });
+    else if ((current as Element).matches("br:not(.ProseMirror-trailingBreak)")) nodes.push({ node: current as Element, text: "\n" });
     current = walker.nextNode();
   }
   return nodes;
 }
 
-function cloneTextRange(source: Element, start: number, end: number) {
+function cloneContent(source: Element) {
+  const clone = source.cloneNode(true) as Element;
+  // ProseMirror adds these for cursor placement; they are not authored breaks.
+  clone.querySelectorAll("br.ProseMirror-trailingBreak").forEach((element) => element.remove());
+  return clone;
+}
+
+function cloneContentRange(source: Element, start: number, end: number) {
   if (end <= start) return null;
   // Range.cloneContents() omits inline ancestors when a range begins inside
   // <strong>, <span style>, <mark>, etc. Clone the full DOM first and trim
-  // text nodes by global offsets so every continuation keeps the complete
+  // content nodes by global offsets so every continuation keeps the complete
   // ancestor chain and therefore its color, emphasis and highlight styles.
-  const shell = source.cloneNode(true) as Element;
-  const nodes = collectTextNodes(shell);
+  // Each real <br> occupies one offset, so even consecutive or edge breaks
+  // belong to exactly one fragment instead of vanishing between text ranges.
+  const shell = cloneContent(source);
+  const nodes = collectContentNodes(shell);
   let traversed = 0;
-  nodes.forEach((node) => {
+  nodes.forEach(({ node, text }) => {
     const nodeStart = traversed;
-    const nodeEnd = nodeStart + node.data.length;
+    const nodeEnd = nodeStart + text.length;
     traversed = nodeEnd;
     if (nodeEnd <= start || nodeStart >= end) {
       node.remove();
       return;
     }
-    const localStart = Math.max(0, start - nodeStart);
-    const localEnd = Math.min(node.data.length, end - nodeStart);
-    node.data = node.data.slice(localStart, localEnd);
-  });
-  const keptTextNodes = collectTextNodes(shell).filter((node) => node.data.length > 0);
-  shell.querySelectorAll("br").forEach((lineBreak) => {
-    const hasTextBefore = keptTextNodes.some((node) => Boolean(node.compareDocumentPosition(lineBreak) & Node.DOCUMENT_POSITION_FOLLOWING));
-    const hasTextAfter = keptTextNodes.some((node) => Boolean(node.compareDocumentPosition(lineBreak) & Node.DOCUMENT_POSITION_PRECEDING));
-    if (!hasTextBefore || !hasTextAfter) lineBreak.remove();
+    if (node.nodeType === Node.TEXT_NODE) {
+      const localStart = Math.max(0, start - nodeStart);
+      const localEnd = Math.min(text.length, end - nodeStart);
+      (node as Text).data = text.slice(localStart, localEnd);
+    }
   });
   [...shell.querySelectorAll("*")].reverse().forEach((element) => {
     const hasText = Boolean(element.textContent);
@@ -69,8 +75,8 @@ export function splitTextPreservingDom(
   firstPieceFits?: (html: string) => boolean,
   wrap: (element: Element, edges: FragmentEdges) => Element = (element) => element,
 ) {
-  const text = collectTextNodes(source).map((node) => node.data).join("");
-  if (text.length < 2) return [source.cloneNode(true) as Element];
+  const text = collectContentNodes(source).map(({ text }) => text).join("");
+  if (text.length < 2) return [cloneContent(source)];
   // Probe visible character boundaries, never individual UTF-16 code units.
   // This preserves surrogate pairs, combining marks, flags and joined emoji.
   const boundaries = [...graphemeSegmenter.segment(text)].map(({ index }) => index);
@@ -82,7 +88,7 @@ export function splitTextPreservingDom(
   let limit = firstHeight;
   const originalPosition = source.getAttribute("data-pagination-fragment");
   const cloneFragment = (from: number, to: number) => {
-    const fragment = cloneTextRange(source, from, to);
+    const fragment = cloneContentRange(source, from, to);
     if (!fragment) return null;
     const startsOriginal = from === 0 && originalPosition !== "middle" && originalPosition !== "end";
     const endsOriginal = to === text.length && originalPosition !== "middle" && originalPosition !== "start";
@@ -122,7 +128,7 @@ export function splitTextPreservingDom(
     }
 
     if (best <= start) {
-      if (!pieces.length) return [source.cloneNode(true) as Element];
+      if (!pieces.length) return [cloneContent(source)];
       pieces.push(remainder);
       break;
     }
@@ -134,5 +140,5 @@ export function splitTextPreservingDom(
     while (boundaries[startIndex] < start) startIndex += 1;
     limit = pageHeight;
   }
-  return pieces.length ? pieces : [source.cloneNode(true) as Element];
+  return pieces.length ? pieces : [cloneContent(source)];
 }
