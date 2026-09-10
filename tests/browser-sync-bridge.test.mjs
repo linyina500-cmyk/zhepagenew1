@@ -4,7 +4,7 @@ import { JSDOM } from "jsdom";
 import { installBrowserSync } from "../lib/browserSync/bridge.mjs";
 
 const ORIGIN = "https://feature-local-draft-sync.zhepagenew.pages.dev";
-const SOURCE = `${ORIGIN}/browser-sync-check.html`;
+const SOURCE = `${ORIGIN}/browser-sync-check`;
 const CHANNEL = "zhepage-browser-sync-v1";
 const TTL = 30 * 60 * 1000;
 const key = (platform) => `${CHANNEL}:${platform}`;
@@ -63,7 +63,7 @@ test("accepts messages only from this window at the fixed preview path and origi
   assert.equal(source.responses.at(-1).origin, ORIGIN);
   source.window.history.replaceState(null, "", "/another-page");
   assert.deepEqual(await source.send(request()), []);
-  for (const url of [`${ORIGIN}/`, "https://other.example/browser-sync-check.html"]) {
+  for (const url of [`${ORIGIN}/`, "https://other.example/browser-sync-check"]) {
     const other = harness(t, url);
     assert.deepEqual(await other.send(request()), []);
     assert.equal(other.events.length, 0);

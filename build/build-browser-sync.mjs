@@ -8,7 +8,7 @@ const metadata = `// ==UserScript==
 // @namespace    ${origin}/browser-sync
 // @version      0.1.0
 // @description  在当前浏览器中，把测试图片和文案填入小红书图文或公众号贴图编辑器。不会发布。
-// @match        ${origin}/browser-sync-check.html
+// @match        ${origin}/browser-sync-check
 // @match        https://creator.xiaohongshu.com/publish/*
 // @match        https://mp.weixin.qq.com/cgi-bin/*
 // @grant        GM.setValue

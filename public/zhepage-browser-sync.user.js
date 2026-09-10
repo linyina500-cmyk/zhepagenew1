@@ -3,7 +3,7 @@
 // @namespace    https://feature-local-draft-sync.zhepagenew.pages.dev/browser-sync
 // @version      0.1.0
 // @description  在当前浏览器中，把测试图片和文案填入小红书图文或公众号贴图编辑器。不会发布。
-// @match        https://feature-local-draft-sync.zhepagenew.pages.dev/browser-sync-check.html
+// @match        https://feature-local-draft-sync.zhepagenew.pages.dev/browser-sync-check
 // @match        https://creator.xiaohongshu.com/publish/*
 // @match        https://mp.weixin.qq.com/cgi-bin/*
 // @grant        GM.setValue
@@ -272,7 +272,7 @@
   const platforms = ["xiaohongshu", "wechat"];
   if (window.top !== window.self) return;
   const key = (platform) => `${CHANNEL}:${platform}`;
-  const isSource = () => window.location.origin === ORIGIN && window.location.pathname === "/browser-sync-check.html";
+  const isSource = () => window.location.origin === ORIGIN && window.location.pathname === "/browser-sync-check";
   const reply = (id, payload) => window.postMessage({ channel: CHANNEL, kind: "response", id, ...payload }, ORIGIN);
   const statusOf = (job) => job ? { id: job.id, status: job.status, message: job.message, title: job.draft.title, imageCount: job.draft.images.length } : null;
   async function write(job) {
