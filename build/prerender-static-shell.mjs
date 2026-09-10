@@ -62,4 +62,4 @@ wrangler.assets = {
 };
 await writeFile(wranglerPath, `${JSON.stringify(wrangler, null, 2)}\n`, "utf8");
 
-console.log("静态首页已生成：仅 /api/import 与 /api/image 请求优先进入 Worker");
+console.log("静态首页已生成：文章导入与图片代理 API 优先进入 Worker");

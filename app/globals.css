@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./components/DraftSyncDialog.css";
 
 /*
  * The poster fonts are shipped with the site instead of relying on whatever
@@ -460,7 +461,7 @@ select:focus { border-color: var(--brown); box-shadow: 0 0 0 3px var(--focus-rin
 .article-flow th { background: #e9d8c2 !important; color: #63371b !important; }
 .article-flow hr { height: 2px; margin: 36px 0; border: 0; background: #d3c1aa; }
 .article-flow .manual-page-break { display: none; }
-.article-flow .manual-empty-line { display: block; min-height: calc(34px * var(--type-scale)); margin: 0 !important; padding: 0 !important; font-size: calc(34px * var(--type-scale)) !important; line-height: var(--article-leading) !important; break-inside: avoid; }
+.article-flow .manual-empty-line { display: block; min-height: calc(34px * var(--type-scale) * var(--article-leading)); margin: 0 !important; padding: 0 !important; font-size: calc(34px * var(--type-scale)) !important; line-height: var(--article-leading) !important; break-inside: avoid; }
 .article-flow .imported-inline-run { margin: 0 !important; padding: 0 !important; color: inherit; font: inherit; line-height: inherit; }
 .article-flow .imported-composite-visual { break-inside: avoid; }
 .article-flow .scaled-composite-visual { position: relative; width: 100%; margin: 0; overflow: hidden; break-inside: avoid; }

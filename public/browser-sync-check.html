@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>浏览器传图验证 · 折页</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#f6f3ec;color:#292624;font:15px/1.7 system-ui,-apple-system,sans-serif}main{max-width:760px;margin:auto;padding:52px 24px 80px}a{color:#9e392d;text-underline-offset:4px}header{border-bottom:1px solid #dcd4c9;padding-bottom:28px;margin-bottom:28px}.brand{letter-spacing:.12em;color:#8c8275;font-size:13px}h1{font-size:32px;line-height:1.3;letter-spacing:-.04em;margin:12px 0}h2{font-size:19px;margin:0 0 12px}p{margin:8px 0}section{margin:20px 0;background:#fffdf9;border:1px solid #ded7ce;border-radius:16px;padding:24px}.muted{color:#776e64;font-size:13px}.steps{display:flex;gap:12px;flex-wrap:wrap}.pill{background:#ece6dc;border-radius:100px;padding:4px 11px;font-size:12px}label{display:block;margin:14px 0 5px;font-weight:600}input,textarea,select{font:inherit;color:inherit;width:100%;padding:10px 12px;border:1px solid #cfc7bb;border-radius:8px;background:white}textarea{min-height:90px;resize:vertical}button,.button{display:inline-block;font:inherit;padding:9px 16px;border:1px solid #cfc7bb;border-radius:9px;background:#fffdf9;color:#292624;cursor:pointer;text-decoration:none;margin:6px 8px 6px 0}button.primary{background:#a83728;color:white;border-color:#a83728}button:disabled{opacity:.45;cursor:default}button:focus-visible,a:focus-visible{outline:3px solid #dc9a64;outline-offset:3px}.images{display:flex;gap:14px;margin:18px 0}.images img{width:116px;height:152px;object-fit:contain;border:1px solid #ddd4c7;border-radius:8px;background:#f5f0e6}.status{white-space:pre-wrap;overflow-wrap:anywhere;min-height:26px;padding:12px 14px;background:#f2ede3;border-radius:8px}.hidden{display:none}ol{padding-left:22px}li{margin:8px 0}@media(max-width:500px){main{padding:28px 16px}section{padding:18px}h1{font-size:27px}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">折页 / 浏览器传图验证</div>
+    <h1>先用两张图片，确认传图可用。</h1>
+    <p>图片在当前浏览器生成和暂存。你点击平台页面的导入按钮后，才上传到该平台。</p>
+    <p><a class="button" href="/">返回折页工作台，使用实际海报同步</a></p>
+    <p class="muted">本页仅用于检查扩展。同步你的文章时，请在工作台打开“同步草稿”，选择完整图片并填写平台文案。</p>
+    <div class="steps"><span class="pill">无需启动程序</span><span class="pill">无需另搭服务器</span><span class="pill">不会公开发布</span></div>
+  </header>
+  <section>
+    <h2>1. 准备浏览器扩展</h2>
+    <p>在你已登录小红书和公众号的同一个 Chrome 浏览器里完成。</p>
+    <a class="button" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo" target="_blank" rel="noopener noreferrer">打开 Tampermonkey 商店</a>
+    <a class="button" href="/zhepage-browser-sync.user.js">安装或更新折页传图脚本 0.2.1</a>
+    <p class="muted">首次安装后，在扩展详情打开“允许用户脚本”，再添加折页脚本。所有操作都在浏览器中完成。</p>
+    <button id="check-extension" type="button">检查是否就绪</button>
+    <p class="status" id="extension-status" role="status">正在检测浏览器扩展…</p>
+  </section>
+  <section>
+    <h2>2. 准备两张测试图</h2>
+    <p class="muted">这些是带有“验证用图”字样的新图片，不包含你的文章或账号资料。</p>
+    <label for="platform">要验证的平台</label>
+    <select id="platform"><option value="xiaohongshu">小红书 · 图文笔记</option><option value="wechat">公众号 · 图文/贴图</option></select>
+    <label for="title">标题（最多 20 字）</label>
+    <input id="title" value="折页浏览器传图验证" maxlength="40">
+    <label for="body">文案</label>
+    <textarea id="body" maxlength="1000">这是一组折页传图验证内容，共两张图片。仅保存草稿，不公开发布。</textarea>
+    <div class="images" id="images" aria-label="两张测试图预览"></div>
+    <button id="prepare" type="button" class="primary" disabled>把测试内容留在浏览器</button>
+    <p id="prepare-status" class="status" role="status">扩展就绪后即可准备。</p>
+  </section>
+  <section>
+    <h2>3. 到平台导入并核对草稿</h2>
+    <a class="button" id="open-platform" href="https://creator.xiaohongshu.com/publish/publish?from=menu_left&target=image" target="_blank" rel="noopener noreferrer">打开小红书图文编辑器</a>
+    <ol>
+      <li>登录后进入空白编辑器。公众号请选择“图文/贴图”。</li>
+      <li>在右下角的折页面板点击“检查待传内容”，确认标题和两张图片，再点“填入当前编辑器”。</li>
+      <li>核对账号、图片顺序和文案，然后保存草稿，并打开平台草稿箱确认。</li>
+    </ol>
+    <p class="muted">这一步正在验证平台兼容性。填入编辑器、触发保存、草稿箱中确实存在，是三个不同结果。</p>
+    <button id="check-result" type="button">查看传图进度</button>
+    <p id="result" class="status" role="status">还没有完成平台草稿验证。</p>
+    <p class="muted">在平台折页面板点击“结束本次传图”可清除临时图片。核对并结束上一组后，可在空白编辑器继续上传下一组。未开始导入的内容超过 30 分钟后读取时会清理；已开始导入的记录会保留，直到你核对并结束。</p>
+  </section>
+</main>
+<script>
+(() => {
+  const origin = 'https://feature-local-draft-sync.zhepagenew.pages.dev';
+  const channel = 'zhepage-browser-sync-v1';
+  const pending = new Map();
+  const $ = (id) => document.getElementById(id);
+  let ready = false;
+  let checking = false;
+  let preparing = false;
+  let images = [];
+  const request = (action, fields = {}) => new Promise((resolve, reject) => {
+    const id = crypto.randomUUID();
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('没有收到扩展回应。请确认脚本已启用，并刷新此页。')); }, action === 'prepare' ? 15000 : 3000);
+    pending.set(id, { resolve, reject, timer });
+    window.postMessage({ channel, kind: 'request', id, action, ...fields }, origin);
+  });
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (event.source !== window || event.origin !== origin || data?.channel !== channel || data.kind !== 'response') return;
+    const item = pending.get(data.id);
+    if (!item) return;
+    clearTimeout(item.timer); pending.delete(data.id);
+    if (data.ok) item.resolve(data); else item.reject(new Error(data.message || '本次操作未完成'));
+  });
+  async function check() {
+    if (checking) return;
+    checking = true; ready = false;
+    $('check-extension').disabled = true;
+    $('prepare').disabled = true;
+    $('extension-status').textContent = '正在检测浏览器扩展…';
+    try {
+      // The userscript may attach after this page's first message at document-idle.
+      let response;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { response = await request('ping'); break; }
+        catch (error) { if (attempt === 2) throw error; }
+      }
+      if (response.version !== '0.2.1') throw new Error('请先更新折页传图脚本至 0.2.1，再刷新折页和平台页面。');
+      ready = true;
+      $('extension-status').textContent = '扩展已连接。内容将留在当前浏览器。';
+    } catch (error) { $('extension-status').textContent = error.message; }
+    finally {
+      checking = false;
+      $('check-extension').disabled = false;
+      $('prepare').disabled = !ready || preparing;
+    }
+  }
+  function renderImages() {
+    const platform = $('platform').value;
+    $('images').replaceChildren();
+    images = [1, 2].map((number) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1080; canvas.height = platform === 'wechat' ? 1350 : 1440;
+      const context = canvas.getContext('2d');
+      context.fillStyle = number === 1 ? '#f1e9da' : '#cddad4'; context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = '#292624'; context.font = '38px system-ui'; context.fillText('折页 · 浏览器传图验证', 90, 130);
+      context.font = 'bold 220px system-ui'; context.fillText(`0${number}`, 80, 470);
+      context.font = '58px system-ui'; context.fillText('验证用图', 90, 620);
+      context.font = '34px system-ui'; context.fillText('只保存草稿，不公开发布', 90, 720);
+      context.fillText(`顺序：第 ${number} 张 / 共 2 张`, 90, canvas.height - 120);
+      const dataUrl = canvas.toDataURL('image/png');
+      const image = document.createElement('img'); image.src = dataUrl; image.alt = `验证用图 ${number}`; $('images').append(image);
+      return { name: `zhepage-check-0${number}.png`, mime: 'image/png', dataUrl };
+    });
+    $('open-platform').href = platform === 'wechat' ? 'https://mp.weixin.qq.com/' : 'https://creator.xiaohongshu.com/publish/publish?from=menu_left&target=image';
+    $('open-platform').textContent = platform === 'wechat' ? '打开公众号后台' : '打开小红书图文编辑器';
+    $('prepare-status').textContent = '两张测试图已生成，尚未交给扩展。';
+    $('result').textContent = '还没有完成平台草稿验证。';
+  }
+  $('check-extension').addEventListener('click', check);
+  $('platform').addEventListener('change', renderImages);
+  $('prepare').addEventListener('click', async () => {
+    if (!ready || preparing) return;
+    preparing = true;
+    const button = $('prepare'); button.disabled = true;
+    $('prepare-status').textContent = '正在保存到当前浏览器…';
+    try {
+      const result = await request('prepare', { platform: $('platform').value, draft: { title: $('title').value, body: $('body').value, images } });
+      $('prepare-status').textContent = `${result.job.imageCount} 张图片已留在浏览器。现在可以打开平台，检查待传内容。`;
+    } catch (error) { $('prepare-status').textContent = error.message; }
+    finally { preparing = false; button.disabled = !ready; }
+  });
+  $('check-result').addEventListener('click', async () => {
+    try {
+      const result = await request('status', { platform: $('platform').value });
+      $('result').textContent = result.job?.message || '浏览器中没有本平台的待传记录。';
+    } catch (error) { $('result').textContent = error.message; }
+  });
+  renderImages(); check();
+})();
+</script>
+</body>
+</html>

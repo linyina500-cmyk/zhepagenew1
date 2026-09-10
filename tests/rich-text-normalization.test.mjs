@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
 installDom();
@@ -13,7 +14,51 @@ const {
   richTextStats,
 } = loadDomModule("lib/richText/normalizeRichHtml.ts");
 const { beautifyArticle } = loadDomModule("lib/beautify/beautifyArticle.ts");
+const { articleBlocks } = loadDomModule("lib/pagination/articleBlocks.ts");
+const { assertPaginationSemantics } = loadDomModule("lib/pagination/semanticIntegrity.ts");
 const parse = (html) => new DOMParser().parseFromString(html, "text/html");
+
+test("real editor Enter paragraphs and ShiftEnter breaks survive base and automatic presentation", (t) => {
+  const require = createRequire(import.meta.url);
+  const { Editor } = require("@tiptap/core");
+  const { default: StarterKit } = require("@tiptap/starter-kit");
+  const editor = new Editor({ element: document.createElement("div"), extensions: [StarterKit], content: "<p>前文</p>" });
+  t.after(() => editor.destroy());
+  editor.commands.setTextSelection(3);
+  editor.commands.splitBlock(); editor.commands.splitBlock(); editor.commands.splitBlock();
+  editor.commands.insertContent("后文");
+  editor.commands.setHardBreak(); editor.commands.setHardBreak(); editor.commands.insertContent("末行");
+  const source = editor.getHTML();
+  assert.equal(source, "<p>前文</p><p></p><p></p><p>后文<br><br>末行</p>");
+  const normalized = normalizeRichHtmlDocument(parse(source)).body.innerHTML;
+  const liveNormalized = normalizeRichHtmlDocument(parse(editor.view.dom.innerHTML)).body.innerHTML;
+  assert.equal(liveNormalized, normalized, "the editor's caret-only trailingBreak must not add any spacing");
+  for (const html of [source, normalized, beautifyArticle(source).html]) {
+    const blocks = articleBlocks(html);
+    const output = parse(blocks.join(""));
+    assert.equal(output.querySelectorAll("p.manual-empty-line").length, 2);
+    assert.equal(output.querySelectorAll("br").length, 2);
+    assert.equal(output.querySelector(".ProseMirror-trailingBreak"), null);
+    assert.equal(output.body.textContent, "前文后文末行");
+    assert.doesNotThrow(() => assertPaginationSemantics(html, blocks));
+  }
+  assert.equal(editor.getHTML(), source, "presentation must not alter the editor document");
+});
+
+test("normalization keeps direct line breaks but gives a caret-only blank paragraph one spacer", () => {
+  const html = '<section><span>前文</span><br><br><span>后文</span></section><p><br class="ProseMirror-trailingBreak"></p>';
+  const normalized = normalizeRichHtmlDocument(parse(html));
+  assert.equal(normalized.querySelectorAll(".imported-inline-run br").length, 2);
+  assert.equal(normalized.querySelectorAll(".manual-empty-line").length, 1);
+  assert.equal(normalized.querySelector(".manual-empty-line").innerHTML, "");
+  assert.equal(normalized.querySelector(".ProseMirror-trailingBreak"), null);
+});
+
+test("typing into a preserved blank paragraph restores normal paragraph layout", () => {
+  const normalized = normalizeRichHtmlDocument(parse('<p class="manual-empty-line source-style">新增正文</p>'));
+  assert.equal(normalized.querySelector("p").className, "source-style");
+  assert.equal(normalized.body.textContent, "新增正文");
+});
 
 test("a painted article wrapper keeps its paragraphs available for automatic typesetting", () => {
   const source = `<section style="background:#fff;padding:24px"><div><p>这是文章的导语，用来介绍接下来需要讨论的问题。</p><p>一、需求变化</p><p>第一，需求变化需要结合实际数据进行观察。</p></div></section>`;

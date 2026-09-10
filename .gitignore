@@ -1,7 +1,9 @@
 node_modules/
 dist/
 dist-pages/
+public/downloads/
 .next/
+.vinext/
 .wrangler/
 playwright-report/
 test-results/

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { withTimeout } from "../../lib/async/withTimeout";
+import type { DraftImage } from "../../lib/draftSync/types";
 import { preparePosterSnapshot } from "../../lib/export/preparePosterSnapshot";
 
 export type ExportVersion = { inputKey: string; paginationVersion: number };
@@ -69,6 +70,7 @@ export function usePosterExport({
   setShowAllPreviewPages, onNotice: setNotice,
 }: PosterExportOptions) {
   const [exporting, setExporting] = useState(false);
+  const exportingRef = useRef(false);
   const htmlToImageModuleRef = useRef<Promise<typeof import("html-to-image")> | null>(null);
   const jsZipModuleRef = useRef<Promise<{ default: typeof import("jszip") }> | null>(null);
   const fontEmbedCssRef = useRef<{ key: string; promise: Promise<string> } | null>(null);
@@ -76,6 +78,18 @@ export function usePosterExport({
   useEffect(() => {
     fontEmbedCssRef.current = null;
   }, [fontKey]);
+
+  function beginExport() {
+    if (exportingRef.current) return false;
+    exportingRef.current = true;
+    setExporting(true);
+    return true;
+  }
+
+  function finishExport() {
+    exportingRef.current = false;
+    setExporting(false);
+  }
 
   async function getHtmlToImageModule() {
     htmlToImageModuleRef.current ||= import("html-to-image");
@@ -157,7 +171,7 @@ export function usePosterExport({
   }
 
   async function exportOne(index: number) {
-    setExporting(true);
+    if (!beginExport()) return;
     setNotice({ tone: "neutral", text: `正在导出第 ${index + 1} 页…` });
     try {
       const version = requireCurrentExport();
@@ -171,12 +185,12 @@ export function usePosterExport({
     } catch (error) {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "导出失败，请刷新页面后重试" });
     } finally {
-      setExporting(false);
+      finishExport();
     }
   }
 
   async function exportAll() {
-    setExporting(true);
+    if (!beginExport()) return;
     try {
       const version = requireCurrentExport();
       jsZipModuleRef.current ||= import("jszip");
@@ -200,9 +214,33 @@ export function usePosterExport({
       jsZipModuleRef.current = null;
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "批量导出失败，请尝试单张导出" });
     } finally {
-      setExporting(false);
+      finishExport();
     }
   }
 
-  return { exporting, exportOne, exportAll };
+  async function collectAssets(): Promise<DraftImage[]> {
+    if (!beginExport()) throw new Error("图片正在处理中，请等待当前任务完成");
+    try {
+      const version = requireCurrentExport();
+      if (!totalPages) throw new Error("请先完成排版，再准备草稿图片");
+      const images: DraftImage[] = [];
+      for (let index = 0; index < totalPages; index += 1) {
+        setNotice({ tone: "neutral", text: `正在准备草稿图片 ${index + 1} / ${totalPages}…` });
+        const blob = await renderPage(index, version);
+        requireCurrentExport(version);
+        images.push({
+          id: crypto.randomUUID(),
+          name: `折页-${formatExportLabel(formatKey)}-${String(index + 1).padStart(2, "0")}.png`,
+          blob, width: format.width, height: format.height,
+        });
+      }
+      requireCurrentExport(version);
+      setNotice({ tone: "success", text: `${images.length} 张草稿图片已准备好` });
+      return images;
+    } finally {
+      finishExport();
+    }
+  }
+
+  return { exporting, exportOne, exportAll, collectAssets };
 }

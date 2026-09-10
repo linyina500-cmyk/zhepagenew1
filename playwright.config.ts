@@ -25,14 +25,14 @@ export default defineConfig({
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "firefox", use: { ...devices["Desktop Firefox"] } },
-    { name: "webkit", testMatch: "**/image-export.spec.ts", use: { ...devices["Desktop Safari"] } },
+    { name: "webkit", testMatch: ["**/image-export.spec.ts", "**/draft-sync*.spec.ts"], use: { ...devices["Desktop Safari"] } },
   ],
-  webServer: {
+  webServer: [{
     command: "npm run build:pages && npx vite preview --config vite.pages.config.ts --host 127.0.0.1 --port 4173 --strictPort",
     url: "http://127.0.0.1:4173",
     reuseExistingServer: false,
     timeout: 120_000,
     stdout: "pipe",
     stderr: "pipe",
-  },
+  }],
 });

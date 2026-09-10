@@ -30,11 +30,13 @@
 
 第一次使用请阅读 [使用说明.md](使用说明.md)。
 
+开发分支新增浏览器草稿同步，页面按“确认内容 → 交给浏览器 → 核对草稿”引导操作。安装 Chrome 扩展商店中的 Tampermonkey 和本站草稿助手脚本后，使用当前浏览器已登录的平台账号，把图片、标题和文案填入平台原生编辑器。无需另设同步服务器或运行辅助程序；保存结果需要在平台核对。两平台的文案和图片可单独存到当前浏览器。使用方式与验证边界见 [DRAFT_SYNC.md](DRAFT_SYNC.md)。
+
 自动排版的中文阅读层级参考了 [doocs/md](https://github.com/doocs/md)、[Markdown Nice](https://github.com/mdnice/markdown-nice) 与 [wechat-format](https://github.com/lyricat/wechat-format) 的公开设计思路，并按贴图分页场景重新实现。V4 提供“小红书爆款、财经深度长文、数据指数型、极简新闻型、重点卡片型”5 套结构版式；版式只管理信息层级，主题只管理颜色，两者可以独立切换。
 
 ## 本地运行
 
-需要 Node.js `>=22.13.0`。
+需要 Node.js 22.18+（22.x）或 24+。
 
 ```bash
 npm install
