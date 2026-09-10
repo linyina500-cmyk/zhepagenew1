@@ -61,6 +61,8 @@
   const pending = new Map();
   const $ = (id) => document.getElementById(id);
   let ready = false;
+  let checking = false;
+  let preparing = false;
   let images = [];
   const request = (action, fields = {}) => new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
@@ -77,10 +79,24 @@
     if (data.ok) item.resolve(data); else item.reject(new Error(data.message || '本次操作未完成'));
   });
   async function check() {
+    if (checking) return;
+    checking = true; ready = false;
+    $('check-extension').disabled = true;
+    $('prepare').disabled = true;
     $('extension-status').textContent = '正在检测浏览器扩展…';
-    try { await request('ping'); ready = true; $('extension-status').textContent = '扩展已连接。内容将留在当前浏览器。'; }
-    catch (error) { ready = false; $('extension-status').textContent = error.message; }
-    $('prepare').disabled = !ready;
+    try {
+      // The userscript may attach after this page's first message at document-idle.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { await request('ping'); ready = true; break; }
+        catch (error) { if (attempt === 2) throw error; }
+      }
+      $('extension-status').textContent = '扩展已连接。内容将留在当前浏览器。';
+    } catch (error) { $('extension-status').textContent = error.message; }
+    finally {
+      checking = false;
+      $('check-extension').disabled = false;
+      $('prepare').disabled = !ready || preparing;
+    }
   }
   function renderImages() {
     const platform = $('platform').value;
@@ -107,13 +123,15 @@
   $('check-extension').addEventListener('click', check);
   $('platform').addEventListener('change', renderImages);
   $('prepare').addEventListener('click', async () => {
+    if (!ready || preparing) return;
+    preparing = true;
     const button = $('prepare'); button.disabled = true;
     $('prepare-status').textContent = '正在保存到当前浏览器…';
     try {
       const result = await request('prepare', { platform: $('platform').value, draft: { title: $('title').value, body: $('body').value, images } });
       $('prepare-status').textContent = `${result.job.imageCount} 张图片已留在浏览器。现在可以打开平台，检查待传内容。`;
     } catch (error) { $('prepare-status').textContent = error.message; }
-    finally { button.disabled = !ready; }
+    finally { preparing = false; button.disabled = !ready; }
   });
   $('check-result').addEventListener('click', async () => {
     try {
