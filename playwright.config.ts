@@ -35,13 +35,6 @@ export default defineConfig({
     stdout: "pipe",
     stderr: "pipe",
   }, {
-    command: "node tests/helpers/start-companion-fixture.mjs",
-    url: "http://127.0.0.1:47831/api/accounts",
-    reuseExistingServer: false,
-    timeout: 30000,
-    stdout: "pipe",
-    stderr: "pipe",
-  }, {
     command: "node tests/helpers/start-public-preview-fixture.mjs",
     url: "https://127.0.0.1:4174",
     ignoreHTTPSErrors: true,

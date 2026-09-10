@@ -2,11 +2,14 @@
 import type { D1Database } from "@cloudflare/workers-types/2023-07-01";
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { onRequest as proxySync } from "../functions/api/sync/[[path]]";
 
 // Vinext accepts standard web Request/Response objects at this boundary.
 type AssetBinding = NonNullable<NonNullable<Parameters<typeof handler.fetch>[1]>["ASSETS"]>;
 
 interface Env {
+  SYNC_SERVICE_URL?: string;
+  SYNC_GATEWAY_SECRET?: string;
   ASSETS: AssetBinding;
   DB: D1Database;
   IMAGES: {
@@ -32,6 +35,8 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/api/sync/")) return proxySync({ request, env });
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];

@@ -1,0 +1,14 @@
+**
+!package.json
+!package-lock.json
+!cloud
+!cloud/**
+!lib
+!lib/draftSync
+!lib/draftSync/validation.ts
+!lib/draftSync/types.ts
+cloud/.env*
+cloud/*secrets*
+cloud/keys.json
+cloud/access-password
+cloud/gateway-secret

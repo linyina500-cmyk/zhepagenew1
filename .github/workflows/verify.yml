@@ -31,6 +31,26 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
 
+  cloud-runtime:
+    name: Cloud container and temporary browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build the pinned cloud runtime
+        run: docker build -f cloud/Dockerfile -t zhepage-sync:ci .
+      - name: Verify the browser under deployment restrictions
+        run: >-
+          docker run --rm --init --read-only --network=none
+          --tmpfs /tmp:rw,nosuid,nodev,size=1073741824,mode=1777
+          --tmpfs /home/pwuser:rw,nosuid,nodev,size=16777216,mode=1777
+          --shm-size=1g --memory=3g --cpus=2 --pids-limit=512 --ulimit core=0
+          --security-opt no-new-privileges:true
+          --security-opt seccomp=cloud/seccomp_profile.json
+          zhepage-sync:ci node cloud/check-runtime.mjs
+
   browser:
     name: Browser (${{ matrix.browser }})
     # Run Safari's engine on macOS. Linux WebKit uses a different font backend.

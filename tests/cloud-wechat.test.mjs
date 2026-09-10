@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { saveWechatDraft, verifyWechatAccount } from "../companion/providers/wechat.mjs";
+import { saveWechatDraft, verifyWechatAccount } from "../cloud/providers/wechat.mjs";
 
 const appId = "wx0123456789abcdef";
 const secret = "test-secret-never-return";

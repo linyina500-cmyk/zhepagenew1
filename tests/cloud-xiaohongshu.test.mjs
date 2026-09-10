@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { Buffer } from "node:buffer";
 import { JSDOM } from "jsdom";
-import { loginXiaohongshu, saveXiaohongshuDraft } from "../companion/providers/xiaohongshu.mjs";
+import { loginXiaohongshu, saveXiaohongshuDraft } from "../cloud/providers/xiaohongshu.mjs";
 
 const ORIGIN = "https://creator.xiaohongshu.com";
 const account = { remoteId: "creator-123", displayName: "测试账号" };

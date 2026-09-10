@@ -1,7 +1,7 @@
 export type DraftPlatform = "xiaohongshu" | "wechat";
 export type DraftContent = { title: string; body: string };
 export type DraftImage = { id: string; name: string; blob: Blob; width: number; height: number };
-export type DraftAccount = { id: string; platform: DraftPlatform; displayName: string; remoteId: string; ready: boolean; syncBlocked?: boolean };
+export type DraftAccount = { id: string; platform: DraftPlatform; displayName: string; remoteId: string; ready: boolean; syncBlocked?: boolean; pendingJobId?: string };
 export type SyncReceipt = {
   accountId: string;
   platform: DraftPlatform;
