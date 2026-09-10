@@ -58,8 +58,8 @@ await writeFile(clientIndex, html, "utf8");
 wrangler.assets = {
   ...(wrangler.assets || {}),
   not_found_handling: "single-page-application",
-  run_worker_first: ["/api/import", "/api/image", "/api/sync/*"],
+  run_worker_first: ["/api/import", "/api/image"],
 };
 await writeFile(wranglerPath, `${JSON.stringify(wrangler, null, 2)}\n`, "utf8");
 
-console.log("静态首页已生成：文章导入、图片代理与网页同步 API 优先进入 Worker");
+console.log("静态首页已生成：文章导入与图片代理 API 优先进入 Worker");

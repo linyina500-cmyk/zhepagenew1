@@ -1,10 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type RefObject } from "react";
-import { acknowledgeUnconfirmed, addWechatAccount, addXiaohongshuAccount, cancelXiaohongshuLogin, connectCloudService, getCloudSession, listAccounts, removeAccount, syncDraft, type CloudConnection, type JobPreview } from "../../lib/draftSync/cloudClient";
-import { getRememberAccounts } from "../../lib/draftSync/credentialStore";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type RefObject } from "react";
+import { BROWSER_SYNC_VERSION, BrowserSyncUnconfirmedError, createBrowserSyncClient, type BrowserSyncJob } from "../../lib/browserSync/client";
 import { clearLocalDraft, loadLocalDraft, saveLocalDraft } from "../../lib/draftSync/localDraftStore";
-import type { DraftAccount, DraftImage, DraftPlatform, LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
+import type { DraftImage, DraftPlatform, LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
 import { countCharacters, countHashtags, DRAFT_LIMITS, imageMetadata, readDraftImage, validateDraft } from "../../lib/draftSync/validation";
 
 type DraftSyncDialogProps = {
@@ -18,23 +17,27 @@ type DraftSyncDialogProps = {
   onReturnToEditor: () => void;
 };
 type Feedback = { tone: "neutral" | "success" | "error"; text: string };
-type DraftStep = "content" | "accounts" | "results";
-type AccountProgress = { platform: DraftPlatform; phase: "waiting" | "cancelling" | "unconfirmed"; error?: string };
-type AccountAttempt = {
-  connection: CloudConnection;
-  controller: AbortController;
-  cancelling: boolean;
-  cancellationAttempted: boolean;
-  closeAfter?: "dialog" | "editor";
-} & ({ platform: "xiaohongshu"; loginRequestId: string } | { platform: "wechat" });
+type DraftStep = "content" | "browser" | "results";
+type Readback = { job: BrowserSyncJob | null; checked: boolean };
 const STEPS: { id: DraftStep; label: string; hint: string }[] = [
-  { id: "content", label: "确认内容", hint: "检查图片，为两个平台分别填写标题和文案。" },
-  { id: "accounts", label: "选择账号", hint: "连接要使用的账号，勾选后保存到平台草稿。" },
-  { id: "results", label: "保存结果", hint: "逐个查看账号结果，再到对应平台检查和发布。" },
+  { id: "content", label: "确认内容", hint: "检查完整图片和顺序，为两个平台分别填写标题与文案。" },
+  { id: "browser", label: "交给浏览器", hint: "把真实内容留在当前浏览器，再到平台原生编辑器导入。" },
+  { id: "results", label: "核对草稿", hint: "使用平台当前登录的账号，核对导入内容并在草稿箱确认保存结果。" },
 ];
 const PLATFORMS: DraftPlatform[] = ["xiaohongshu", "wechat"];
-const RECEIPT_LABELS: Record<SyncReceipt["status"], string> = { saved: "已保存平台草稿", confirmed_by_user: "用户确认已保存", needs_confirmation: "待核实", failed: "未保存" };
+const EDITOR_URLS: Record<DraftPlatform, string> = {
+  xiaohongshu: "https://creator.xiaohongshu.com/publish/publish?from=menu_left&target=image",
+  wechat: "https://mp.weixin.qq.com/",
+};
+const JOB_LABELS: Record<BrowserSyncJob["status"], string> = {
+  ready: "已存入扩展，尚未导入", filling: "正在导入，请勿重复操作", filled: "已填入编辑器，草稿尚待核对", needs_confirmation: "导入或保存结果待核对",
+};
+const receiptKey = (platform: DraftPlatform) => `browser-sync:${platform}`;
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "操作未完成，请重试";
+const withReceipt = (draft: LocalDraft, receipt: SyncReceipt): LocalDraft => ({
+  ...draft, updatedAt: new Date().toISOString(), selectedAccountIds: [],
+  receipts: [...draft.receipts.filter((item) => item.accountId !== receipt.accountId), receipt],
+});
 
 function DraftThumbnail({ image, index }: { image: DraftImage; index: number }) {
   const imageRef = useRef<HTMLImageElement>(null);
@@ -45,40 +48,23 @@ function DraftThumbnail({ image, index }: { image: DraftImage; index: number }) 
     node.src = url;
     return () => { node.removeAttribute("src"); URL.revokeObjectURL(url); };
   }, [image.blob]);
-  // Generated local Blobs need their exact dimensions, without an image proxy.
+  // Generated local Blobs retain their original dimensions and bytes.
   // eslint-disable-next-line @next/next/no-img-element
   return <img ref={imageRef} alt={`草稿图片 ${index + 1}：${image.name}`} width={image.width} height={image.height} />;
-}
-
-function CloudSnapshot({ preview, label }: { preview: JobPreview; label: string }) {
-  const [expired, setExpired] = useState(() => Boolean(preview.expiresAt && preview.expiresAt <= Date.now()));
-  useEffect(() => {
-    if (!preview.expiresAt) return;
-    const timer = window.setTimeout(() => setExpired(true), Math.max(0, preview.expiresAt - Date.now()));
-    return () => window.clearTimeout(timer);
-  }, [preview.expiresAt]);
-  return <div className="draft-sync-cloud-snapshot">
-    {preview.image && !expired && <>
-      {/* The service supplies a validated, in-memory JPEG, never a remote URL. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={preview.image} alt={label} />
-    </>}
-    {preview.expiresAt && <p>{expired ? "临时核对页面已到期，请到平台检查实际保存结果。" : `临时核对页面保留至 ${new Date(preview.expiresAt).toLocaleTimeString("zh-CN")}，记录核对结果后即清理。`}</p>}
-  </div>;
 }
 
 export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, canCollect, collectAssets, onClose, onReturnToEditor }: DraftSyncDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replacementIdRef = useRef<string | null>(null);
-  const operationRef = useRef(false);
-  const accountAttemptRef = useRef<AccountAttempt | null>(null);
+  const operationRef = useRef<AbortController | null>(null);
+  const clientRef = useRef<ReturnType<typeof createBrowserSyncClient> | null>(null);
+  const mountedRef = useRef(true);
   const loadStartedRef = useRef(false);
-  const sessionAttemptRef = useRef(false);
   const stepHeadingRef = useRef<HTMLHeadingElement>(null);
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const [step, setStep] = useState<DraftStep>("content");
-  const [connectionState, setConnectionState] = useState<"idle" | "connecting" | "connected" | "error">("idle");
+  const [connectionState, setConnectionState] = useState<"idle" | "checking" | "connected" | "error">("idle");
   const [connectionError, setConnectionError] = useState("");
   const [draft, setDraft] = useState<LocalDraft | null>(null);
   const [storedDraft, setStoredDraft] = useState<LocalDraft | null>(null);
@@ -88,31 +74,32 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   const [archiveFeedback, setArchiveFeedback] = useState<Feedback | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [busy, setBusy] = useState("");
-  const [accountProgress, setAccountProgress] = useState<AccountProgress | null>(null);
   const [platform, setPlatform] = useState<DraftPlatform>("xiaohongshu");
-  const [servicePassword, setServicePassword] = useState("");
-  const [rememberAccounts, setRememberAccounts] = useState(false);
-  const [connection, setConnection] = useState<CloudConnection | null>(null);
-  const [loginImage, setLoginImage] = useState("");
-  const [jobPreviews, setJobPreviews] = useState<Record<string, JobPreview>>({});
-  const [accounts, setAccounts] = useState<DraftAccount[]>([]);
-  const [accountName, setAccountName] = useState("");
-  const [appId, setAppId] = useState("");
-  const [appSecret, setAppSecret] = useState("");
-  const [pendingChecks, setPendingChecks] = useState<Record<string, SyncReceipt>>({});
+  const [readbacks, setReadbacks] = useState<Partial<Record<DraftPlatform, Readback>>>({});
   const [acceptedWarnings, setAcceptedWarnings] = useState("");
-  const [contentChanged, setContentChanged] = useState(false);
+  const [contentChanged, setContentChanged] = useState<Record<DraftPlatform, boolean>>({ xiaohongshu: false, wechat: false });
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      operationRef.current?.abort();
+      clientRef.current?.dispose();
+      clientRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog || !open) return;
-    // Pointer activation does not focus buttons in every browser. Retain the
-    // explicit trigger instead of guessing it from document.activeElement.
     const opener = openerRef.current;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     dialog.showModal();
     return () => {
+      operationRef.current?.abort();
+      clientRef.current?.dispose();
+      clientRef.current = null;
       dialog.close();
       document.body.style.overflow = previousOverflow;
       if (opener?.isConnected) opener.focus({ preventScroll: true });
@@ -120,53 +107,20 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   }, [open, openerRef]);
 
   async function readStoredDraft() {
-    setStorageState("loading");
-    setStorageError("");
+    setStorageState("loading"); setStorageError("");
     try {
       const saved = await loadLocalDraft();
-      setStoredDraft(saved);
-      setStorageState("ready");
+      if (!mountedRef.current) return;
+      setStoredDraft(saved); setStorageState("ready");
     } catch (error) {
-      setStorageState("error");
-      setStorageError(errorMessage(error));
+      if (!mountedRef.current) return;
+      setStorageState("error"); setStorageError(errorMessage(error));
     }
   }
-
   useEffect(() => {
     if (!open || loadStartedRef.current) return;
     loadStartedRef.current = true;
-    // Storage is loaded only on the first user-opened dialog, never written here.
     void Promise.resolve().then(readStoredDraft);
-  }, [open]);
-
-  useEffect(() => {
-    const expired = () => {
-      setConnection(null);
-      setConnectionState("error");
-      setConnectionError("同步服务登录已过期，请重新输入服务口令。待核对的同步不会自动重试。");
-    };
-    window.addEventListener("zhepage-sync-session-expired", expired);
-    return () => window.removeEventListener("zhepage-sync-session-expired", expired);
-  }, []);
-
-  useEffect(() => {
-    if (!open || sessionAttemptRef.current) return;
-    sessionAttemptRef.current = true;
-    void Promise.resolve().then(async () => {
-      setConnectionState("connecting");
-      try {
-        setRememberAccounts(await getRememberAccounts());
-        const session = await getCloudSession();
-        if (!session.authenticated || !session.csrf) { setConnectionState("idle"); return; }
-        const next = { csrf: session.csrf };
-        applyAccounts(await listAccounts(next));
-        setConnection(next);
-        setConnectionState("connected");
-      } catch (error) {
-        setConnectionState("error");
-        setConnectionError(errorMessage(error));
-      }
-    });
   }, [open]);
 
   useEffect(() => {
@@ -178,13 +132,16 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   function queueSave(snapshot: LocalDraft) {
     const pending = saveChainRef.current.catch(() => {}).then(() => saveLocalDraft(snapshot));
     saveChainRef.current = pending;
-    return pending.then(() => { setStoredDraft(snapshot); setStorageState("ready"); setStorageError(""); });
+    return pending.then(() => {
+      if (!mountedRef.current) return;
+      setStoredDraft(snapshot); setStorageState("ready"); setStorageError("");
+    });
   }
-
   useEffect(() => {
-    if (!autoSave || !draft) return;
+    if (!autoSave || !draft || busy) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
+      if (operationRef.current) return;
       queueSave(draft).then(() => {
         if (!cancelled) setArchiveFeedback({ tone: "success", text: "已自动存到本机" });
       }).catch((error) => {
@@ -192,345 +149,216 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
       });
     }, 600);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [autoSave, draft]);
+  }, [autoSave, draft, busy]);
 
-  async function runOperation(label: string, operation: () => Promise<void>) {
+  function client() {
+    if (!clientRef.current) clientRef.current = createBrowserSyncClient(window);
+    return clientRef.current;
+  }
+  async function runOperation(label: string, operation: (signal: AbortSignal) => Promise<void>) {
     if (operationRef.current) return;
-    operationRef.current = true;
-    setBusy(label);
-    setFeedback(null);
-    try { await operation(); }
-    catch (error) { setFeedback({ tone: "error", text: errorMessage(error) }); }
-    finally { operationRef.current = false; setBusy(""); }
+    const controller = new AbortController();
+    operationRef.current = controller;
+    setBusy(label); setFeedback(null);
+    try { await operation(controller.signal); }
+    catch (error) {
+      if (mountedRef.current && !controller.signal.aborted) setFeedback({ tone: "error", text: errorMessage(error) });
+    } finally {
+      if (operationRef.current === controller) {
+        operationRef.current = null;
+        if (mountedRef.current) setBusy("");
+      }
+    }
   }
-
-  function updateDraft(update: (current: LocalDraft) => LocalDraft) {
+  function updateDraft(update: (current: LocalDraft) => LocalDraft, changedPlatform?: DraftPlatform) {
+    if (operationRef.current) return;
     setDraft((current) => current ? { ...update(current), updatedAt: new Date().toISOString() } : null);
-    setContentChanged(true);
-    setArchiveFeedback(null);
+    setContentChanged((current) => changedPlatform ? { ...current, [changedPlatform]: true } : { xiaohongshu: true, wechat: true }); setArchiveFeedback(null);
   }
-
-  function applyAccounts(next: DraftAccount[]) {
-    setAccounts(next);
-    // listAccounts overlays the durable browser pending markers before this
-    // refresh is allowed to clear an in-memory receipt lock.
-    setPendingChecks((current) => Object.fromEntries(Object.entries(current).filter(([id]) => !next.some((account) => account.id === id && account.syncBlocked === false))));
-  }
-
   function useStoredDraft() {
-    if (!storedDraft) return;
-    setDraft(storedDraft);
-    setContentChanged(false);
-    setAcceptedWarnings("");
-    setStep("content");
+    if (!storedDraft || operationRef.current) return;
+    setDraft({ ...storedDraft, selectedAccountIds: [], receipts: storedDraft.receipts.filter((item) => item.accountId === receiptKey(item.platform)) });
+    setContentChanged({ xiaohongshu: false, wechat: false }); setAcceptedWarnings(""); setReadbacks({}); setStep("content");
     setFeedback({ tone: "success", text: "已恢复本机存档，未重新生成或替换图片" });
   }
-
   function createDraft() {
-    void runOperation("正在生成当前图片…", async () => {
+    void runOperation("正在生成当前图片…", async (signal) => {
       const images = await collectAssets();
+      signal.throwIfAborted();
       const initialTitle = title.replace(/\s*\n\s*/g, " ").trim();
       setDraft({
         schemaVersion: 1, id: crypto.randomUUID(), updatedAt: new Date().toISOString(), sourceFormat, images,
         content: { xiaohongshu: { title: initialTitle, body: "" }, wechat: { title: initialTitle, body: "" } },
         selectedAccountIds: [], receipts: [],
       });
-      setContentChanged(false);
-      setStep("content");
-      setAcceptedWarnings("");
-      setArchiveFeedback(null);
-      setFeedback({ tone: "success", text: `已准备 ${images.length} 张图片。检查标题和文案后，进入下一步选择账号。` });
+      setContentChanged({ xiaohongshu: false, wechat: false }); setStep("content"); setReadbacks({}); setAcceptedWarnings(""); setArchiveFeedback(null);
+      setFeedback({ tone: "success", text: `已准备全部 ${images.length} 张真实图片。请检查顺序，并为所选平台填写标题和文案。` });
     });
   }
-
   function saveDraft() {
     if (!draft) return;
     setArchiveFeedback(null);
-    void runOperation("正在存到本机…", async () => {
-      await queueSave(draft);
-      setArchiveFeedback({ tone: "success", text: "图片、文案和账号选择已存到当前浏览器" });
+    void runOperation("正在存到本机…", async (signal) => {
+      await queueSave(draft); signal.throwIfAborted();
+      setArchiveFeedback({ tone: "success", text: "图片、独立文案和核对记录已存到当前浏览器" });
     });
   }
-
   function deleteArchive() {
     setAutoSave(false);
-    void runOperation("正在删除本机存档…", async () => {
-      await saveChainRef.current.catch(() => {});
-      await clearLocalDraft();
-      setStoredDraft(null);
-      setStorageState("ready");
-      setStorageError("");
+    void runOperation("正在删除本机存档…", async (signal) => {
+      await saveChainRef.current.catch(() => {}); signal.throwIfAborted();
+      await clearLocalDraft(); signal.throwIfAborted();
+      setStoredDraft(null); setStorageState("ready"); setStorageError("");
       setArchiveFeedback({ tone: "success", text: "本机存档已删除。当前窗口中的编辑仍可继续" });
     });
   }
-
-  async function connectService(event: FormEvent) {
-    event.preventDefault();
-    if (!servicePassword || (accountAttemptRef.current && accountProgress?.phase !== "unconfirmed")) return;
-    const password = servicePassword;
-    setServicePassword("");
-    await runOperation("正在连接网页同步服务…", async () => {
-      setConnection(null);
-      setConnectionState("connecting");
-      setConnectionError("");
-      try {
-        const next = await connectCloudService(password, rememberAccounts);
-        const interrupted = accountAttemptRef.current;
-        if (interrupted) interrupted.connection = next;
-        applyAccounts(await listAccounts(next));
-        setConnection(next);
-        setConnectionState("connected");
-        setFeedback({ tone: "success", text: "网页同步已连接，可以添加并选择平台账号。" });
-      } catch (error) {
-        setConnectionState("error");
-        setConnectionError(errorMessage(error));
-        throw error;
-      }
-    });
-  }
-
-  function addAccount() {
-    if (!connection || operationRef.current || accountAttemptRef.current) return;
-    const label = accountName.trim() || (platform === "wechat" ? "公众号账号" : "小红书账号");
-    const credentials = { appId: appId.trim(), appSecret: appSecret.trim() };
-    const attempt: AccountAttempt = {
-      connection, controller: new AbortController(), cancelling: false, cancellationAttempted: false,
-      ...(platform === "xiaohongshu" ? { platform, loginRequestId: crypto.randomUUID() } : { platform }),
-    };
-    accountAttemptRef.current = attempt;
-    setLoginImage("");
-    setAccountProgress({ platform, phase: "waiting" });
-    setFeedback(null);
-    setAppSecret("");
-    void (async () => {
-      try {
-        const account = attempt.platform === "wechat"
-          ? await addWechatAccount(attempt.connection, { displayName: label, ...credentials })
-          : await addXiaohongshuAccount(attempt.connection, label, attempt.loginRequestId, attempt.controller.signal, (image) => {
-            if (accountAttemptRef.current === attempt && !attempt.cancelling) setLoginImage(image);
-          });
-        // A cancellation response, followed by a fresh account list if the
-        // save already finished, owns the outcome once cancellation starts.
-        if (accountAttemptRef.current !== attempt || attempt.cancelling) return;
-        setAccounts((current) => [...current.filter((item) => item.id !== account.id), account]);
-        setAccountName("");
-        setAppId("");
-        accountAttemptRef.current = null;
-        setLoginImage("");
-        setAccountProgress(null);
-        setFeedback({ tone: "success", text: `${account.displayName} 已添加，请勾选需要同步的账号` });
-      } catch (error) {
-        if (accountAttemptRef.current !== attempt || attempt.cancelling) return;
-        if (attempt.platform === "xiaohongshu") {
-          // Losing the HTTP response does not prove that the login stopped.
-          // Resolve the server operation before allowing another account task.
-          if (!attempt.cancellationAttempted) await cancelAccountLogin(undefined, errorMessage(error));
-          else setAccountProgress({ platform: attempt.platform, phase: "unconfirmed", error: errorMessage(error) });
-        } else {
-          accountAttemptRef.current = null;
-          setAccountProgress(null);
-          setFeedback({ tone: "error", text: errorMessage(error) });
-        }
-      }
-    })();
-  }
-
-  async function cancelAccountLogin(closeAfter?: "dialog" | "editor", originalError?: string) {
-    const attempt = accountAttemptRef.current;
-    if (!attempt || attempt.platform !== "xiaohongshu") return;
-    if (closeAfter) attempt.closeAfter = closeAfter;
-    if (attempt.cancelling) return;
-    attempt.cancelling = true;
-    attempt.cancellationAttempted = true;
-    setAccountProgress({ platform: "xiaohongshu", phase: "cancelling" });
-    try {
-      const cancelled = await cancelXiaohongshuLogin(attempt.connection, attempt.loginRequestId);
-      if (accountAttemptRef.current !== attempt) return;
-      // false means this login has finished or is no longer the active one.
-      // Refresh its actual outcome without cancelling a later login.
-      if (!cancelled) applyAccounts(await listAccounts(attempt.connection));
-      if (accountAttemptRef.current !== attempt) return;
-      accountAttemptRef.current = null;
-      setLoginImage("");
-      setAccountProgress(null);
-      attempt.controller.abort();
-      setFeedback({ tone: originalError ? "error" : "neutral", text: originalError ? `${originalError} 已结束这次登录检查，可以重新尝试。` : cancelled ? "已取消小红书登录，可以继续编辑或重新添加账号。" : "这次登录已经结束，已刷新账号列表。请核对账号是否已添加。" });
-      if (attempt.closeAfter) closeDialog(attempt.closeAfter === "editor");
-    } catch (error) {
-      if (accountAttemptRef.current !== attempt) return;
-      attempt.cancelling = false;
-      attempt.closeAfter = undefined;
-      setAccountProgress({ platform: "xiaohongshu", phase: "unconfirmed", error: errorMessage(error) });
-    }
-  }
-
-  function refreshAccounts() {
-    if (!connection || accountAttemptRef.current) return;
-    void runOperation("正在刷新账号…", async () => { applyAccounts(await listAccounts(connection)); });
-  }
-
-  function deleteAccount(account: DraftAccount) {
-    if (!connection || accountAttemptRef.current) return;
-    void runOperation("正在移除账号…", async () => {
-      await removeAccount(connection, account.id);
-      setAccounts((current) => current.filter((item) => item.id !== account.id));
-      updateDraft((current) => ({ ...current, selectedAccountIds: current.selectedAccountIds.filter((id) => id !== account.id) }));
-      setFeedback({ tone: "success", text: `${account.displayName} 的加密授权包已从此浏览器移除，未撤销平台授权。` });
-    });
-  }
-
   function selectFiles(replacementId: string | null) {
+    if (operationRef.current) return;
     replacementIdRef.current = replacementId;
-    if (fileInputRef.current) {
-      fileInputRef.current.multiple = replacementId === null;
-      fileInputRef.current.click();
-    }
+    if (fileInputRef.current) { fileInputRef.current.multiple = replacementId === null; fileInputRef.current.click(); }
   }
-
   function onFilesSelected(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
     if (!files.length) return;
     const replacementId = replacementIdRef.current;
-    void runOperation("正在读取本机图片…", async () => {
+    void runOperation("正在读取本机图片…", async (signal) => {
       const images: DraftImage[] = [];
-      for (const file of files) images.push(await readDraftImage(file));
-      updateDraft((current) => ({
-        ...current,
-        images: replacementId
-          ? current.images.map((image) => image.id === replacementId ? images[0] : image)
-          : [...current.images, ...images],
-      }));
+      for (const file of files) { images.push(await readDraftImage(file)); signal.throwIfAborted(); }
+      setDraft((current) => current ? { ...current, updatedAt: new Date().toISOString(), images: replacementId
+        ? current.images.map((image) => image.id === replacementId ? images[0] : image) : [...current.images, ...images] } : null);
+      setContentChanged({ xiaohongshu: true, wechat: true }); setArchiveFeedback(null);
       setFeedback({ tone: "success", text: replacementId ? "图片已替换，未裁剪原图" : `已添加 ${images.length} 张图片，未裁剪原图` });
     });
   }
-
   function moveImage(index: number, direction: -1 | 1) {
     updateDraft((current) => {
-      const images = [...current.images];
-      const next = index + direction;
+      const images = [...current.images]; const next = index + direction;
       if (next < 0 || next >= images.length) return current;
       [images[index], images[next]] = [images[next], images[index]];
       return { ...current, images };
     });
   }
 
-  const selectedAccounts = accounts.filter((account) => draft?.selectedAccountIds.includes(account.id));
-  const selectedPlatforms = PLATFORMS.filter((target) => selectedAccounts.some((account) => account.platform === target));
-  const checkedPlatforms = selectedPlatforms.length ? selectedPlatforms : [platform];
+  const limit = DRAFT_LIMITS[platform];
   const metadata = useMemo(() => draft?.images.map(imageMetadata) || [], [draft?.images]);
-  const issues = draft ? checkedPlatforms.flatMap((target) => validateDraft(target, draft.content[target], metadata).map((issue) => ({ ...issue, platform: target }))) : [];
+  const issues = draft ? validateDraft(platform, draft.content[platform], metadata) : [];
   const errors = issues.filter((issue) => issue.severity === "error");
   const warnings = issues.filter((issue) => issue.severity === "warning");
-  const warningsKey = JSON.stringify({ metadata, warnings: warnings.map(({ platform, code, imageId }) => ({ platform, code, imageId })) });
-  const unknownAccounts = draft?.selectedAccountIds.filter((id) => !accounts.some((account) => account.id === id)) || [];
-  const unresolvedSelection = selectedAccounts.some((account) => pendingChecks[account.id] || account.syncBlocked);
-  const canSync = Boolean(connection && connectionState === "connected" && draft && selectedAccounts.length && !unknownAccounts.length && selectedAccounts.every((account) => account.ready) && !errors.length && (!warnings.length || acceptedWarnings === warningsKey) && !unresolvedSelection && !busy && !accountProgress);
+  const warningsKey = JSON.stringify({ platform, metadata, warnings: warnings.map(({ code, imageId }) => ({ code, imageId })) });
+  const contentReady = Boolean(draft && !errors.length && (!warnings.length || acceptedWarnings === warningsKey));
+  const receipt = draft?.receipts.find((item) => item.accountId === receiptKey(platform));
+  const readback = readbacks[platform];
+  const job = readback?.job;
+  const matchingJob = job && receipt?.draftId === job.id;
+  const canPrepare = Boolean(contentReady && connectionState === "connected" && !busy);
+
+  function checkExtension() {
+    void runOperation("正在检查浏览器扩展…", async (signal) => {
+      setConnectionState("checking"); setConnectionError("");
+      try {
+        await client().ping(signal); signal.throwIfAborted();
+        setConnectionState("connected");
+        setFeedback({ tone: "success", text: "浏览器扩展已连接，可以传入当前图片与文案。" });
+      } catch (error) {
+        if (!signal.aborted) { setConnectionState("error"); setConnectionError(errorMessage(error)); }
+        throw error;
+      }
+    });
+  }
 
   function submitDraft() {
-    if (!connection || !draft || !canSync || accountAttemptRef.current) return;
-    const snapshot = draft;
-    const connectionSnapshot = connection;
-    void runOperation("正在核对所选账号…", async () => {
-      const currentAccounts = await listAccounts(connectionSnapshot);
-      applyAccounts(currentAccounts);
-      const targets = snapshot.selectedAccountIds.map((id) => currentAccounts.find((account) => account.id === id));
-      if (targets.some((account) => !account?.ready || account.syncBlocked || pendingChecks[account.id])) throw new Error("部分所选账号不可用或仍待核实，请检查账号后重试");
-      setStep("results");
-      setContentChanged(false);
-      let needsConfirmation = false;
-      for (const target of targets) {
-        if (!target) continue;
-        const before = selectedAccounts.find((account) => account.id === target.id);
-        if (!before || before.remoteId !== target.remoteId || before.platform !== target.platform) throw new Error("账号身份已变化，已停止剩余同步。请重新核对所选账号");
-        setBusy(`正在同步到 ${target.displayName}…`);
-        let receipt: SyncReceipt;
-        try { receipt = await syncDraft(connectionSnapshot, target, snapshot.content[target.platform], snapshot.images, (preview) => setJobPreviews((current) => ({ ...current, [target.id]: preview }))); }
-        catch (error) { receipt = { accountId: target.id, platform: target.platform, status: "needs_confirmation", message: `同步未完成确认：${errorMessage(error)}。请先在平台核对草稿。` }; }
-        if (receipt.accountId !== target.id || receipt.platform !== target.platform || !["saved", "confirmed_by_user", "needs_confirmation", "failed"].includes(receipt.status) || (receipt.status === "saved" && !receipt.draftId)) {
-          receipt = { accountId: target.id, platform: target.platform, status: "needs_confirmation", message: "收到的结果缺少匹配的账号或草稿凭据，请先在平台核对" };
-        }
-        if (receipt.status === "needs_confirmation") setPendingChecks((current) => ({ ...current, [target.id]: receipt }));
-        const result = receipt;
-        setDraft((current) => current && current.id === snapshot.id ? {
-          ...current, updatedAt: new Date().toISOString(),
-          selectedAccountIds: result.status === "saved" || result.status === "confirmed_by_user" ? current.selectedAccountIds.filter((id) => id !== target.id) : current.selectedAccountIds,
-          receipts: [...current.receipts.filter((item) => item.accountId !== target.id), result],
-        } : current);
-        if (receipt.status === "needs_confirmation") { needsConfirmation = true; break; }
+    if (!draft || !canPrepare) return;
+    const snapshot = draft; const target = platform;
+    void runOperation("正在核对浏览器中的上一组内容…", async (signal) => {
+      const bridge = client();
+      const existing = await bridge.getStatus(target, signal); signal.throwIfAborted();
+      setReadbacks((current) => ({ ...current, [target]: { job: existing, checked: true } }));
+      if (existing) {
+        setStep("results");
+        setFeedback({ tone: "neutral", text: "扩展里仍有上一组内容。请先在平台核对编辑器和草稿箱，并在折页面板点击“结束本次传图”，再返回传入下一组。" });
+        return;
       }
-      setFeedback({ tone: "neutral", text: needsConfirmation ? "有账号需要核对，已暂停后续账号，尚未向它们发送。完成核对后返回选择账号继续。" : "所选账号已处理，已保存的账号已取消勾选。请查看逐个结果。" });
+      // Persist the request identity before sending so a refresh cannot turn an
+      // uncertain response into a blind second preparation of the same content.
+      const transferId = crypto.randomUUID();
+      const pendingReceipt: SyncReceipt = { accountId: receiptKey(target), platform: target, draftId: transferId, status: "needs_confirmation", message: "正在传入浏览器扩展，尚未确认导入或保存。中断后请先读取传图状态。" };
+      const staged = withReceipt(snapshot, pendingReceipt);
+      await queueSave(staged); signal.throwIfAborted();
+      setDraft(staged); setReadbacks((current) => ({ ...current, [target]: { job: null, checked: false } }));
+      setContentChanged((current) => ({ ...current, [target]: false })); setStep("results"); setBusy(`正在完整传入 ${snapshot.images.length} 张图片并读回核对…`);
+      let next: LocalDraft;
+      try {
+        const stored = await bridge.prepare({ id: transferId, platform: target, content: snapshot.content[target], images: snapshot.images }, signal);
+        next = withReceipt(staged, { ...pendingReceipt, message: stored.message });
+        if (mountedRef.current && !signal.aborted) {
+          setReadbacks((current) => ({ ...current, [target]: { job: stored, checked: true } }));
+          setFeedback({ tone: "success", text: `全部 ${stored.imageCount} 张图片及文案已存入扩展并读回核对。请到 ${DRAFT_LIMITS[target].label} 当前登录账号的编辑器导入。` });
+        }
+      } catch (error) {
+        const uncertain = error instanceof BrowserSyncUnconfirmedError;
+        next = withReceipt(staged, { ...pendingReceipt, status: uncertain ? "needs_confirmation" : "failed", message: uncertain ? errorMessage(error) : `内容尚未交给扩展：${errorMessage(error)}` });
+        if (mountedRef.current && !signal.aborted) setFeedback({ tone: "error", text: next.receipts.find((item) => item.accountId === receiptKey(target))!.message });
+      }
+      if (mountedRef.current) setDraft(next);
+      try { await queueSave(next); }
+      catch (error) {
+        if (mountedRef.current) setStorageError(`素材仍在当前窗口，本次结果未能更新到本机存档：${errorMessage(error)}`);
+      }
     });
   }
 
-  function confirmOutcome(accountId: string, outcome: "saved" | "not_saved") {
-    const account = accounts.find((item) => item.id === accountId);
-    if (!connection || !account || accountAttemptRef.current || (!pendingChecks[accountId] && !account.syncBlocked)) return;
-    void runOperation("正在记录核对结果…", async () => {
-      await acknowledgeUnconfirmed(connection, accountId, outcome, account.pendingJobId);
-      setJobPreviews((current) => { const next = { ...current }; delete next[accountId]; return next; });
-      // A successful acknowledgement resolves the lock. An unrelated account
-      // refresh must not turn that recorded outcome back into an uncertain save.
-      setAccounts((current) => current.map((item) => item.id === accountId ? { ...item, syncBlocked: false, pendingJobId: undefined } : item));
-      setPendingChecks((current) => { const next = { ...current }; delete next[accountId]; return next; });
-      const receipt: SyncReceipt = {
-        accountId, platform: account.platform,
-        status: outcome === "saved" ? "confirmed_by_user" : "failed",
-        message: outcome === "saved" ? "你已在对应平台账号检查并确认草稿已保存。这是你的人工确认，同步服务未自动验证。" : "你已在对应平台账号检查并确认草稿未保存。现已解除该账号的重试限制，尚未再次发送。",
-      };
-      setDraft((current) => current ? {
-        ...current, updatedAt: new Date().toISOString(),
-        selectedAccountIds: outcome === "saved" ? current.selectedAccountIds.filter((id) => id !== accountId) : current.selectedAccountIds,
-        receipts: [...current.receipts.filter((item) => item.accountId !== accountId), receipt],
-      } : current);
-      setFeedback({ tone: "neutral", text: outcome === "saved" ? `已记录你确认 ${account.displayName} 的草稿已保存，并取消该账号勾选。` : `已记录你确认 ${account.displayName} 的草稿未保存。需要重试时，点击“返回选择账号”检查后再保存。` });
+  function readTransfer() {
+    const target = platform; const snapshot = draft;
+    void runOperation("正在读取传图状态…", async (signal) => {
+      const stored = await client().getStatus(target, signal); signal.throwIfAborted();
+      setReadbacks((current) => ({ ...current, [target]: { job: stored, checked: true } }));
+      const previous = snapshot?.receipts.find((item) => item.accountId === receiptKey(target));
+      if (snapshot && previous?.status === "needs_confirmation" && stored && stored.id === previous.draftId) {
+        const next = withReceipt(snapshot, { ...previous, message: stored.message });
+        setDraft(next); await queueSave(next); signal.throwIfAborted();
+      }
+      setFeedback({ tone: "neutral", text: stored ? "已读回扩展记录。请以平台编辑器和草稿箱中的实际内容为准。" : "扩展中当前没有待传内容；这不能证明草稿已保存。核对平台后，可返回确认内容并传入下一组。" });
     });
   }
 
-  const limit = DRAFT_LIMITS[platform];
-  const platformAccounts = accounts.filter((account) => account.platform === platform);
-  const serverPending = accounts.filter((account) => account.syncBlocked && !pendingChecks[account.id]).map((account): SyncReceipt => ({ accountId: account.id, platform: account.platform, status: "needs_confirmation", message: "浏览器保留了一次未确认的同步。请先在对应平台账号检查草稿，再如实选择已保存或未保存；刷新页面或重新连接账号不会解除锁定。" }));
-  const allReceipts = [...(draft?.receipts.filter((receipt) => !pendingChecks[receipt.accountId] && !serverPending.some((item) => item.accountId === receipt.accountId)) || []), ...Object.values(pendingChecks), ...serverPending];
+  function confirmOutcome(outcome: "saved" | "not_saved") {
+    if (!draft || !receipt || !readback?.checked || (job && !matchingJob)) return;
+    const confirmed: SyncReceipt = { ...receipt, status: outcome === "saved" ? "confirmed_by_user" : "failed", message: outcome === "saved"
+      ? `你已在${limit.label}当前账号的草稿箱核对标题、文案与全部图片，并确认草稿已保存。这是人工确认。`
+      : `你已在${limit.label}核对，草稿尚未保存。请先处理当前编辑器中的内容，再在平台折页面板结束本次传图。` };
+    const next = withReceipt(draft, confirmed);
+    void runOperation("正在记录人工核对结果…", async (signal) => {
+      await queueSave(next); signal.throwIfAborted(); setDraft(next);
+      setFeedback({ tone: "neutral", text: "已记录你的核对结果。要传下一组或更换账号，请先在平台折页面板结束本次传图。" });
+    });
+  }
 
   function closeDialog(returnToEditor = false) {
-    if (operationRef.current) return;
-    if (accountAttemptRef.current?.platform === "xiaohongshu") {
-      void cancelAccountLogin(returnToEditor ? "editor" : "dialog");
-      return;
-    }
-    setAppSecret("");
-    setServicePassword("");
+    operationRef.current?.abort();
+    clientRef.current?.dispose(); clientRef.current = null;
+    setConnectionState("idle");
     if (returnToEditor) onReturnToEditor(); else onClose();
   }
-
   function goToStep(next: DraftStep) {
     if (operationRef.current) return;
-    setFeedback(null);
-    setAppSecret("");
-    setStep(next);
+    setFeedback(null); setStep(next);
+    if (next === "browser" && connectionState !== "connected") checkExtension();
   }
-
   const stepInfo = STEPS.find((item) => item.id === step)!;
-  const nextHint = step === "content"
-    ? !draft ? "先用当前海报开始，或继续已有的本机存档。" : !draft.images.length ? "请先添加至少一张图片。" : "检查完内容后，下一步选择账号。"
-    : step === "accounts"
-      ? accountProgress ? "账号连接尚未结束。你可以继续编辑；添加、移除和保存到平台草稿需等本次连接结束。" : !connection ? "请先使用管理员提供的口令连接网页同步服务。" : unknownAccounts.length ? "请重新连接存档中的账号，或清除不可用选择。" : unresolvedSelection ? "所选账号有待核实结果，请先查看并核对。" : !selectedAccounts.length ? "请至少勾选一个要保存的账号。" : selectedAccounts.some((account) => !account.ready) ? "所选账号需要重新登录。" : errors.length ? "请返回确认内容，修改检查中提示的问题。" : warnings.length && acceptedWarnings !== warningsKey ? "请先核对下方图片尺寸提示。" : `将 ${draft?.images.length || 0} 张图片保存到 ${selectedAccounts.length} 个账号草稿，之后仍需到平台发布。`
-      : allReceipts.some((receipt) => receipt.status === "needs_confirmation" && (pendingChecks[receipt.accountId] || accounts.find((account) => account.id === receipt.accountId)?.syncBlocked)) ? "待核实的账号请先到平台检查，再记录实际结果。" : "已保存的草稿可在对应平台继续编辑和发布。未保存的账号可返回选择后重试。";
-  const platformTabs = <div className="draft-sync-platforms" role="group" aria-label={step === "content" ? "选择文案平台" : "选择账号平台"}>{PLATFORMS.map((target) => <button type="button" key={target} aria-pressed={platform === target} disabled={Boolean(busy)} onClick={() => { setPlatform(target); setAppSecret(""); }}>{DRAFT_LIMITS[target].label}<span>{step === "content" ? "独立填写标题与文案" : `已选 ${selectedAccounts.filter((account) => account.platform === target).length} 个账号`}</span></button>)}</div>;
+  const nextHint = step === "content" ? !draft ? "先用当前海报开始，或继续已有的本机存档。" : contentReady ? "确认当前平台的完整内容后，下一步交给浏览器。" : "请先处理下方检查提示，再继续。"
+    : step === "browser" ? "每次只传当前平台；换账号时，请在平台自行切换并结束上一组传图。" : "“已填入编辑器”不代表草稿已保存，请在平台草稿箱核对。";
+  const platformTabs = <div className="draft-sync-platforms" role="group" aria-label="选择同步平台">{PLATFORMS.map((target) => <button type="button" key={target} aria-pressed={platform === target} disabled={Boolean(busy)} onClick={() => { setPlatform(target); setFeedback(null); }}>{DRAFT_LIMITS[target].label}<span>{step === "content" ? "独立填写标题与文案" : "使用平台当前登录账号"}</span></button>)}</div>;
+  const openPlatform = <a className="draft-sync-platform-link" href={EDITOR_URLS[platform]} target="_blank" rel="noopener noreferrer">{platform === "wechat" ? "打开公众号后台" : "打开小红书图文编辑器"}</a>;
 
   return <dialog ref={dialogRef} className="draft-sync-dialog" aria-labelledby="draft-sync-title" aria-describedby="draft-sync-description" onCancel={(event) => { event.preventDefault(); closeDialog(); }}>
     <div className="draft-sync-frame">
       <header className="draft-sync-header">
-        <div><span className="eyebrow">图片完成后，继续这三步</span><h2 id="draft-sync-title">同步到平台草稿</h2><p id="draft-sync-description">先确认内容，再选账号，最后查看保存结果。平台发布由你完成。</p></div>
-        <button type="button" className="modal-close" aria-label="关闭草稿同步" disabled={Boolean(busy)} onClick={() => closeDialog()}>×</button>
+        <div><span className="eyebrow">图片完成后，继续这三步</span><h2 id="draft-sync-title">同步到平台草稿</h2><p id="draft-sync-description">把你的完整图片和文案交给浏览器，在平台当前账号的编辑器导入、保存，再核对草稿。</p></div>
+        <button type="button" className="modal-close" aria-label="关闭草稿同步" onClick={() => closeDialog()}>×</button>
       </header>
-      <nav className="draft-sync-steps" aria-label="草稿保存步骤">{STEPS.map((item, index) => <button type="button" key={item.id} aria-current={step === item.id ? "step" : undefined} disabled={Boolean(busy) || (item.id === "accounts" && !draft?.images.length) || (item.id === "results" && !allReceipts.length)} onClick={() => goToStep(item.id)}><span aria-hidden="true">{index + 1}</span>{item.label}</button>)}</nav>
-      {accountProgress && <section className="draft-sync-login-progress" aria-label="账号连接进度" aria-live="polite">
-        <div><strong>{accountProgress.platform === "wechat" ? "正在验证公众号" : accountProgress.phase === "cancelling" ? "正在取消登录…" : accountProgress.phase === "unconfirmed" ? "登录状态尚未确认" : "请用小红书扫描本页二维码"}</strong><p>{accountProgress.platform === "wechat" ? "验证期间可以继续编辑。关闭此窗口后，验证仍会继续；稍后回来查看结果。" : accountProgress.phase === "cancelling" ? "正在确认本次登录已经结束。期间仍可继续编辑，完成前暂不能添加账号或保存平台草稿。" : accountProgress.phase === "unconfirmed" ? "尚未确认登录已经停止。可以继续编辑，请点击“取消登录”重新核对；服务登录过期时，先重新输入服务口令。" : "下方显示临时登录页面，用手机小红书扫码并确认。此处仅展示页面；若出现需要点击的验证，请取消后重新连接。等待时可继续编辑或存档。"}</p>{accountProgress.error && <p className="error" role="alert">{accountProgress.error}</p>}</div>
-        {accountProgress.platform === "xiaohongshu" && <button type="button" disabled={accountProgress.phase === "cancelling"} onClick={() => void cancelAccountLogin()}>取消登录</button>}
-      </section>}
+      <nav className="draft-sync-steps" aria-label="草稿保存步骤">{STEPS.map((item, index) => <button type="button" key={item.id} aria-current={step === item.id ? "step" : undefined} disabled={Boolean(busy) || (item.id === "browser" && !draft?.images.length) || (item.id === "results" && !draft)} onClick={() => goToStep(item.id)}><span aria-hidden="true">{index + 1}</span>{item.label}</button>)}</nav>
       <div className="draft-sync-scroll">
-        {accountProgress?.platform === "xiaohongshu" && loginImage && <section aria-label="小红书扫码页面"><CloudSnapshot preview={{ image: loginImage }} label="小红书临时登录页面，请使用手机扫码" /></section>}
         <div className="draft-sync-step-heading"><h3 ref={stepHeadingRef} tabIndex={-1}>{stepInfo.label}</h3><p>{stepInfo.hint}</p></div>
         {step === "content" && <>
           <section className="draft-sync-archive" aria-label="本机存档">
@@ -544,7 +372,7 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
             {storageError && <div className="draft-sync-message error" role="alert">{storageError}<button type="button" disabled={Boolean(busy)} onClick={() => void readStoredDraft()}>重新读取</button></div>}
             {!canCollect && <p>海报正在处理，排版完成后即可开始；也可继续已有存档。</p>}
           </section>
-          {!draft ? <div className="draft-sync-empty"><span aria-hidden="true">01</span><h3>先把当前海报带进来</h3><p>点击“用当前海报开始”，生成可单独编辑的图片副本。你可以替换图片、调整顺序，再给两个平台分别写文案。</p><p className="draft-sync-small">素材准备好后，在下一步连接网页同步服务和平台账号。</p></div> : <div className="draft-sync-columns">
+          {!draft ? <div className="draft-sync-empty"><span aria-hidden="true">01</span><h3>先把当前海报带进来</h3><p>点击“用当前海报开始”，生成全部海报的图片副本。你可以替换图片、调整顺序，再给两个平台分别写文案。</p><p className="draft-sync-small">下一步通过浏览器扩展传入这些真实内容。</p></div> : <div className="draft-sync-columns">
           <section className="draft-sync-assets" aria-labelledby="draft-sync-assets-title">
             <div className="draft-sync-section-title"><div><h3 id="draft-sync-assets-title">图片素材 <span>{draft.images.length} 张</span></h3><p>首图作为封面，两平台使用同一组图片。可替换、增删和调整顺序。</p></div><button type="button" disabled={Boolean(busy)} onClick={() => selectFiles(null)}>＋ 添加图片</button></div>
             <input ref={fileInputRef} type="file" accept="image/png,image/jpeg" hidden onChange={onFilesSelected} aria-label="草稿图片文件" />
@@ -567,74 +395,55 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
 
           <section className="draft-sync-editor" aria-label="平台文案">
             {platformTabs}
-            <div className="field-stack"><label htmlFor="draft-platform-title">{limit.label}标题</label><input id="draft-platform-title" value={draft.content[platform].title} disabled={Boolean(busy)} onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], title: event.target.value } } }))} /><small>{countCharacters(draft.content[platform].title)} / {limit.title} 个字符（本工具上限）</small></div>
-            <div className="field-stack"><label htmlFor="draft-platform-body">{limit.label}文案</label><textarea id="draft-platform-body" rows={6} value={draft.content[platform].body} disabled={Boolean(busy)} placeholder="为这个平台写一段配文" onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], body: event.target.value } } }))} /><small>{countCharacters(draft.content[platform].body)} / {limit.body} 字{platform === "wechat" ? " · 约680个汉字以内（表情也占用长度）" : ""}；两个平台分别保存文案</small><small>话题 {countHashtags(draft.content[platform].body)} / {limit.topics} 个；每个话题以 # 开头，用空格分隔</small></div>
-            <p className="draft-sync-small">只用一个平台时，检查对应平台的内容即可。账号在下一步选择。</p>
+            <div className="field-stack"><label htmlFor="draft-platform-title">{limit.label}标题</label><input id="draft-platform-title" value={draft.content[platform].title} disabled={Boolean(busy)} onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], title: event.target.value } } }), platform)} /><small>{countCharacters(draft.content[platform].title)} / {limit.title} 个字符（本工具上限）</small></div>
+            <div className="field-stack"><label htmlFor="draft-platform-body">{limit.label}文案</label><textarea id="draft-platform-body" rows={6} value={draft.content[platform].body} disabled={Boolean(busy)} placeholder="为这个平台写一段配文" onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], body: event.target.value } } }), platform)} /><small>{countCharacters(draft.content[platform].body)} / {limit.body} 字；两个平台分别保存文案</small><small>话题 {countHashtags(draft.content[platform].body)} / {limit.topics} 个；每个话题以 # 开头，用空格分隔</small></div>
+            <p className="draft-sync-small">两个平台的标题与文案互不覆盖。每次只传入当前选择的平台。</p>
           </section>
           </div>}
         </>}
-
-        {step === "accounts" && draft && <>
-          <section className={`draft-sync-service ${connection ? "connected" : ""}`} aria-label="网页同步连接">
-            {connection && connectionState === "connected" ? <div className="draft-sync-connection-status"><span aria-hidden="true">✓</span><div><strong>网页同步服务已连接</strong><p>账号以加密授权包交由浏览器持有，云端仅在本次操作中临时使用。可添加多个账号，再勾选本次要保存的账号。</p></div></div> : <><h3>{connectionState === "connecting" ? "正在连接网页同步服务…" : "连接网页同步服务"}</h3><p>首次使用请填写站点管理员设置的服务口令，再添加平台账号。</p></>}
+        {step === "browser" && draft && <>
+          {platformTabs}
+          <section className={`draft-sync-service ${connectionState === "connected" ? "connected" : ""}`} aria-label="浏览器扩展连接">
+            <h3>{connectionState === "connected" ? "浏览器扩展已连接" : connectionState === "checking" ? "正在检查浏览器扩展…" : "连接浏览器扩展"}</h3>
+            <p>请在已登录平台的同一个 Chrome 中使用 Tampermonkey，并安装折页传图脚本 {BROWSER_SYNC_VERSION}。扩展只在你点击平台面板的导入按钮后上传内容。</p>
+            <div className="draft-sync-extension-actions"><a href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo" target="_blank" rel="noopener noreferrer">打开 Tampermonkey 商店</a><a href="/zhepage-browser-sync.user.js" target="_blank" rel="noopener noreferrer">安装或更新折页传图脚本</a><button type="button" disabled={Boolean(busy)} onClick={checkExtension}>检查浏览器扩展</button></div>
+            <p className="draft-sync-small">首次安装后，在扩展详情打开“允许用户脚本”，并允许在折页和所用平台运行；更新脚本后刷新此页，再继续本机存档。</p>
             {connectionError && <p className="draft-sync-message error" role="alert">{connectionError}</p>}
-            <form onSubmit={connectService} className="draft-sync-connect-form">
-              <label htmlFor="draft-service-password">{connection ? "重新登录同步服务" : "同步服务口令"}</label>
-              <div><input id="draft-service-password" type="password" autoComplete="current-password" value={servicePassword} disabled={Boolean(busy) || Boolean(accountProgress && accountProgress.phase !== "unconfirmed")} onChange={(event) => setServicePassword(event.target.value)} placeholder="输入管理员提供的服务口令" /><button type="submit" disabled={Boolean(busy) || Boolean(accountProgress && accountProgress.phase !== "unconfirmed") || !servicePassword}>{connection ? "重新连接" : "连接服务"}</button></div>
-              <label className="draft-sync-check draft-sync-remember"><input type="checkbox" checked={rememberAccounts} disabled={Boolean(busy) || Boolean(accountProgress)} onChange={(event) => setRememberAccounts(event.target.checked)} /><span>在此浏览器记住账号（点击连接服务后生效）</span></label>
-              <p className="draft-sync-small">勾选后，加密授权包保留在此浏览器，直到移除账号；过期后仍需重新登录。未勾选时只保留在当前页面，刷新或关闭网页后需重新连接平台账号。未确认的同步记录始终保留，避免重复保存。</p>
-            </form>
           </section>
-          {connection && <div className="draft-sync-account-workspace">
-            <section className="draft-sync-editor" aria-label="平台账号">
-              {platformTabs}
-            <div className="draft-sync-account-heading"><h3>选择要保存的账号</h3>{connection && <button type="button" disabled={Boolean(busy) || Boolean(accountProgress)} onClick={refreshAccounts}>刷新账号</button>}</div>
-            {!platformAccounts.length ? <p className="draft-sync-small">尚未添加{limit.label}账号。添加后，即可勾选要使用的账号。</p> : <div className="draft-sync-accounts">{platformAccounts.map((account) => <div key={account.id} className="draft-sync-account-row"><label htmlFor={`draft-account-${account.id}`} aria-label={`选择同步账号 ${account.displayName}`}><input id={`draft-account-${account.id}`} type="checkbox" checked={draft.selectedAccountIds.includes(account.id)} disabled={Boolean(busy) || ((!account.ready || Boolean(pendingChecks[account.id]) || account.syncBlocked) && !draft.selectedAccountIds.includes(account.id))} onChange={(event) => updateDraft((current) => ({ ...current, selectedAccountIds: event.target.checked ? [...new Set([...current.selectedAccountIds, account.id])] : current.selectedAccountIds.filter((id) => id !== account.id) }))} /><span><b>{account.displayName}</b><small>{pendingChecks[account.id] || account.syncBlocked ? "上次结果待核实" : account.ready ? account.remoteId : "需要重新登录"}</small></span></label><button type="button" className="draft-sync-text-button" disabled={Boolean(busy) || Boolean(accountProgress) || Boolean(pendingChecks[account.id]) || account.syncBlocked} onClick={() => deleteAccount(account)} aria-label={`从此浏览器移除加密授权包 ${account.displayName}`} title="从此浏览器移除加密授权包">移除</button></div>)}</div>}
-            {!!unknownAccounts.length && <div className="draft-sync-message error">存档中有 {unknownAccounts.length} 个账号尚未连接，请重新连接对应账号或清除选择。<button type="button" disabled={Boolean(busy)} onClick={() => updateDraft((current) => ({ ...current, selectedAccountIds: current.selectedAccountIds.filter((id) => !unknownAccounts.includes(id)) }))}>清除不可用账号选择</button></div>}
-
-              {!!allReceipts.length && <button type="button" className="draft-sync-review-results" disabled={Boolean(busy)} onClick={() => goToStep("results")}>查看保存结果</button>}
-            </section>
-            <section className="draft-sync-add-account" aria-label="添加平台账号">
-              <h3>{platform === "wechat" ? "添加公众号" : "添加小红书账号"}</h3>
-              {platform === "xiaohongshu" ? <><p className="draft-sync-small">点击后在本页显示小红书登录二维码。用手机扫码完成登录，再勾选需要使用的账号。</p><div className="field-stack"><label htmlFor="draft-account-name">账号备注（选填）</label><input id="draft-account-name" value={accountName} disabled={Boolean(busy) || Boolean(accountProgress)} onChange={(event) => setAccountName(event.target.value)} placeholder="例如：品牌主账号" /></div><button type="button" disabled={Boolean(busy) || Boolean(accountProgress)} onClick={addAccount}>显示小红书登录二维码</button></> : <><p className="draft-sync-small">公众号需要管理员先连接一次，完成后即可勾选账号保存草稿。</p><details className="draft-sync-wechat-setup"><summary>需公众号管理员完成首次配置</summary><p>这里使用公众号后台的 AppID 和 AppSecret，不是微信账号和密码。请让管理员确认账号具有草稿接口权限后填写。</p><div className="field-stack"><label htmlFor="draft-account-name">账号备注（选填）</label><input id="draft-account-name" value={accountName} disabled={Boolean(busy) || Boolean(accountProgress)} onChange={(event) => setAccountName(event.target.value)} placeholder="例如：品牌公众号" /></div><div className="field-stack"><label htmlFor="draft-wechat-app-id">公众号 AppID</label><input id="draft-wechat-app-id" autoComplete="off" value={appId} disabled={Boolean(busy) || Boolean(accountProgress)} onChange={(event) => setAppId(event.target.value)} /></div><div className="field-stack"><label htmlFor="draft-wechat-secret">公众号 AppSecret</label><input id="draft-wechat-secret" type="password" autoComplete="new-password" value={appSecret} disabled={Boolean(busy) || Boolean(accountProgress)} onChange={(event) => setAppSecret(event.target.value)} /><small>提交后清空。浏览器只接收加密授权包，不保存明文 AppSecret。</small></div><button type="button" disabled={Boolean(busy) || Boolean(accountProgress) || !appId.trim() || !appSecret.trim()} onClick={addAccount}>验证并添加公众号</button></details></>}
-            </section>
-          </div>}
-          {!!selectedAccounts.length && <section className="draft-sync-selection-summary" aria-label="本次保存内容"><h3>本次将保存到 {selectedAccounts.length} 个账号</h3><ul>{selectedPlatforms.map((target) => <li key={target}><strong>{DRAFT_LIMITS[target].label} · {draft.content[target].title || "未填写标题"}</strong><span>{selectedAccounts.filter((account) => account.platform === target).map((account) => account.displayName).join("、")} · {draft.images.length} 张图片</span></li>)}</ul><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>返回确认内容</button></section>}
-        {draft && !!issues.length && <section className="draft-sync-validation" aria-label="同步前检查"><h3>同步前检查</h3><ul>{issues.map((issue, index) => <li key={`${issue.platform}-${issue.code}-${issue.imageId || index}`} className={issue.severity}><b>{DRAFT_LIMITS[issue.platform].label}：</b>{issue.message}</li>)}</ul>{!!warnings.length && <label className="draft-sync-check"><input type="checkbox" checked={acceptedWarnings === warningsKey} disabled={Boolean(busy)} onChange={(event) => setAcceptedWarnings(event.target.checked ? warningsKey : "")} /><span>我已核对图片，沿用当前尺寸和比例</span></label>}</section>}
-
+          <section className="draft-sync-selection-summary" aria-label="本次传入内容">
+            <h3>{limit.label} · {draft.content[platform].title || "未填写标题"}</h3>
+            <p className="draft-sync-small">完整传入 {draft.images.length} 张图片，顺序与“确认内容”一致 · {(draft.images.reduce((sum, image) => sum + image.blob.size, 0) / 1024 / 1024).toFixed(2)} MiB</p>
+            <p className="draft-sync-summary-body">{draft.content[platform].body || "本平台未填写配文"}</p>
+            <p className="draft-sync-small">图片、双平台文案和核对记录同时保留一份本机副本。这里不会替你选择、切换账号或公开发布。</p>
+            {openPlatform}
+            <button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>返回确认内容</button>
+          </section>
         </>}
-        {step === "results" && <><p className="draft-sync-result-guidance">保存成功的账号已取消勾选。需要重试时，返回选择账号并检查；待核实的账号须先到平台核对。小红书的“暂存”操作须人工核实，临时页面到期后，不保证未保存内容可以恢复；本浏览器中准备的原始素材仍保留。</p>{!connection && <p className="draft-sync-message error">{connectionError || "同步服务尚未连接，请返回选择账号重新登录，再记录核对结果。"}<button type="button" disabled={Boolean(busy)} onClick={() => goToStep("accounts")}>返回连接同步服务</button></p>}{busy && <p className="draft-sync-message neutral" role="status">{busy}</p>}{!allReceipts.length && <p className="draft-sync-small">正在等待第一个账号的保存结果…</p>}</>}
-        {step === "results" && !!allReceipts.length && <section className="draft-sync-results" aria-label="账号同步结果">
-          <h3>{contentChanged ? "上次同步结果（当前编辑尚未同步）" : "账号同步结果"}</h3>
-          {allReceipts.map((receipt) => {
-            const account = accounts.find((item) => item.id === receipt.accountId);
-            const accountLabel = account?.displayName || `${DRAFT_LIMITS[receipt.platform].label}账号`;
-            const needsCheck = receipt.status === "needs_confirmation" && Boolean(pendingChecks[receipt.accountId] || account?.syncBlocked);
-            const historical = receipt.status === "needs_confirmation" && account?.syncBlocked === false && !needsCheck;
-            return <article key={receipt.accountId} className={`draft-sync-receipt ${receipt.status}`} data-account-id={receipt.accountId} aria-label={`${accountLabel}的同步结果`}>
-              <div><strong>{accountLabel}</strong><b>{historical ? "历史回执" : RECEIPT_LABELS[receipt.status]}</b></div>
-              <p>{historical ? `存档中的记录：${receipt.message}` : receipt.message}</p>
-              {jobPreviews[receipt.accountId] && <CloudSnapshot key={`${receipt.accountId}-${jobPreviews[receipt.accountId].expiresAt || "current"}`} preview={jobPreviews[receipt.accountId]} label={`${accountLabel} 的临时保存页面，仅供核对`} />}
-              {receipt.draftId && <small>草稿编号：{receipt.draftId}</small>}
-              <a className="draft-sync-platform-link" href={receipt.platform === "wechat" ? "https://mp.weixin.qq.com/" : "https://creator.xiaohongshu.com/"} target="_blank" rel="noopener noreferrer">{receipt.platform === "wechat" ? "打开公众号后台" : "打开小红书创作平台"}</a>
-              {historical && <p>历史回执，当前已解除锁定。本工具无法确认当时是否保存，请在平台检查；未自动重试。</p>}
-              {needsCheck && <>
-                <p>请先打开 {accountLabel} 的平台草稿列表，检查此次标题和图片。只有完成核对后，才选择与实际情况一致的结果。</p>
-                <div className="draft-sync-confirm-actions">
-                  <button type="button" disabled={Boolean(busy) || Boolean(accountProgress) || !connection || !account?.ready} onClick={() => confirmOutcome(receipt.accountId, "saved")}>已在平台核对，确认已保存</button>
-                  <button type="button" disabled={Boolean(busy) || Boolean(accountProgress) || !connection || !account?.ready} onClick={() => confirmOutcome(receipt.accountId, "not_saved")}>已在平台核对，确认未保存</button>
-                </div>
-                {!account?.ready && <p>请先返回选择账号，重新连接同一平台账号，再记录核对结果。</p>}
-              </>}
-            </article>;
-          })}
-        </section>}
+        {draft && step !== "results" && !!issues.length && <section className="draft-sync-validation" aria-label="同步前检查"><h3>同步前检查</h3><ul>{issues.map((issue, index) => <li key={`${issue.code}-${issue.imageId || index}`} className={issue.severity}><b>{limit.label}：</b>{issue.message}</li>)}</ul>{!!warnings.length && <label className="draft-sync-check"><input type="checkbox" checked={acceptedWarnings === warningsKey} disabled={Boolean(busy)} onChange={(event) => setAcceptedWarnings(event.target.checked ? warningsKey : "")} /><span>我已核对图片，沿用当前尺寸和比例</span></label>}</section>}
+        {step === "results" && <>
+          {platformTabs}
+          <section className="draft-sync-service" aria-label="平台核对步骤">
+            <h3>在当前登录账号的编辑器中完成</h3>
+            <ol className="draft-sync-browser-steps"><li>打开平台，确认当前账号。小红书进入“图文”，公众号进入“贴图”，使用空白编辑器。</li><li>在折页面板点击“检查待传内容”，核对标题和图片总数，再点击“填入当前编辑器”。</li><li>核对全部图片的顺序、标题与正文，再保存草稿；打开平台草稿箱确认实际结果。</li></ol>
+            {openPlatform}
+            <p className="draft-sync-small">如果只上传了一部分，先核对编辑器中的实际图片；不要再次导入同一组。完成或放弃本组后，在平台折页面板点击“结束本次传图”。下一组仍可从本窗口继续。</p>
+          </section>
+          <section className="draft-sync-results" aria-label="当前平台传图结果">
+            <div className="draft-sync-section-title"><h3>{contentChanged[platform] ? "上次传图结果（当前编辑尚未传入）" : "传图与草稿状态"}</h3><button type="button" disabled={Boolean(busy)} onClick={readTransfer}>读取传图状态</button></div>
+            {job && <article className="draft-sync-receipt needs_confirmation"><div><strong>{job.title} · {job.imageCount} 张图片</strong><b>{JOB_LABELS[job.status]}</b></div><p>{job.message}</p>{!matchingJob && <p>这是扩展中现有的一组内容，尚未与本机草稿记录匹配。请到平台核对并结束该组，再传入当前内容。</p>}</article>}
+            {!job && <p className="draft-sync-message neutral">{readback?.checked ? "扩展中当前没有待传内容。平台草稿是否存在，需要到平台草稿箱核对。" : "尚未读回当前平台的完整状态，请点击“读取传图状态”。"}</p>}
+            {receipt && <article className={`draft-sync-receipt ${receipt.status}`} aria-label="本次草稿人工核对记录"><div><strong>{limit.label} · 人工核对记录</strong><b>{receipt.status === "confirmed_by_user" ? "用户确认已保存" : receipt.status === "failed" ? "尚未确认保存" : "草稿结果待核对"}</b></div><p>{receipt.message}</p>
+              {receipt.status !== "confirmed_by_user" && <><p>只有在平台草稿箱核对本次标题、文案和全部图片后，才记录实际结果。</p><div className="draft-sync-confirm-actions"><button type="button" disabled={Boolean(busy) || !readback?.checked || Boolean(job && !matchingJob)} onClick={() => confirmOutcome("saved")}>已在草稿箱核对，确认已保存</button><button type="button" disabled={Boolean(busy) || !readback?.checked || Boolean(job && !matchingJob)} onClick={() => confirmOutcome("not_saved")}>已核对，尚未保存</button></div></>}
+            </article>}
+            {storageError && <p className="draft-sync-message error" role="alert">{storageError}</p>}
+          </section>
+        </>}
       </div>
       <footer className="draft-sync-footer">
-        <div className="draft-sync-footer-status" aria-live="polite">{busy ? <p role="status">{busy} 完成后可关闭窗口。</p> : <>{feedback && <p className={feedback.tone} role={feedback.tone === "error" ? "alert" : "status"}>{feedback.text}</p>}<p>{nextHint}</p></>}{archiveFeedback && <p className={archiveFeedback.tone} role="status">{archiveFeedback.text}</p>}{draft && <label className="draft-sync-check"><input type="checkbox" checked={autoSave} disabled={Boolean(busy)} onChange={(event) => setAutoSave(event.target.checked)} /><span>自动存到当前浏览器</span></label>}</div>
+        <div className="draft-sync-footer-status" aria-live="polite">{busy ? <p role="status">{busy} 关闭窗口可停止等待；已经传给扩展的内容仍需核对。</p> : <>{feedback && <p className={feedback.tone} role={feedback.tone === "error" ? "alert" : "status"}>{feedback.text}</p>}<p>{nextHint}</p></>}{archiveFeedback && <p className={archiveFeedback.tone} role="status">{archiveFeedback.text}</p>}{draft && <label className="draft-sync-check"><input type="checkbox" checked={autoSave} disabled={Boolean(busy)} onChange={(event) => setAutoSave(event.target.checked)} /><span>自动存到当前浏览器</span></label>}</div>
         <div className="draft-sync-footer-actions">
           <button type="button" disabled={Boolean(busy) || !draft} onClick={saveDraft}>存到本机</button>
-          {step === "content" ? <button type="button" className="primary" disabled={Boolean(busy) || (draft ? !draft.images.length : !canCollect || storageState === "loading")} onClick={() => draft ? goToStep("accounts") : createDraft()}>{draft ? "下一步：选择账号" : "用当前海报开始"}</button> : step === "accounts" ? <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>上一步</button><button type="button" className="primary" disabled={!canSync} onClick={submitDraft}>存到 {selectedAccounts.length} 个账号草稿</button></> : <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("accounts")}>返回选择账号</button><button type="button" className="primary" disabled={Boolean(busy)} onClick={() => closeDialog()}>完成</button></>}
+          {step === "content" ? <button type="button" className="primary" disabled={Boolean(busy) || (draft ? !contentReady : !canCollect || storageState === "loading")} onClick={() => draft ? goToStep("browser") : createDraft()}>{draft ? "下一步：交给浏览器" : "用当前海报开始"}</button> : step === "browser" ? <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>上一步</button><button type="button" className="primary" disabled={!canPrepare} onClick={submitDraft}>存入浏览器扩展</button></> : <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>返回确认内容</button><button type="button" className="primary" onClick={() => closeDialog()}>完成</button></>}
         </div>
       </footer>
     </div>

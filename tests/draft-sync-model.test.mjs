@@ -119,13 +119,24 @@ test("platform validation counts Unicode characters and distinguishes size advic
     const issues = validateDraft(platform, { title: `${title}🌿`, body: "" }, [metadata]);
     assert.ok(issues.some((issue) => issue.code === "title-long" && issue.severity === "error" && issue.message.includes("20 个字符")));
   }
-  const wechat = validateDraft("wechat", { title: "标题", body: "中".repeat(683) }, [metadata]);
-  assert.ok(wechat.some((issue) => issue.code === "body-bytes" && issue.severity === "error"));
+  const wechat = validateDraft("wechat", { title: "标题", body: "正文" }, [metadata]);
+  assert.equal(wechat.filter((issue) => issue.severity === "error").length, 0);
   assert.ok(wechat.some((issue) => issue.code === "image-ratio" && issue.severity === "warning"));
-  assert.equal(validateDraft("wechat", { title: "标题", body: "中".repeat(682) }, [{ ...metadata, height: 1350 }]).filter((issue) => issue.severity === "error").length, 0);
   const mixed = validateDraft("xiaohongshu", { title: "标题", body: "" }, [metadata, { ...metadata, id: "image-2", width: 640, height: 640 }]);
   assert.ok(mixed.some((issue) => issue.code === "mixed-ratios"));
   assert.ok(mixed.some((issue) => issue.code === "image-resolution"));
+});
+
+test("WeChat browser drafts accept 700 to 1000 Chinese characters while still enforcing the character limit", () => {
+  const images = [{ ...metadata, height: 1350 }];
+  assert.equal(DRAFT_LIMITS.wechat.body, 1000);
+  for (const length of [700, 900, 1000]) {
+    const body = "中".repeat(length);
+    assert.ok(Buffer.byteLength(body, "utf8") > 2048, "The fixture must exceed the removed API byte limit");
+    assert.deepEqual(validateDraft("wechat", { title: "标题", body }, images), [], `${length} Chinese characters must be accepted`);
+  }
+  const exceeded = validateDraft("wechat", { title: "标题", body: "中".repeat(1001) }, images);
+  assert.deepEqual(exceeded.map((issue) => issue.code), ["body-long"]);
 });
 
 test("hashtag counting supports whitespace-separated Chinese and English topics without counting closing hashes or Markdown headings", () => {

@@ -32,7 +32,7 @@ function fixture(t) {
   return {
     window, requests, element: (id) => window.document.getElementById(id),
     reply(request, fields = {}, overrides) {
-      emit({ channel: CHANNEL, kind: "response", id: request.id, ok: true, ...fields }, overrides);
+      emit({ channel: CHANNEL, kind: "response", id: request.id, ok: true, ...(request.action === "ping" ? { version: "0.2.0" } : {}), ...fields }, overrides);
     },
     async advance(ms) { t.mock.timers.tick(ms); await flush(); },
   };
@@ -118,4 +118,14 @@ test("a check cannot enable a pending preparation, and prepare or status never r
   await app.advance(9000);
   assert.equal(app.requests.filter(({ action }) => action === "status").length, 1);
   assert.match(app.element("result").textContent, /没有收到扩展回应/);
+});
+
+test("an installed old script prompts for its update without enabling preparation or hiding the version error", async (t) => {
+  const app = fixture(t);
+  app.reply(app.requests[0], { version: "0.1.1" });
+  await flush();
+  await app.advance(30000);
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.element("prepare").disabled, true);
+  assert.match(app.element("extension-status").textContent, /更新.*0\.2\.0/);
 });

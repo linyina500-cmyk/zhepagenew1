@@ -14,12 +14,11 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run test:unit && npm run build && node --test tests/rendered-html.test.mjs",
     "test:unit": "node build/test-unit.mjs",
-    "lint": "eslint app lib worker cloud functions tests --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint app lib worker functions tests --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "test:browser": "playwright test",
     "test:browser:list": "playwright test --list",
-    "typecheck": "tsc --noEmit",
-    "sync:server": "node cloud/start.mjs"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@tiptap/core": "3.30.0",
@@ -36,7 +35,6 @@
     "@tiptap/starter-kit": "3.30.0",
     "drizzle-orm": "0.45.2",
     "html-to-image": "^1.11.13",
-    "iron-session": "9.0.1",
     "jszip": "^3.10.1",
     "marked": "17.0.6",
     "react": "19.2.6",

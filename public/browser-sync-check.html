@@ -16,13 +16,15 @@
     <div class="brand">折页 / 浏览器传图验证</div>
     <h1>先用两张图片，确认传图可用。</h1>
     <p>图片在当前浏览器生成和暂存。你点击平台页面的导入按钮后，才上传到该平台。</p>
+    <p><a class="button" href="/">返回折页工作台，使用实际海报同步</a></p>
+    <p class="muted">本页仅用于检查扩展。同步你的文章时，请在工作台打开“同步草稿”，选择完整图片并填写平台文案。</p>
     <div class="steps"><span class="pill">无需启动程序</span><span class="pill">无需另搭服务器</span><span class="pill">不会公开发布</span></div>
   </header>
   <section>
     <h2>1. 准备浏览器扩展</h2>
     <p>在你已登录小红书和公众号的同一个 Chrome 浏览器里完成。</p>
     <a class="button" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo" target="_blank" rel="noopener noreferrer">打开 Tampermonkey 商店</a>
-    <a class="button" href="/zhepage-browser-sync.user.js">添加折页传图脚本</a>
+    <a class="button" href="/zhepage-browser-sync.user.js">安装或更新折页传图脚本 0.2.0</a>
     <p class="muted">首次安装后，在扩展详情打开“允许用户脚本”，再添加折页脚本。所有操作都在浏览器中完成。</p>
     <button id="check-extension" type="button">检查是否就绪</button>
     <p class="status" id="extension-status" role="status">正在检测浏览器扩展…</p>
@@ -51,7 +53,7 @@
     <p class="muted">这一步正在验证平台兼容性。填入编辑器、触发保存、草稿箱中确实存在，是三个不同结果。</p>
     <button id="check-result" type="button">查看传图进度</button>
     <p id="result" class="status" role="status">还没有完成平台草稿验证。</p>
-    <p class="muted">在平台折页面板点击“结束本次验证”可清除临时图片。未开始导入的内容超过 30 分钟后读取时会清理；已开始导入的记录会保留，直到你核对并结束验证。</p>
+    <p class="muted">在平台折页面板点击“结束本次传图”可清除临时图片。核对并结束上一组后，可在空白编辑器继续上传下一组。未开始导入的内容超过 30 分钟后读取时会清理；已开始导入的记录会保留，直到你核对并结束。</p>
   </section>
 </main>
 <script>
@@ -86,10 +88,13 @@
     $('extension-status').textContent = '正在检测浏览器扩展…';
     try {
       // The userscript may attach after this page's first message at document-idle.
+      let response;
       for (let attempt = 0; attempt < 3; attempt++) {
-        try { await request('ping'); ready = true; break; }
+        try { response = await request('ping'); break; }
         catch (error) { if (attempt === 2) throw error; }
       }
+      if (response.version !== '0.2.0') throw new Error('请先更新折页传图脚本至 0.2.0，再刷新折页和平台页面。');
+      ready = true;
       $('extension-status').textContent = '扩展已连接。内容将留在当前浏览器。';
     } catch (error) { $('extension-status').textContent = error.message; }
     finally {

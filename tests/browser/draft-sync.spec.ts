@@ -63,7 +63,6 @@ async function savedDraftSummary(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.route("**/api/sync/session", (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "网页同步服务尚未部署，请联系站点管理员完成配置" }) }));
   await openWorkbench(page);
 });
 
@@ -100,7 +99,7 @@ test("real poster images and independent platform copy survive explicit local sa
   await expect(cards).toHaveCount(initialCount + 1);
   const names = await cards.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-image-name")));
   await dialog.getByRole("button", { name: "存到本机", exact: true }).click();
-  await expect(dialog.getByText("图片、文案和账号选择已存到当前浏览器", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("图片、独立文案和核对记录已存到当前浏览器", { exact: true })).toBeVisible();
   const saved = await savedDraftSummary(page);
   expect(saved?.content).toEqual({
     xiaohongshu: { title: "小红书的独立标题", body: "只属于小红书的配文。" },
@@ -177,7 +176,7 @@ test("mobile draft controls stay usable and a denied local save never reports su
   });
   await dialog.getByRole("button", { name: "存到本机", exact: true }).click();
   await expect(dialog.locator(".draft-sync-footer-status").getByRole("alert")).toContainText("Test storage denied");
-  await expect(dialog.getByText("图片、文案和账号选择已存到当前浏览器", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText("图片、独立文案和核对记录已存到当前浏览器", { exact: true })).toHaveCount(0);
   await expect(dialog.locator(".draft-sync-image-card").first()).toBeVisible();
   await dialog.press("Escape");
   await expect(page.getByRole("button", { name: "同步草稿", exact: true })).toBeFocused();
