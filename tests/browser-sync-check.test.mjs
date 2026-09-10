@@ -32,7 +32,7 @@ function fixture(t) {
   return {
     window, requests, element: (id) => window.document.getElementById(id),
     reply(request, fields = {}, overrides) {
-      emit({ channel: CHANNEL, kind: "response", id: request.id, ok: true, ...(request.action === "ping" ? { version: "0.2.0" } : {}), ...fields }, overrides);
+      emit({ channel: CHANNEL, kind: "response", id: request.id, ok: true, ...(request.action === "ping" ? { version: "0.2.1" } : {}), ...fields }, overrides);
     },
     async advance(ms) { t.mock.timers.tick(ms); await flush(); },
   };
@@ -127,5 +127,5 @@ test("an installed old script prompts for its update without enabling preparatio
   await app.advance(30000);
   assert.equal(app.requests.length, 1);
   assert.equal(app.element("prepare").disabled, true);
-  assert.match(app.element("extension-status").textContent, /更新.*0\.2\.0/);
+  assert.match(app.element("extension-status").textContent, /更新.*0\.2\.1/);
 });

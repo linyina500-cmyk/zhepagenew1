@@ -6,7 +6,7 @@ const origin = "https://feature-local-draft-sync.zhepagenew.pages.dev";
 const metadata = `// ==UserScript==
 // @name         折页 · 浏览器传图验证
 // @namespace    ${origin}/browser-sync
-// @version      0.2.0
+// @version      0.2.1
 // @description  在当前浏览器中，把完整文章图片和文案填入小红书图文或公众号贴图编辑器。不会发布。
 // @match        ${origin}/
 // @match        ${origin}/browser-sync-check

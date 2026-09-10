@@ -95,7 +95,7 @@ test("accepts the document's window through a userscript Proxy but rejects other
   assert.notEqual(source.scriptWindow, source.window.document.defaultView);
   assert.equal(source.scriptWindow.top, source.scriptWindow.self);
   const ping = { ...request(), action: "ping" };
-  assert.equal((await source.send(ping))[0].version, "0.2.0");
+  assert.equal((await source.send(ping))[0].version, "0.2.1");
   assert.equal((await source.send())[0].ok, true);
 
   const other = harness(t);
@@ -113,7 +113,7 @@ test("accepts the document's window through a userscript Proxy but rejects other
 
 test("the main application root accepts the same versioned prepare and status protocol", async (t) => {
   const source = harness(t, `${ORIGIN}/`, storage(), {}, true);
-  assert.equal((await source.send({ ...request(), action: "ping" }))[0].version, "0.2.0");
+  assert.equal((await source.send({ ...request(), action: "ping" }))[0].version, "0.2.1");
   assert.equal((await source.send(request("wechat", "main-job", 3)))[0].job.imageCount, 3);
   assert.equal((await source.send({ ...request("wechat"), action: "status" }))[0].job.id, "main-job");
   for (const path of ["/browser-sync-check.html", "/browser-sync-check/", "/articles", "/login"]) {

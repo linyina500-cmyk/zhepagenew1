@@ -24,7 +24,7 @@
     <h2>1. 准备浏览器扩展</h2>
     <p>在你已登录小红书和公众号的同一个 Chrome 浏览器里完成。</p>
     <a class="button" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo" target="_blank" rel="noopener noreferrer">打开 Tampermonkey 商店</a>
-    <a class="button" href="/zhepage-browser-sync.user.js">安装或更新折页传图脚本 0.2.0</a>
+    <a class="button" href="/zhepage-browser-sync.user.js">安装或更新折页传图脚本 0.2.1</a>
     <p class="muted">首次安装后，在扩展详情打开“允许用户脚本”，再添加折页脚本。所有操作都在浏览器中完成。</p>
     <button id="check-extension" type="button">检查是否就绪</button>
     <p class="status" id="extension-status" role="status">正在检测浏览器扩展…</p>
@@ -93,7 +93,7 @@
         try { response = await request('ping'); break; }
         catch (error) { if (attempt === 2) throw error; }
       }
-      if (response.version !== '0.2.0') throw new Error('请先更新折页传图脚本至 0.2.0，再刷新折页和平台页面。');
+      if (response.version !== '0.2.1') throw new Error('请先更新折页传图脚本至 0.2.1，再刷新折页和平台页面。');
       ready = true;
       $('extension-status').textContent = '扩展已连接。内容将留在当前浏览器。';
     } catch (error) { $('extension-status').textContent = error.message; }

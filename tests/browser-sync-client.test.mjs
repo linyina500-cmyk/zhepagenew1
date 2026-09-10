@@ -98,7 +98,7 @@ test("ping retries only missing responses, caps attempts, and rejects obsolete s
   await flush(); await f.expire(3000); await f.expire(3000); await f.expire(3000); await missing;
   assert.equal(f.requests.length, 5);
   f.onRequest = (request) => f.respond(request, { version: "0.1.1" });
-  await assert.rejects(client.ping(), /0\.2\.0/);
+  await assert.rejects(client.ping(), /0\.2\.1/);
   assert.equal(f.requests.length, 6);
   assert.equal(f.timers.size, 0);
 });

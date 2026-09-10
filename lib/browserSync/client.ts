@@ -1,7 +1,7 @@
 import type { DraftContent, DraftImage, DraftPlatform } from "../draftSync/types";
 import { imageMetadata, validateDraft } from "../draftSync/validation";
 
-export const BROWSER_SYNC_VERSION = "0.2.0";
+export const BROWSER_SYNC_VERSION = "0.2.1";
 export const BROWSER_SYNC_ORIGIN = "https://feature-local-draft-sync.zhepagenew.pages.dev";
 const CHANNEL = "zhepage-browser-sync-v1";
 const ID = /^[a-zA-Z0-9-]{1,80}$/;
