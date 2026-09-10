@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         折页 · 浏览器传图验证
 // @namespace    https://feature-local-draft-sync.zhepagenew.pages.dev/browser-sync
-// @version      0.1.0
+// @version      0.1.1
 // @description  在当前浏览器中，把测试图片和文案填入小红书图文或公众号贴图编辑器。不会发布。
 // @match        https://feature-local-draft-sync.zhepagenew.pages.dev/browser-sync-check
 // @match        https://creator.xiaohongshu.com/publish/*
@@ -270,7 +270,9 @@
   const TTL = 30 * 60 * 1000;
   const IMAGE_LIMIT = 1024 * 1024;
   const platforms = ["xiaohongshu", "wechat"];
-  if (window.top !== window.self) return;
+  // Tampermonkey wraps window; MessageEvent.source uses the document's window.
+  const sourceWindow = document.defaultView;
+  if (!sourceWindow || window.top !== window.self) return;
   const key = (platform) => `${CHANNEL}:${platform}`;
   const isSource = () => window.location.origin === ORIGIN && window.location.pathname === "/browser-sync-check";
   const reply = (id, payload) => window.postMessage({ channel: CHANNEL, kind: "response", id, ...payload }, ORIGIN);
@@ -316,9 +318,9 @@
     let saving = false;
     window.addEventListener("message", async (event) => {
       const message = event.data;
-      if (!isSource() || event.source !== window || event.origin !== ORIGIN || message?.channel !== CHANNEL || message.kind !== "request" || typeof message.id !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(message.id)) return;
+      if (!isSource() || event.source !== sourceWindow || event.origin !== ORIGIN || message?.channel !== CHANNEL || message.kind !== "request" || typeof message.id !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(message.id)) return;
       try {
-        if (message.action === "ping") return reply(message.id, { ok: true, version: "0.1.0" });
+        if (message.action === "ping") return reply(message.id, { ok: true, version: "0.1.1" });
         if (!platforms.includes(message.platform)) throw new Error("未知平台");
         if (message.action === "status") return reply(message.id, { ok: true, job: statusOf(await read(message.platform)) });
         if (message.action !== "prepare") throw new Error("未知操作");

@@ -27,7 +27,7 @@ function storage() {
     deleteValue: async (name) => { events.push(["delete", name]); values.delete(name); },
   } };
 }
-function harness(t, url = SOURCE, shared = storage(), adapterOverrides = {}) {
+function harness(t, url = SOURCE, shared = storage(), adapterOverrides = {}, wrapWindow = false) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url });
   t.after(() => dom.window.close());
   const { window } = dom;
@@ -43,9 +43,15 @@ function harness(t, url = SOURCE, shared = storage(), adapterOverrides = {}) {
     save: async (platform) => { calls.push(["save", platform]); assert.equal(shared.values.get(key(platform)).status, "needs_confirmation"); return { status: "needs_confirmation", message: "请到平台草稿箱核对" }; },
     ...adapterOverrides,
   };
-  installBrowserSync({ window, document: window.document, GM: shared.GM }, () => adapter);
+  const scriptWindow = wrapWindow ? new Proxy(window, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) : window;
+  installBrowserSync({ window: scriptWindow, document: window.document, GM: shared.GM }, () => adapter);
   const emit = (data, overrides = {}) => window.dispatchEvent(new window.MessageEvent("message", { data, origin: ORIGIN, source: window, ...overrides }));
-  return { ...shared, window, responses, calls, adapter, emit,
+  return { ...shared, window, scriptWindow, responses, calls, adapter, emit,
     async send(data = request(), overrides) { const start = responses.length; emit(data, overrides); await tick(); return responses.slice(start).map((item) => item.data); },
     async click(label) { const button = [...panel.querySelectorAll("button")].find((item) => item.textContent === label); assert.ok(button); button.click(); await tick(); },
     text: () => panel?.querySelector('[role="status"]').textContent,
@@ -68,6 +74,37 @@ test("accepts messages only from this window at the fixed preview path and origi
     assert.deepEqual(await other.send(request()), []);
     assert.equal(other.events.length, 0);
   }
+});
+
+test("accepts the document's window through a userscript Proxy but rejects other message sources", async (t) => {
+  const source = harness(t, SOURCE, storage(), {}, true);
+  assert.notEqual(source.scriptWindow, source.window.document.defaultView);
+  assert.equal(source.scriptWindow.top, source.scriptWindow.self);
+  const ping = { ...request(), action: "ping" };
+  assert.equal((await source.send(ping))[0].version, "0.1.1");
+  assert.equal((await source.send())[0].ok, true);
+
+  const other = harness(t);
+  const frame = source.window.document.createElement("iframe");
+  source.window.document.body.append(frame);
+  for (const sender of [other.window, frame.contentWindow, null]) {
+    assert.deepEqual(await source.send(ping, { source: sender }), []);
+  }
+  assert.deepEqual(await source.send(ping, { origin: "https://other.example" }), []);
+  assert.deepEqual(await source.send({ ...ping, channel: "other" }), []);
+  assert.deepEqual(await source.send({ ...ping, id: "invalid id" }), []);
+  source.window.history.replaceState(null, "", "/another-page");
+  assert.deepEqual(await source.send(ping), []);
+});
+
+test("does not install without a document window", (t) => {
+  const dom = new JSDOM("<!doctype html>", { url: SOURCE });
+  t.after(() => dom.window.close());
+  const document = dom.window.document.implementation.createHTMLDocument();
+  assert.equal(document.defaultView, null);
+  const listen = t.mock.method(dom.window, "addEventListener");
+  installBrowserSync({ window: dom.window, document, GM: {} }, () => assert.fail("must not create an adapter"));
+  assert.equal(listen.mock.callCount(), 0);
 });
 
 test("does not install in an iframe or expose platform actions through messages", async (t) => {
