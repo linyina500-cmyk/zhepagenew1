@@ -118,6 +118,8 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
       const browserType = chromium ?? (await import("playwright")).chromium;
       context = await browserType.launchPersistentContext(profileDir, { channel: "chrome", headless: false, viewport: { width: 1440, height: 1000 } });
       context.setDefaultTimeout(10_000);
+    }
+    if (!page) {
       const pages = context.pages();
       // A second creator editor may contain user work. Never select arbitrarily.
       if (pages.filter((candidate) => candidate.url().startsWith(ORIGIN)).length > 1) throw new XhsDriverError("专用浏览器中有多个小红书页面，请保留一个后再连接");

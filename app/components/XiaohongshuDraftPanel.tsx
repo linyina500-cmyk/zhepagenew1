@@ -73,20 +73,20 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChan
   }
   return <div className="draft-sync-xhs">
     <section className="draft-sync-service" aria-label="小红书本机连接"><h3>连接小红书</h3>
-      <p>本机程序打开专用小红书窗口。首次扫码登录后，在这台电脑保留登录状态，之后直接同步到草稿箱。</p>
-      {!binding && <div className="field-stack"><label htmlFor="xhs-connection-token">本机连接口令</label><input id="xhs-connection-token" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} /><small>与公众号使用同一份本机连接配置。</small></div>}
+      <p>首次使用先扫码登录，再检查账号。以后可直接检查账号并存草稿。</p>
+      {!binding && <div className="field-stack"><label htmlFor="xhs-connection-token">本机连接口令</label><input id="xhs-connection-token" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} /><small>已连接公众号时，无需再次填写。</small></div>}
       <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || !(binding || token.trim())} onClick={() => run("正在打开小红书专用窗口…", async (signal) => { await (await client(signal)).openLogin(signal); signal.throwIfAborted(); setAccount(null); setFeedback("请在本机专用窗口扫码，完成后点击“检查小红书账号”。"); })}>打开专用窗口登录</button>
       <button type="button" disabled={busy || !(binding || token.trim())} onClick={() => run("正在检查小红书账号…", async (signal) => { const value = await (await client(signal)).getAccount(signal); signal.throwIfAborted(); setAccount(value); setJob(null); setAllowNew(false); })}>检查小红书账号</button></div>
-      {account && <p role="status">目标账号：<strong>{account.name}</strong></p>}
+      {account && <p role="status">已连接：<strong>{account.name}</strong></p>}
     </section>
-    {receipt && <section className="draft-sync-results" aria-label="小红书同步结果"><h3>{contentChanged ? "上次同步记录（当前编辑尚未同步）" : "小红书草稿状态"}</h3>
+    {receipt && <section className="draft-sync-results" aria-label="小红书同步结果"><h3>{contentChanged ? "上次结果 · 当前内容有更新" : "小红书草稿状态"}</h3>
       <p>{job?.message || receipt.message}</p>{job && <p>图片 {job.uploadedCount} / {job.imageCount} 张</p>}
       <div className="draft-sync-confirm-actions"><button type="button" disabled={busy} onClick={() => read("read")}>读取小红书同步状态</button><button type="button" disabled={busy || !(job?.draftId || receipt.draftId)} onClick={() => read("verify")}>重新核对小红书草稿</button></div>
-      {pending && <><p>请在专用窗口重新打开草稿，检查标题、配文和全部图片。结果待核对不会显示为保存成功。</p><label className="draft-sync-check"><input type="checkbox" disabled={busy} checked={checked} onChange={(event) => setChecked(event.target.checked)} /><span>我已在专用窗口核对本次结果，并处理好当前编辑器</span></label><button type="button" disabled={busy || !checked} onClick={() => read("acknowledge")}>结束本次任务</button></>}
-      {job?.acknowledged && <p>已记录人工核对并结束任务；这不代表程序已验证保存成功。</p>}
+      {pending && <><p>保存结果尚未确认。请在小红书窗口打开草稿，检查文字和全部图片。</p><label className="draft-sync-check"><input type="checkbox" disabled={busy} checked={checked} onChange={(event) => setChecked(event.target.checked)} /><span>我已检查草稿，并保存或退出了当前编辑</span></label><button type="button" disabled={busy || !checked} onClick={() => read("acknowledge")}>结束本次任务</button></>}
+      {job?.acknowledged && <p>已结束本次任务。保存结果以小红书草稿箱为准。</p>}
     </section>}
-    <section className="draft-sync-service"><h3>保存当前贴图草稿</h3><p>将 {draft.images.length} 张完整海报按当前顺序上传，只保存草稿。</p>
-      {receipt && !pending && <label className="draft-sync-check"><input type="checkbox" checked={allowNew} disabled={busy} onChange={(event) => setAllowNew(event.target.checked)} /><span>确认另建一份草稿，保留上次平台内容</span></label>}
+    <section className="draft-sync-service"><h3>保存到小红书</h3><p>共 {draft.images.length} 张图片，按当前顺序存入草稿箱。</p>
+      {receipt && !pending && <label className="draft-sync-check"><input type="checkbox" checked={allowNew} disabled={busy} onChange={(event) => setAllowNew(event.target.checked)} /><span>另存一份新草稿，保留上次内容</span></label>}
       <button type="button" className="primary" disabled={busy || !account || !contentReady || pending || Boolean(receipt && !allowNew)} onClick={submit}>同步到小红书草稿箱</button>
     </section>
     {feedback && <p className="draft-sync-message" role="status">{feedback}</p>}

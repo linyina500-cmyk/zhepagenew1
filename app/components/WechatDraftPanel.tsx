@@ -22,7 +22,7 @@ function receiptFor(job: WechatJob, previous: SyncReceipt): SyncReceipt {
   return { ...previous, draftId: job.draftId, status: confirmed ? "confirmed_by_user" : job.status === "saved" ? "saved" : job.status === "failed" ? "failed" : "needs_confirmation", message: confirmed ? previous.message : job.message };
 }
 
-export default function WechatDraftPanel({ draft, view, contentReady, contentChanged, busy, runOperation, persistReceipt, onSubmitted }: Props) {
+export default function WechatDraftPanel({ draft, contentReady, contentChanged, busy, runOperation, persistReceipt, onSubmitted }: Props) {
   const [binding, setBinding] = useState<Binding | null>(null);
   const [accounts, setAccounts] = useState<LocalWechatAccount[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -31,6 +31,8 @@ export default function WechatDraftPanel({ draft, view, contentReady, contentCha
   const [feedback, setFeedback] = useState("");
   const [confirmation, setConfirmation] = useState<{ draft: LocalDraft; accounts: LocalWechatAccount[] } | null>(null);
   const requestRef = useRef(false);
+  const confirmationRef = useRef<HTMLElement>(null);
+  useEffect(() => { if (confirmation) confirmationRef.current?.focus(); }, [confirmation]);
   useEffect(() => {
     let live = true;
     void Promise.all([loadBinding(), listAccounts()]).then(([storedBinding, storedAccounts]) => {
@@ -172,24 +174,24 @@ export default function WechatDraftPanel({ draft, view, contentReady, contentCha
       <div className="draft-sync-wechat-heading"><h3>选择公众号</h3>{accounts.length > 0 && <label><input type="checkbox" checked={selected.length === accounts.length} disabled={busy} onChange={(event) => setSelected(event.target.checked ? accounts.map((account) => account.id) : [])} />全选</label>}</div>
       {loading ? <p role="status">正在读取本机公众号…</p> : accounts.length === 0 ? <p>先添加公众号，即可勾选多个账号一起操作。</p> : <div className="draft-sync-wechat-account-list">{accounts.map((account) => {
         const receipt = receiptForAccount(account.id), current = results[account.id];
-        const label = current?.publication ? publicationLabels[current.publication.status] : receipt?.publicationAttempted ? "发表状态待读取" : receipt?.status === "confirmed_by_user" ? "图片已人工核对" : receipt?.status === "saved" ? "草稿已保存" : receipt?.status === "failed" ? "同步未完成" : receipt ? "结果待核对" : "尚未同步";
-        return <article key={account.id} className="draft-sync-wechat-account-row" aria-label={`${account.name} 的结果`}>
+        const label = current?.publication ? publicationLabels[current.publication.status] : receipt?.publicationAttempted ? "发布结果待确认" : receipt?.status === "confirmed_by_user" ? "图片已核对" : receipt?.status === "saved" ? "草稿已保存" : receipt?.status === "failed" ? "同步未完成" : receipt ? "结果待核对" : "尚未同步";
+        return <article key={account.id} className="draft-sync-wechat-account-row" data-selected={selected.includes(account.id)} aria-label={`${account.name} 的结果`}>
           <label className="draft-sync-wechat-account-choice"><input type="checkbox" checked={selected.includes(account.id)} disabled={busy} onChange={(event) => setSelected((ids) => event.target.checked ? [...ids, account.id] : ids.filter((id) => id !== account.id))} /><span><strong>{account.name}</strong><small>{account.appId}</small></span><b>{label}</b></label>
           {(current?.text || receipt) && <p className={current?.error ? "draft-sync-message error" : "draft-sync-small"} role="status">{current?.text || receipt?.message}</p>}
-          {receipt && <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || !binding} onClick={() => read(account)}>读取 {account.name} 状态</button>{receipt.draftId && !receipt.publicationAttempted && !current?.publication && <><button type="button" disabled={busy || !binding} onClick={() => read(account, true)}>重新核对草稿</button>{receipt.status !== "confirmed_by_user" && <button type="button" disabled={busy} onClick={() => confirmVisual(account)}>图片显示正常</button>}</>}</div>}
+          {receipt && <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || !binding} onClick={() => read(account)} aria-label={`刷新 ${account.name} 状态`}>刷新状态</button>{receipt.draftId && !receipt.publicationAttempted && !current?.publication && <><button type="button" disabled={busy || !binding} onClick={() => read(account, true)}>重新核对草稿</button>{receipt.status !== "confirmed_by_user" && <button type="button" disabled={busy} onClick={() => confirmVisual(account)}>图片显示正常</button>}</>}</div>}
           {current?.publication?.urls.map((url, index) => <a key={url} href={url} target="_blank" rel="noopener noreferrer">查看已发表内容{current.publication!.urls.length > 1 ? ` ${index + 1}` : ""}</a>)}
         </article>;
       })}</div>}
     </section>
     <section className="draft-sync-wechat-actions" aria-label="公众号操作">
-      <p>已选 {targets.length} 个公众号 · {draft.images.length} 张图片{contentChanged || view === "results" ? " · 每个账号分别保存结果" : ""}</p>
+      <p>已选 {targets.length} 个公众号 · {draft.images.length} 张图片{contentChanged && draft.receipts.some((receipt) => receipt.platform === "wechat") ? " · 当前内容有更新" : ""}</p>
       <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || loading || !binding || !targets.length || !contentReady} onClick={() => batch(false)}>同步到草稿箱</button><button type="button" className="primary" disabled={busy || loading || !binding || !targets.length || !contentReady} onClick={() => setConfirmation({ draft, accounts: targets })}>立即发布</button></div>
-      <p className="draft-sync-small">同一内容已保存的草稿会直接复用；结果不确定时只读取原任务，避免重复提交。</p>
+      <p className="draft-sync-small">需要定时发布？先存草稿，再去公众号后台设置时间。</p>
       <a href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer">打开公众号后台</a>
     </section>
-    {confirmation && <section className="draft-sync-wechat-confirmation" aria-label="确认立即发布">
+    {confirmation && <section ref={confirmationRef} tabIndex={-1} className="draft-sync-wechat-confirmation" aria-label="确认立即发布">
       <h3>确认立即发布</h3><p>标题：<strong>{confirmation.draft.content.wechat.title}</strong></p><p>{confirmation.draft.images.length} 张图片 · {confirmation.accounts.length} 个公众号</p><ul>{confirmation.accounts.map((account) => <li key={account.id}>{account.name} <small>（{account.appId}）</small></li>)}</ul>
-      <p>确认后会立即提交微信发表；尚未保存的内容会先创建草稿。发表结果以微信返回为准。</p>
+      <p>确认后，这些公众号将立即提交发布。请检查账号和内容；处理结果会逐个显示。</p>
       <div className="draft-sync-confirm-actions"><button type="button" disabled={busy} onClick={() => setConfirmation(null)}>取消</button><button type="button" className="primary" disabled={busy} onClick={() => batch(true, confirmation)}>确认立即发布</button></div>
     </section>}
     {feedback && <p className="draft-sync-message error" role="alert">{feedback}</p>}

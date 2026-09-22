@@ -103,6 +103,29 @@ test("driver is lazy, uses a dedicated persistent profile and preserves native f
   assert.equal((await f.driver.verifyDraft({ ...saved, account, title: "标题", body: "配文", images })).verified, true);
 });
 
+test("driver can select the remaining creator page after an ambiguous first connection", async (t) => {
+  const profileDir = await mkdtemp(join(tmpdir(), "zhepage-xhs-reconnect-"));
+  let launches = 0, focused = 0;
+  const remaining = {
+    url: () => "https://creator.xiaohongshu.com/publish/publish?target=image",
+    isClosed: () => false,
+    async bringToFront() { focused++; },
+    async evaluate() { return { account: null }; },
+  };
+  let pages = [remaining, { url: () => "https://creator.xiaohongshu.com/home" }];
+  const context = { setDefaultTimeout() {}, pages: () => pages, async close() {} };
+  const driver = createXhsBrowserDriver({ profileDir, chromium: {
+    async launchPersistentContext() { launches++; return context; },
+  } });
+  t.after(async () => { await driver.close(); await rm(profileDir, { recursive: true, force: true }); });
+  await assert.rejects(driver.checkConnection(), /多个小红书页面/);
+  assert.equal(focused, 0);
+  pages = [remaining];
+  assert.equal((await driver.openLogin()).status, "needs_attention");
+  assert.equal(focused, 1); assert.equal(launches, 1, "retry must reuse the same persistent context");
+  assert.equal((await driver.checkConnection()).status, "needs_attention");
+});
+
 test("driver never retries an ambiguous save click", async (t) => {
   const f = await browserFixture(t, { saveError: true }), { account } = await f.driver.checkConnection();
   const prepared = await f.driver.prepare({ jobId: "job", account, title: "标题", body: "配文", images: [{ path: "/a.png" }], onProgress: async () => {} });

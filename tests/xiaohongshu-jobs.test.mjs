@@ -78,6 +78,21 @@ test("missing account identity stops before uploads and never binds a guessed na
   assert.deepEqual(f.calls, []);
 });
 
+test("login-required and unrecognized identity show distinct controlled messages", async (t) => {
+  let status = "login_required";
+  const f = await fixture(t, { async checkConnection() { return { status, message: "untrusted?cookie=secret" }; } });
+  await assert.rejects(f.service.checkConnection(), (error) => error.status === 409 && /当前显示登录页/.test(error.message) && /扫码登录/.test(error.message));
+  status = "needs_attention";
+  await assert.rejects(f.service.checkConnection(), (error) => {
+    assert.equal(error.status, 409);
+    assert.match(error.message, /稳定的小红书账号标识/);
+    assert.match(error.message, /请勿重复扫码/);
+    assert.doesNotMatch(error.message, /完成登录|cookie|secret/);
+    return true;
+  });
+  assert.deepEqual(f.calls, []);
+});
+
 test("profile remains bound to the same account after restart", async (t) => {
   let current = account;
   const f = await fixture(t, { async checkConnection() { return { status: "connected", account: current }; } });

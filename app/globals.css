@@ -407,6 +407,10 @@ select:focus { border-color: var(--brown); box-shadow: 0 0 0 3px var(--focus-rin
 .article-flow { --type-scale: 1; --article-leading: 1.72; width: 888px; color: var(--poster-text); font-family: var(--poster-body-font), "Source Han Serif SC", serif; font-size: calc(34px * var(--type-scale)); line-height: var(--article-leading); letter-spacing: .015em; widows: 2; orphans: 2; counter-reset: auto-heading; }
 .article-flow, .article-flow * { box-sizing: border-box; max-width: 100%; font-family: var(--poster-body-font), "Source Han Serif SC", serif !important; }
 .article-flow p { margin: 0 0 29px; line-height: var(--article-leading); text-align: justify; }
+/* Paint the last authored soft-break line without adding text or a dummy BR.
+   A page continuation gets that next line on the following page instead. */
+.article-flow :is(p, h1, h2, h3):not([data-pagination-fragment="start"], [data-pagination-fragment="middle"]):has(br:last-child)::after { content: "\200b"; }
+.article-flow br[data-pagination-leading-break] { display: none; }
 .article-flow h1, .article-flow h2, .article-flow h3 { break-after: avoid; margin: 34px 0 22px; color: var(--poster-accent); font-family: var(--poster-title-font), "Source Han Sans SC", sans-serif !important; line-height: 1.34; }
 .article-flow h1 { font-size: calc(52px * var(--type-scale)); }
 .article-flow h2 { padding-left: 22px; border-left: 8px solid var(--poster-accent); font-size: calc(43px * var(--type-scale)); }

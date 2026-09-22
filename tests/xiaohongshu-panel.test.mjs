@@ -87,7 +87,7 @@ test("XHS human acknowledgement requires the checkbox and never becomes saved", 
   assert.equal(f.calls.filter(([action]) => action === "acknowledge").length, 1);
   assert.equal(f.draft.receipts[0].status, "needs_confirmation");
   assert.ok(f.saves.every((receipt) => receipt.status !== "saved"));
-  assert.match(f.container.textContent, /不代表程序已验证保存成功/);
+  assert.match(f.container.textContent, /保存结果以小红书草稿箱为准/);
   assert.equal(f.button("同步到小红书草稿箱").disabled, true, "a separate new-draft confirmation remains necessary");
 });
 

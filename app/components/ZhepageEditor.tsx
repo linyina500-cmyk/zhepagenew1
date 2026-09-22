@@ -10,6 +10,7 @@ import { Color, TextStyle } from "@tiptap/extension-text-style";
 import { TableKit } from "@tiptap/extension-table";
 import { Extension, Mark, Node, getStyleProperty, mergeAttributes } from "@tiptap/core";
 import { NodeSelection } from "@tiptap/pm/state";
+import { closeHistory } from "@tiptap/pm/history";
 import UnifiedColorPopover from "./UnifiedColorPopover";
 import { createContentLimitExtension, createPasteHandlers } from "../../lib/richText/editorPaste";
 import { IMAGE_FILE_ACCEPT, insertImageFiles } from "../../lib/richText/editorImages";
@@ -298,7 +299,11 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     if (!editor || revision === lastRevision.current) return;
     lastRevision.current = revision;
     applyingExternalContent.current = true;
-    editor.chain().setMeta("richTextExternalContent", true).setContent(html, { emitUpdate: false }).run();
+    // Importing or typesetting is one undo step, independent of typing on
+    // either side, even when all actions happen within the history delay.
+    editor.chain().command(({ tr }) => { closeHistory(tr); return true; })
+      .setMeta("richTextExternalContent", true).setContent(html, { emitUpdate: false }).run();
+    editor.view.dispatch(closeHistory(editor.state.tr));
     applyingExternalContent.current = false;
   }, [editor, html, revision]);
 

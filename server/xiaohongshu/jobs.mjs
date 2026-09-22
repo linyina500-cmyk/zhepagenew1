@@ -143,7 +143,8 @@ export async function createXhsService({ dataDir, driver }) {
   }
   async function bindConnection(openLogin = false) {
     const state = await (openLogin ? driver.openLogin() : driver.checkConnection());
-    if (state?.status !== "connected") return { status: state?.status === "login_required" ? "login_required" : "needs_attention", message: "请在小红书专用浏览器完成登录并核对账号" };
+    if (state?.status === "login_required") return { status: "login_required", message: "小红书专用窗口当前显示登录页，请在该窗口完成扫码登录" };
+    if (state?.status !== "connected") return { status: "needs_attention", message: "暂未从专用窗口确认稳定的小红书账号标识；若已登录，请勿重复扫码，需要核对当前页面与账号识别" };
     const account = state.account;
     if (!account || !ACCOUNT_ID.test(account.id) || typeof account.name !== "string" || !account.name.trim()) return { status: "needs_attention", message: "尚未确认小红书账号身份，当前不会上传图片" };
     let bound;

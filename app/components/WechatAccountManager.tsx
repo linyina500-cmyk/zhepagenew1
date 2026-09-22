@@ -87,8 +87,8 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
     });
   }
   return <details className="draft-sync-wechat-settings" open={!binding || !accounts.length || undefined}>
-    <summary>{binding ? "管理本机公众号" : "连接本机并添加公众号"}</summary>
-    <p className="draft-sync-small">账号密钥只保存在这台浏览器的加密存储中；清除浏览器资料后需重新添加。每次操作时才连接本机服务。</p>
+    <summary>{binding ? "添加或管理公众号" : "首次使用：连接这台电脑"}</summary>
+    <p className="draft-sync-small">账号密钥仅保存在当前浏览器。换设备或清除浏览器数据后，需要重新添加。</p>
     <div className="draft-sync-wechat-fields">
       <div className="field-stack"><label htmlFor="wechat-connection-password">本机连接口令</label><input id="wechat-connection-password" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} placeholder={binding ? "更换口令时填写" : "填写启动工具中的连接口令"} /></div>
       <button type="button" disabled={busy || !token.trim()} onClick={() => run("正在连接本机服务…", async (signal) => { await bind(token, signal); signal.throwIfAborted(); setFeedback("本机服务已连接，可以添加公众号。"); })}>连接本机服务</button>
@@ -96,6 +96,8 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
       <input ref={fileRef} type="file" accept=".env,text/plain" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) importConfig(file); }} />
     </div>
     {binding && <form onSubmit={(event) => { event.preventDefault(); run("正在保存并连接公众号…", (signal) => add({ appId, appSecret: secret, name }, binding, signal)); }}>
+      <h4>添加公众号</h4>
+      <p className="draft-sync-small">在微信开发者平台找到 AppID 和 AppSecret，复制到下方。</p>
       <div className="draft-sync-wechat-fields">
         <div className="field-stack"><label htmlFor="wechat-account-name">公众号名称</label><input id="wechat-account-name" value={name} disabled={busy} onChange={(event) => setName(event.target.value)} autoComplete="off" /></div>
         <div className="field-stack"><label htmlFor="wechat-account-appid">AppID</label><input id="wechat-account-appid" value={appId} disabled={busy} onChange={(event) => setAppId(event.target.value)} autoComplete="off" spellCheck={false} /></div>
@@ -111,8 +113,8 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
       await client.disconnectAccount(account.id, signal); signal.throwIfAborted();
       await removeAccount(account.id); signal.throwIfAborted(); onChange(binding, await listAccounts());
       setFeedback(`${account.name} 已从本机移除，已保存的草稿不受影响。`);
-    })}>移除 {account.name}</button></li>)}</ul>}
-    <button type="button" disabled={busy} onClick={() => { setRecovery("confirm"); setOldServiceStopped(false); }}>本机连接已失效？清除此浏览器的公众号绑定</button>
+    })} aria-label={`移除 ${account.name}`}>移除</button></li>)}</ul>}
+    <button type="button" className="draft-sync-reset-connection" disabled={busy} onClick={() => { setRecovery("confirm"); setOldServiceStopped(false); }}>重置本机连接</button>
     {recovery && <section className="draft-sync-wechat-confirmation" aria-label="清除本机公众号绑定">
       <h3>清除本机公众号绑定</h3>
       <p>将删除此浏览器保存的全部公众号密钥、连接口令和加密密钥，之后需要重新添加账号。海报、图片和同步记录会保留。</p>

@@ -6,7 +6,7 @@ import { startWechatTestServer } from "./wechat-server";
 
 async function openDraftDialog(page: Page) {
   await page.getByRole("button", { name: "同步草稿", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "同步到平台草稿", exact: true });
+  const dialog = page.getByRole("dialog", { name: "同步与发布", exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("status", { name: "" }).filter({ hasText: "正在检查本机存档" })).toHaveCount(0);
   return dialog;
@@ -239,8 +239,9 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await choosePlatform(dialog, "wechat");
     await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("真实海报贴图草稿");
     await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("多张海报完整同步。\n\n这一行也保留。\n");
+    await expect(dialog.locator(".draft-sync-validation li").filter({ hasText: "并非平台强制要求" })).toHaveCount(1);
     await dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true }).check();
-    await dialog.getByRole("button", { name: "下一步：连接公众号", exact: true }).click();
+    await dialog.getByRole("button", { name: "下一步：选择公众号", exact: true }).click();
     expect(requests).toEqual([]);
     await dialog.getByLabel("本机连接口令", { exact: true }).fill("browser-test-password");
     await dialog.getByRole("button", { name: "连接本机服务", exact: true }).click();
@@ -255,6 +256,37 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
       await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeEnabled();
     }
     expect(uploads).toHaveLength(0);
+    // Account checkboxes must never inherit the global full-width text-input rule.
+    // Check both the user's laptop size and narrow screens before any upload.
+    for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      const settings = dialog.locator(".draft-sync-wechat-settings");
+      if (await settings.evaluate((element) => (element as HTMLDetailsElement).open)) await settings.locator("summary").click();
+      const rows = await dialog.locator(".draft-sync-wechat-account-choice").evaluateAll((nodes) => nodes.map((node) => {
+        const box = node.getBoundingClientRect(), checkbox = node.querySelector("input")!.getBoundingClientRect(), name = node.querySelector("strong")!.getBoundingClientRect();
+        return { height: box.height, checkboxWidth: checkbox.width, checkboxHeight: checkbox.height, nameWidth: name.width, overflow: node.scrollWidth - node.clientWidth };
+      }));
+      for (const row of rows) {
+        expect(row.height).toBeLessThan(120);
+        expect(row.checkboxWidth).toBe(16); expect(row.checkboxHeight).toBe(16);
+        expect(row.nameWidth).toBeGreaterThan(150); expect(row.overflow).toBeLessThanOrEqual(1);
+      }
+      await dialog.locator(".draft-sync-wechat-targets").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `test-results/wechat-accounts-${viewport.width}.png` });
+      await dialog.locator(".draft-sync-wechat-actions").scrollIntoViewIfNeeded();
+      await expect(dialog.getByRole("button", { name: "立即发布", exact: true })).toBeInViewport();
+      await page.screenshot({ path: `test-results/wechat-actions-${viewport.width}.png` });
+      const clipped = await dialog.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return [...element.querySelectorAll("button,input,summary")].filter((node) => {
+          if (!node.getClientRects().length) return false;
+          const box = node.getBoundingClientRect();
+          return box.left < bounds.left - 1 || box.right > bounds.right + 1;
+        }).map((node) => node.textContent || node.id);
+      });
+      expect(clipped).toEqual([]);
+    }
+    await page.setViewportSize({ width: 1110, height: 770 });
     await dialog.getByLabel("全选", { exact: true }).check();
     await dialog.getByRole("button", { name: "同步到草稿箱", exact: true }).click();
     await expect.poll(() => server.failure() || uploads.length).toBe(2);
@@ -280,6 +312,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     expect(protectedVault.serialized).not.toContain("browser-test-password");
     await dialog.getByRole("button", { name: "立即发布", exact: true }).click();
     const confirmation = dialog.getByRole("region", { name: "确认立即发布", exact: true });
+    await expect(confirmation).toBeFocused();
     await expect(confirmation).toContainText("真实海报贴图草稿");
     await expect(confirmation).toContainText(accounts[0].name); await expect(confirmation).toContainText(accounts[1].name);
     expect(publications.size).toBe(0);
@@ -299,11 +332,22 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await page.reload(); dialog = await openDraftDialog(page);
     await dialog.getByRole("button", { name: "继续本机存档", exact: true }).click(); await choosePlatform(dialog, "wechat");
     await dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true }).check();
-    await dialog.getByRole("button", { name: "下一步：连接公众号", exact: true }).click();
+    await dialog.getByRole("button", { name: "下一步：选择公众号", exact: true }).click();
     await expect(dialog.getByRole("article", { name: `${accounts[0].name} 的结果` })).toBeVisible();
     expect(requests).toHaveLength(callsBeforeReload);
-    await dialog.getByRole("button", { name: `读取 ${accounts[0].name} 状态`, exact: true }).click();
+    await dialog.getByRole("button", { name: `刷新 ${accounts[0].name} 状态`, exact: true }).click();
     await expect(dialog.getByRole("article", { name: `${accounts[0].name} 的结果` })).toContainText("已发表");
     expect(publications.size).toBe(2); expect(uploads).toHaveLength(2); expect(server.failure()).toBeUndefined();
+    await dialog.locator(".draft-sync-steps button").first().click();
+    await choosePlatform(dialog, "xiaohongshu");
+    await dialog.locator(".draft-sync-steps button").nth(1).click();
+    await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toBeVisible();
+    for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await dialog.locator(".draft-sync-xhs").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `test-results/xiaohongshu-panel-${viewport.width}.png` });
+      expect(await dialog.locator(".draft-sync-xhs").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    }
+
   } finally { await server.close(); }
 });

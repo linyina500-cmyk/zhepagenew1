@@ -115,7 +115,7 @@ test("sync after publication reports the article and does not rely on a possibly
   const row = f.container.querySelector('[aria-label="测试公众号1 的结果"]');
   assert.match(row.textContent, /这份内容已发表/); assert.doesNotMatch(row.textContent, /草稿已保存|已同步到草稿箱|重新核对草稿/);
   assert.match(f.saved.receipts[0].message, /已发表/);
-  await f.click("读取 测试公众号1 状态");
+  await f.click("刷新状态");
   assert.match(row.textContent, /这份内容已发表/);
   await f.click("立即发布"); await f.click("确认立即发布");
   assert.equal(f.publications.length, 1);

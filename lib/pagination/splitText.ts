@@ -97,6 +97,15 @@ export function splitTextPreservingDom(
     if (!startsOriginal || !endsOriginal) {
       fragment.setAttribute("data-pagination-fragment", startsOriginal ? "start" : endsOriginal ? "end" : "middle");
     }
+    // When a page ends just before a soft break, the new page already moves
+    // past that text line. Keep the authored BR for content fidelity, but do
+    // not paint that same line transition again at the continuation's start.
+    if (from > 0 && text[from] === "\n" && text[from - 1] !== "\n") {
+      const first = collectContentNodes(fragment)[0]?.node;
+      if (first?.nodeType === Node.ELEMENT_NODE && (first as Element).matches("br")) {
+        (first as Element).setAttribute("data-pagination-leading-break", "true");
+      }
+    }
     return fragment;
   };
 

@@ -7,7 +7,7 @@ import ts from "typescript";
 import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const { WechatRequestError } = loadDomModule("lib/wechat/client.ts");
-const resetText = "本机连接已失效？清除此浏览器的公众号绑定";
+const resetText = "重置本机连接";
 const confirmText = "确认清除本机公众号绑定";
 
 async function fixture(context) {

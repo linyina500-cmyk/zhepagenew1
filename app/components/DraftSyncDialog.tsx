@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type RefObject } from "react";
 import { clearLocalDraft, loadLocalDraft, saveLocalDraft } from "../../lib/draftSync/localDraftStore";
 import type { DraftImage, DraftPlatform, LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
-import { countCharacters, countHashtags, countUtf8Bytes, DRAFT_LIMITS, imageMetadata, readDraftImage, validateDraft, WECHAT_BODY_BYTES } from "../../lib/draftSync/validation";
+import { countCharacters, countHashtags, DRAFT_LIMITS, imageMetadata, readDraftImage, validateDraft } from "../../lib/draftSync/validation";
 import WechatDraftPanel from "./WechatDraftPanel";
 import XiaohongshuDraftPanel from "./XiaohongshuDraftPanel";
 
@@ -20,15 +20,11 @@ type DraftSyncDialogProps = {
 type Feedback = { tone: "neutral" | "success" | "error"; text: string };
 type DraftStep = "content" | "browser" | "results";
 const STEPS: { id: DraftStep; label: string; hint: string }[] = [
-  { id: "content", label: "确认内容", hint: "检查完整图片和顺序，为两个平台分别填写标题与文案。" },
-  { id: "browser", label: "连接小红书", hint: "把真实内容留在当前浏览器，再到平台原生编辑器导入。" },
-  { id: "results", label: "核对草稿", hint: "使用平台当前登录的账号，核对导入内容并在草稿箱确认保存结果。" },
+  { id: "content", label: "确认内容", hint: "检查图片顺序，填写所选平台的标题和配文。" },
+  { id: "browser", label: "连接小红书", hint: "登录并确认账号，然后保存到小红书草稿箱。" },
+  { id: "results", label: "查看结果", hint: "查看保存结果，打开平台草稿箱检查图片。" },
 ];
 const PLATFORMS: DraftPlatform[] = ["xiaohongshu", "wechat"];
-const EDITOR_URLS: Record<DraftPlatform, string> = {
-  xiaohongshu: "https://creator.xiaohongshu.com/publish/publish?from=menu_left&target=image",
-  wechat: "https://mp.weixin.qq.com/",
-};
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "操作未完成，请重试";
 const withReceipt = (draft: LocalDraft, receipt: SyncReceipt): LocalDraft => ({
   ...draft, updatedAt: new Date().toISOString(), selectedAccountIds: [],
@@ -230,6 +226,9 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   const issues = draft ? validateDraft(platform, draft.content[platform], metadata) : [];
   const errors = issues.filter((issue) => issue.severity === "error");
   const warnings = issues.filter((issue) => issue.severity === "warning");
+  const ratioWarnings = warnings.filter((issue) => issue.code === "image-ratio");
+  const displayIssues = issues.filter((issue) => issue.code !== "image-ratio");
+  if (ratioWarnings.length) displayIssues.push({ severity: "warning", code: "image-ratio-summary", message: `${ratioWarnings.length} 张图片与建议比例 ${limit.sizeLabel} 不同，可确认沿用。这只是排版建议，并非平台强制要求。` });
   const warningsKey = JSON.stringify({ platform, metadata, warnings: warnings.map(({ code, imageId }) => ({ code, imageId })) });
   const contentReady = Boolean(draft && !errors.length && (!warnings.length || acceptedWarnings === warningsKey));
   function closeDialog(returnToEditor = false) {
@@ -248,17 +247,17 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
     await queueSave(next); signal.throwIfAborted(); receiptSnapshotRef.current = next; setDraft(next);
     return next;
   }
-  const steps = STEPS.map((item) => platform === "wechat" && item.id === "browser" ? { ...item, label: "选择公众号", hint: "勾选目标公众号，选择同步到草稿箱或立即发布。" } : platform === "wechat" && item.id === "results" ? { ...item, hint: "读取官方接口核对结果，并在公众号草稿箱检查全部图片的实际显示。" } : item);
+  const steps = STEPS.map((item) => platform === "wechat" && item.id === "browser" ? { ...item, label: "选择公众号", hint: "勾选目标公众号，选择同步到草稿箱或立即发布。" } : platform === "wechat" && item.id === "results" ? { ...item, hint: "查看每个公众号的处理结果。存草稿后，可去后台检查图片或设置定时发布。" } : item);
   const stepInfo = steps.find((item) => item.id === step)!;
-  const nextHint = step === "content" ? !draft ? "先用当前海报开始，或继续已有的本机存档。" : contentReady ? `确认当前平台的完整内容后，下一步${platform === "wechat" ? "连接公众号" : "连接小红书"}。` : "请先处理下方检查提示，再继续。"
+  const nextHint = step === "content" ? !draft ? "先用当前海报开始，或继续已有的本机存档。" : contentReady ? `图片和文案已准备好，可以继续选择账号。` : "请先处理下方检查提示，再继续。"
     : platform === "wechat" ? "草稿保留在所选公众号；立即发布会另行确认目标和内容。" : step === "browser" ? "请先在本机打开专用小红书窗口扫码，确认账号后同步。" : "以草稿箱中重新打开的内容为准；结果待核对时请勿重复创建。";
-  const platformTabs = <div className="draft-sync-platforms" role="group" aria-label="选择同步平台">{PLATFORMS.map((target) => <button type="button" key={target} aria-pressed={platform === target} disabled={Boolean(busy)} onClick={() => { setPlatform(target); setFeedback(null); }}>{DRAFT_LIMITS[target].label}<span>{step === "content" ? "独立填写标题与文案" : target === "wechat" ? "核对服务连接的公众号" : "使用平台当前登录账号"}</span></button>)}</div>;
-  const openPlatform = <a className="draft-sync-platform-link" href={EDITOR_URLS[platform]} target="_blank" rel="noopener noreferrer">{platform === "wechat" ? "打开公众号后台" : "打开小红书图文编辑器"}</a>;
+  const platformTabs = <div className="draft-sync-platforms" role="group" aria-label="选择同步平台">{PLATFORMS.map((target) => <button type="button" key={target} aria-pressed={platform === target} disabled={Boolean(busy)} onClick={() => { setPlatform(target); setFeedback(null); }}>{DRAFT_LIMITS[target].label}<span>{step === "content" ? "独立填写标题与文案" : target === "wechat" ? "存草稿或立即发布" : "保存到草稿箱"}</span></button>)}</div>;
+
 
   return <dialog ref={dialogRef} className="draft-sync-dialog" aria-labelledby="draft-sync-title" aria-describedby="draft-sync-description" onCancel={(event) => { event.preventDefault(); closeDialog(); }}>
     <div className="draft-sync-frame">
       <header className="draft-sync-header">
-        <div><span className="eyebrow">图片完成后，继续这三步</span><h2 id="draft-sync-title">同步到平台草稿</h2><p id="draft-sync-description">确认完整图片和独立文案，连接所选平台，保存后核对草稿内容与图片显示。</p></div>
+        <div><span className="eyebrow">海报已就绪，继续下一步</span><h2 id="draft-sync-title">同步与发布</h2><p id="draft-sync-description">小红书存草稿；公众号可存草稿或立即发布。</p></div>
         <button type="button" className="modal-close" aria-label="关闭草稿同步" onClick={() => closeDialog()}>×</button>
       </header>
       <nav className="draft-sync-steps" aria-label="草稿保存步骤">{steps.map((item, index) => <button type="button" key={item.id} aria-current={step === item.id ? "step" : undefined} disabled={Boolean(busy) || (item.id === "browser" && !draft?.images.length) || (item.id === "results" && !draft)} onClick={() => goToStep(item.id)}><span aria-hidden="true">{index + 1}</span>{item.label}</button>)}</nav>
@@ -276,7 +275,7 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
             {storageError && <div className="draft-sync-message error" role="alert">{storageError}<button type="button" disabled={Boolean(busy)} onClick={() => void readStoredDraft()}>重新读取</button></div>}
             {!canCollect && <p>海报正在处理，排版完成后即可开始；也可继续已有存档。</p>}
           </section>
-          {!draft ? <div className="draft-sync-empty"><span aria-hidden="true">01</span><h3>先把当前海报带进来</h3><p>点击“用当前海报开始”，生成全部海报的图片副本。你可以替换图片、调整顺序，再给两个平台分别写文案。</p><p className="draft-sync-small">小红书由本机程序保存草稿；公众号通过官方接口同步。</p></div> : <div className="draft-sync-columns">
+          {!draft ? <div className="draft-sync-empty"><span aria-hidden="true">01</span><h3>先把当前海报带进来</h3><p>点击“用当前海报开始”，生成全部海报的图片副本。你可以替换图片、调整顺序，再给两个平台分别写文案。</p></div> : <div className="draft-sync-columns">
           <section className="draft-sync-assets" aria-labelledby="draft-sync-assets-title">
             <div className="draft-sync-section-title"><div><h3 id="draft-sync-assets-title">图片素材 <span>{draft.images.length} 张</span></h3><p>首图作为封面，两平台使用同一组图片。可替换、增删和调整顺序。</p></div><button type="button" disabled={Boolean(busy)} onClick={() => selectFiles(null)}>＋ 添加图片</button></div>
             <input ref={fileInputRef} type="file" accept="image/png,image/jpeg" hidden onChange={onFilesSelected} aria-label="草稿图片文件" />
@@ -299,9 +298,9 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
 
           <section className="draft-sync-editor" aria-label="平台文案">
             {platformTabs}
-            <div className="field-stack"><label htmlFor="draft-platform-title">{limit.label}标题</label><input id="draft-platform-title" value={draft.content[platform].title} disabled={Boolean(busy)} onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], title: event.target.value } } }), platform)} /><small>{countCharacters(draft.content[platform].title)} / {limit.title} 个字符（本工具上限）</small></div>
-            <div className="field-stack"><label htmlFor="draft-platform-body">{limit.label}文案</label><textarea id="draft-platform-body" rows={6} value={draft.content[platform].body} disabled={Boolean(busy)} placeholder="为这个平台写一段配文" onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], body: event.target.value } } }), platform)} /><small>{countCharacters(draft.content[platform].body)} / {limit.body} 字；两个平台分别保存文案</small>{platform === "wechat" && <small>文案大小 {countUtf8Bytes(draft.content.wechat.body)} / {WECHAT_BODY_BYTES} 字节（本工具上限，中文通常占 3 字节）</small>}<small>话题 {countHashtags(draft.content[platform].body)} / {limit.topics} 个；每个话题以 # 开头，用空格分隔</small></div>
-            <p className="draft-sync-small">两个平台的标题与文案互不覆盖。每次只传入当前选择的平台。</p>
+            <div className="field-stack"><label htmlFor="draft-platform-title">{limit.label}标题</label><input id="draft-platform-title" value={draft.content[platform].title} disabled={Boolean(busy)} onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], title: event.target.value } } }), platform)} /><small>{countCharacters(draft.content[platform].title)} / {limit.title} 字（本工具上限）</small></div>
+            <div className="field-stack"><label htmlFor="draft-platform-body">{limit.label}文案</label><textarea id="draft-platform-body" rows={6} value={draft.content[platform].body} disabled={Boolean(busy)} placeholder="为这个平台写一段配文" onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], body: event.target.value } } }), platform)} /><small>{countCharacters(draft.content[platform].body)} / {limit.body} 字；平台文案分别保存</small>{platform === "xiaohongshu" && <small>话题 {countHashtags(draft.content[platform].body)} / {limit.topics} 个；以 # 开头，用空格分隔</small>}</div>
+            <p className="draft-sync-small">切换平台后，可分别填写标题和配文。</p>
           </section>
           </div>}
         </>}
@@ -309,24 +308,22 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
           {platformTabs}
           <section className="draft-sync-selection-summary" aria-label="本次传入内容">
             <h3>{limit.label} · {draft.content[platform].title || "未填写标题"}</h3>
-            <p className="draft-sync-small">完整传入 {draft.images.length} 张图片，顺序与“确认内容”一致 · {(draft.images.reduce((sum, image) => sum + image.blob.size, 0) / 1024 / 1024).toFixed(2)} MiB</p>
-            <p className="draft-sync-summary-body">{draft.content[platform].body || "本平台未填写配文"}</p>
-            <p className="draft-sync-small">图片、双平台文案和核对记录同时保留一份本机副本。存草稿与立即发布分别操作，发布前会再次确认。</p>
-            {openPlatform}
+            <p className="draft-sync-small">共 {draft.images.length} 张图片，按已确认的顺序同步。</p>
+            <details><summary>查看本次配文</summary><p className="draft-sync-summary-body">{draft.content[platform].body || "未填写配文"}</p></details>
             <button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>返回确认内容</button>
           </section>
         </>}
         {step === "results" && platformTabs}
         {open && platform === "wechat" && draft && step !== "content" && <WechatDraftPanel key={draft.id} draft={draft} view={step} contentReady={contentReady} contentChanged={contentChanged.wechat} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, wechat: false })); }} />}
         {open && platform === "xiaohongshu" && draft && step !== "content" && <XiaohongshuDraftPanel key={draft.id} draft={draft} contentReady={contentReady} contentChanged={contentChanged.xiaohongshu} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, xiaohongshu: false })); }} />}
-        {draft && step !== "results" && !!issues.length && <section className="draft-sync-validation" aria-label="同步前检查"><h3>同步前检查</h3><ul>{issues.map((issue, index) => <li key={`${issue.code}-${issue.imageId || index}`} className={issue.severity}><b>{limit.label}：</b>{issue.message}</li>)}</ul>{!!warnings.length && <label className="draft-sync-check"><input type="checkbox" checked={acceptedWarnings === warningsKey} disabled={Boolean(busy)} onChange={(event) => setAcceptedWarnings(event.target.checked ? warningsKey : "")} /><span>我已核对图片，沿用当前尺寸和比例</span></label>}</section>}
+        {draft && step !== "results" && !!issues.length && <section className="draft-sync-validation" aria-label="同步前检查"><h3>同步前检查</h3><ul>{displayIssues.map((issue, index) => <li key={`${issue.code}-${issue.imageId || index}`} className={issue.severity}><b>{limit.label}：</b>{issue.message}</li>)}</ul>{!!warnings.length && <label className="draft-sync-check"><input type="checkbox" checked={acceptedWarnings === warningsKey} disabled={Boolean(busy)} onChange={(event) => setAcceptedWarnings(event.target.checked ? warningsKey : "")} /><span>我已核对图片，沿用当前尺寸和比例</span></label>}</section>}
 
       </div>
       <footer className="draft-sync-footer">
         <div className="draft-sync-footer-status" aria-live="polite">{busy ? <p role="status">{busy} 关闭窗口可停止等待；已经提交的任务仍需读取状态和核对结果。</p> : <>{feedback && <p className={feedback.tone} role={feedback.tone === "error" ? "alert" : "status"}>{feedback.text}</p>}<p>{nextHint}</p></>}{archiveFeedback && <p className={archiveFeedback.tone} role="status">{archiveFeedback.text}</p>}{draft && <label className="draft-sync-check"><input type="checkbox" checked={autoSave} disabled={Boolean(busy)} onChange={(event) => setAutoSave(event.target.checked)} /><span>自动存到当前浏览器</span></label>}</div>
         <div className="draft-sync-footer-actions">
           <button type="button" disabled={Boolean(busy) || !draft} onClick={saveDraft}>存到本机</button>
-          {step === "content" ? <button type="button" className="primary" disabled={Boolean(busy) || (draft ? !contentReady : !canCollect || storageState === "loading")} onClick={() => draft ? goToStep("browser") : createDraft()}>{draft ? platform === "wechat" ? "下一步：连接公众号" : "下一步：连接小红书" : "用当前海报开始"}</button> : step === "browser" ? <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>上一步</button></> : <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>返回确认内容</button><button type="button" className="primary" onClick={() => closeDialog()}>完成</button></>}
+          {step === "content" ? <button type="button" className="primary" disabled={Boolean(busy) || (draft ? !contentReady : !canCollect || storageState === "loading")} onClick={() => draft ? goToStep("browser") : createDraft()}>{draft ? platform === "wechat" ? "下一步：选择公众号" : "下一步：连接小红书" : "用当前海报开始"}</button> : step === "browser" ? <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>上一步</button></> : <><button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>返回确认内容</button><button type="button" className="primary" onClick={() => closeDialog()}>完成</button></>}
         </div>
       </footer>
     </div>
