@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { makePng, shortArticleHtml, shortBody, shortTitle } from "./fixtures";
 import { expectPreviewReady, importRichArticle, openWorkbench } from "./helpers";
+import { startWechatTestServer } from "./wechat-server";
 
 async function openDraftDialog(page: Page) {
   await page.getByRole("button", { name: "同步草稿", exact: true }).click();
@@ -186,16 +187,22 @@ test("WeChat official draft flow uploads complete generated PNGs only after acco
   test.setTimeout(180_000);
   const requests: string[] = [];
   let upload: { id: string; title: string; body: string; images: { name: string; size: number; signature: number[] }[] } | null = null;
-  await page.route("**/api/wechat/**", async (route) => {
-    const request = route.request(), path = new URL(request.url()).pathname;
-    requests.push(`${request.method()} ${path}`);
-    expect(request.headers().authorization).toBe("Bearer browser-test-password");
+  const server = await startWechatTestServer(new URL(page.url()).origin, async (request, response) => {
+    const path = new URL(request.url!, "http://test.local").pathname;
+    const reply = (status: number, json: unknown) => {
+      response.writeHead(status, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(json));
+    };
+    requests.push(`${request.method} ${path}`);
+    expect(request.headers.authorization).toBe("Bearer browser-test-password");
     if (path === "/api/wechat/account") {
-      await route.fulfill({ json: { account: { id: "browser-test-account", name: "贴图测试公众号" } } });
+      reply(200, { account: { id: "browser-test-account", name: "贴图测试公众号" } });
       return;
     }
-    expect(path).toBe("/api/wechat/jobs"); expect(request.method()).toBe("POST");
-    const form = await new Response(new Uint8Array(request.postDataBuffer()!), { headers: { "content-type": request.headers()["content-type"] } }).formData();
+    expect(path).toBe("/api/wechat/jobs"); expect(request.method).toBe("POST");
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const form = await new Response(new Uint8Array(Buffer.concat(chunks)), { headers: { "content-type": request.headers["content-type"]! } }).formData();
     expect(form.get("expectedAccountId")).toBe("browser-test-account");
     const images = await Promise.all(form.getAll("images").map(async (value) => {
       const file = value as File;
@@ -205,37 +212,45 @@ test("WeChat official draft flow uploads complete generated PNGs only after acco
     const stored = await savedDraftSummary(page);
     expect(stored?.receipts).toContainEqual(expect.objectContaining({ accountId: "browser-test-account", jobId: upload.id, status: "needs_confirmation" }));
     expect(stored?.images.map((image) => image.size)).toEqual(images.map((image) => image.size));
-    await route.fulfill({ status: 202, json: { job: { id: upload.id, accountId: "browser-test-account", accountName: "贴图测试公众号", title: upload.title, imageCount: images.length, uploadedCount: images.length, status: "saved", message: "模拟官方草稿读回核对通过", draftId: "mock-wechat-draft", createdAt: "2026-09-22T00:00:00Z", updatedAt: "2026-09-22T00:00:00Z" } } });
+    expect(stored?.content.wechat.body).toBe("多张海报完整同步。\n\n这一行也保留。\n");
+    reply(202, { job: { id: upload.id, accountId: "browser-test-account", accountName: "贴图测试公众号", title: upload.title, imageCount: images.length, uploadedCount: images.length, status: "saved", message: "模拟官方草稿读回核对通过", draftId: "mock-wechat-draft", createdAt: "2026-09-22T00:00:00Z", updatedAt: "2026-09-22T00:00:00Z" } });
   });
-  const dialog = await prepareRealImages(page);
-  await choosePlatform(dialog, "wechat");
-  await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("真实海报贴图草稿");
-  await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("多张海报完整同步。\n这一行也保留。");
-  await dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true }).check();
-  await dialog.getByRole("button", { name: "下一步：连接公众号", exact: true }).click();
-  await expect(dialog.getByRole("link", { name: "打开 Tampermonkey 商店", exact: true })).toHaveCount(0);
-  expect(requests).toEqual([]);
-  await dialog.getByLabel("公众号连接口令", { exact: true }).fill("browser-test-password");
-  expect(requests).toEqual([]);
-  await dialog.getByRole("button", { name: "检查公众号连接", exact: true }).click();
-  await expect(dialog.locator(".draft-sync-wechat-account")).toContainText("贴图测试公众号");
-  await dialog.getByRole("button", { name: "同步到公众号草稿箱", exact: true }).click();
-  await expect(dialog.getByText("接口已核对，图片显示待人工检查", { exact: true })).toBeVisible();
-  expect(requests).toEqual(["GET /api/wechat/account", "POST /api/wechat/jobs"]);
-  expect(upload).toMatchObject({ title: "真实海报贴图草稿", body: "多张海报完整同步。\n这一行也保留。" });
-  const received = upload as unknown as { images: { size: number; signature: number[] }[] };
-  expect(received.images.length).toBeGreaterThan(0);
-  for (const image of received.images) { expect(image.size).toBeGreaterThan(10_000); expect(image.signature).toEqual([137, 80, 78, 71, 13, 10, 26, 10]); }
-  expect(JSON.stringify(await savedDraftSummary(page))).not.toContain("browser-test-password");
-  await page.setViewportSize({ width: 390, height: 844 });
-  const clipped = await dialog.evaluate((element) => {
-    const bounds = element.getBoundingClientRect();
-    return [...element.querySelectorAll(".draft-sync-wechat button,.draft-sync-wechat input")].filter((node) => {
-      const box = node.getBoundingClientRect();
-      return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1);
-    }).map((node) => node.textContent || node.id);
-  });
-  expect(clipped).toEqual([]);
-  await dialog.getByRole("button", { name: "已在公众号草稿箱核对，图片显示正常", exact: true }).click();
-  await expect(dialog.getByText("用户已确认图片正常", { exact: true })).toBeVisible();
+  try {
+    await page.goto(server.origin);
+    const dialog = await prepareRealImages(page);
+    await choosePlatform(dialog, "wechat");
+    await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("真实海报贴图草稿");
+    await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("多张海报完整同步。\n\n这一行也保留。\n");
+    await expect(dialog.getByLabel("公众号贴图文案", { exact: true })).toHaveValue("多张海报完整同步。\n\n这一行也保留。\n");
+    await dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true }).check();
+    await dialog.getByRole("button", { name: "下一步：连接公众号", exact: true }).click();
+    await expect(dialog.getByRole("link", { name: "打开 Tampermonkey 商店", exact: true })).toHaveCount(0);
+    expect(requests).toEqual([]);
+    await dialog.getByLabel("公众号连接口令", { exact: true }).fill("browser-test-password");
+    expect(requests).toEqual([]);
+    await dialog.getByRole("button", { name: "检查公众号连接", exact: true }).click();
+    await expect(dialog.locator(".draft-sync-wechat-account")).toContainText("贴图测试公众号");
+    await dialog.getByRole("button", { name: "同步到公众号草稿箱", exact: true }).click();
+    await expect.poll(() => server.failure() || upload).not.toBeNull();
+    expect(server.failure()).toBeUndefined();
+    await expect(dialog.getByText("接口已核对，图片显示待人工检查", { exact: true })).toBeVisible();
+    expect(requests).toEqual(["GET /api/wechat/account", "POST /api/wechat/jobs"]);
+    // Multipart transport uses CRLF, while the editor and durable local copy use LF.
+    expect(upload).toMatchObject({ title: "真实海报贴图草稿", body: "多张海报完整同步。\r\n\r\n这一行也保留。\r\n" });
+    const received = upload as unknown as { images: { size: number; signature: number[] }[] };
+    expect(received.images.length).toBeGreaterThan(0);
+    for (const image of received.images) { expect(image.size).toBeGreaterThan(10_000); expect(image.signature).toEqual([137, 80, 78, 71, 13, 10, 26, 10]); }
+    expect(JSON.stringify(await savedDraftSummary(page))).not.toContain("browser-test-password");
+    await page.setViewportSize({ width: 390, height: 844 });
+    const clipped = await dialog.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return [...element.querySelectorAll(".draft-sync-wechat button,.draft-sync-wechat input")].filter((node) => {
+        const box = node.getBoundingClientRect();
+        return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1);
+      }).map((node) => node.textContent || node.id);
+    });
+    expect(clipped).toEqual([]);
+    await dialog.getByRole("button", { name: "已在公众号草稿箱核对，图片显示正常", exact: true }).click();
+    await expect(dialog.getByText("用户已确认图片正常", { exact: true })).toBeVisible();
+  } finally { await server.close(); }
 });

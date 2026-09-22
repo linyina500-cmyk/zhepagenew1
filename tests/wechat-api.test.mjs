@@ -124,6 +124,40 @@ test("a clear WeChat refusal is rejected without exposing errmsg or retrying the
   }
 });
 
+test("whitelist errors expose only a strictly validated IPv4 and never adjacent credentials", async () => {
+  const { api, calls } = fixture([jsonResponse({
+    errcode: 40164,
+    errmsg: `invalid ip 203.0.113.27 ipv6 ::ffff:203.0.113.27, not in whitelist; raw-error-detail https://api.weixin.qq.com/?access_token=${accessToken}&secret=${appSecret}`,
+  })]);
+  await assert.rejects(api.checkConnection(), (error) => {
+    assertControlledError(error, "rejected", 40164);
+    assert.match(error.message, /出口 IPv4 为 203\.0\.113\.27/);
+    assert.doesNotMatch(error.message, /ipv6|::ffff|not in whitelist/);
+    return true;
+  });
+  assert.equal(calls.length, 1);
+});
+
+test("invalid, ambiguous and unrelated error addresses are not echoed as whitelist guidance", async () => {
+  for (const [errcode, errmsg] of [
+    [40164, "invalid ip 999.1.2.3, not in whitelist"],
+    [40164, "invalid ip 01.2.3.4, not in whitelist"],
+    [40164, "invalid ip 1.2.3.4.5, not in whitelist"],
+    [40164, "invalid ip 203.0.113.27.example.com, not in whitelist"],
+    [40164, "invalid ip 2001:db8::1, not in whitelist"],
+    [40164, "request failed at https://203.0.113.27/"],
+    [40164, { ip: "203.0.113.27" }],
+    [48001, "invalid ip 203.0.113.27, not in whitelist"],
+  ]) {
+    const { api } = fixture([jsonResponse({ errcode, errmsg })]);
+    await assert.rejects(api.checkConnection(), (error) => {
+      assertControlledError(error, "rejected", errcode);
+      assert.doesNotMatch(error.message, /(?:\d{1,3}\.){3}\d{1,3}|2001:db8|example\.com/);
+      return true;
+    });
+  }
+});
+
 test("network, HTTP, invalid JSON, malformed responses and missing IDs leave creation uncertain without retry", async () => {
   for (const response of [
     () => { throw new Error(`raw-error-detail https://api.weixin.qq.com/?access_token=${accessToken}`); },

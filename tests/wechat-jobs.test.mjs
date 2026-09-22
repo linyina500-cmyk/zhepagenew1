@@ -34,6 +34,44 @@ async function fixture(t, overrides = {}) {
   return { dataDir, api, calls, options, jobs: createJobService(options) };
 }
 
+async function multipartRoundtrip(value) {
+  const request = new Request("https://sync.example/api/wechat/jobs", { method: "POST", body: value });
+  return new Response(await request.arrayBuffer(), { headers: request.headers }).formData();
+}
+
+test("multipart text restores all line breaks before fingerprinting and draft verification", async (t) => {
+  const f = await fixture(t), original = form();
+  const body = "\n第一行\n\n第三行\n";
+  original.set("body", body);
+  const encoded = await multipartRoundtrip(original);
+  assert.equal(encoded.get("body"), "\r\n第一行\r\n\r\n第三行\r\n");
+  const input = await readSubmission(encoded);
+  assert.equal(input.body, body);
+  assert.equal(input.fingerprint, (await readSubmission(original)).fingerprint);
+  await f.jobs.submit(input); await f.jobs.idle();
+  for (const kind of ["create", "verify"]) assert.equal(f.calls.find(([action]) => action === kind)[1].body, body);
+  const carriageReturns = form(); carriageReturns.set("body", "一\r二\r\n\r三");
+  assert.equal((await readSubmission(carriageReturns)).body, "一\n二\n\n三");
+});
+
+test("multipart line encoding cannot inflate the exact text limits or permit multiline titles", async () => {
+  const atByteLimit = form();
+  const body = "中".repeat(680) + "\n" + "a".repeat(7);
+  assert.equal(Buffer.byteLength(body, "utf8"), 2048);
+  atByteLimit.set("body", body);
+  const encoded = await multipartRoundtrip(atByteLimit);
+  assert.equal(Buffer.byteLength(encoded.get("body"), "utf8"), 2049);
+  assert.equal((await readSubmission(encoded)).body, body);
+  const overByteLimit = form(); overByteLimit.set("body", body + "a");
+  await assert.rejects(readSubmission(await multipartRoundtrip(overByteLimit)), /2,048/);
+  const atCharacterLimit = form(); atCharacterLimit.set("body", "a".repeat(998) + "\n\n");
+  assert.equal((await readSubmission(await multipartRoundtrip(atCharacterLimit))).body.length, 1000);
+  atCharacterLimit.set("body", "a".repeat(999) + "\n\n");
+  await assert.rejects(readSubmission(await multipartRoundtrip(atCharacterLimit)), /1,000/);
+  const multilineTitle = form(); multilineTitle.set("title", "标题\n第二行");
+  await assert.rejects(readSubmission(await multipartRoundtrip(multilineTitle)), /不含换行/);
+});
+
 test("all images are validated before any writes and the raw images arrive in order", async (t) => {
   const f = await fixture(t), input = await readSubmission(form());
   assert.deepEqual(Buffer.from(await input.images[0].blob.arrayBuffer()), png);
@@ -230,6 +268,7 @@ test("HTTP service requires a separate credential and exposes only draft operati
   assert.equal(response.status, 202);
   const id = (await response.json()).job.id;
   await f.jobs.idle();
+  assert.equal(f.calls.find(([kind]) => kind === "create")[1].body, input.get("body"));
   const read = await call(`${base}/jobs/${id}`, { headers });
   assert.equal((await read.json()).job.status, "saved");
 });

@@ -20,6 +20,12 @@ const port = Number(process.env.WECHAT_PORT || 8788);
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("WECHAT_PORT 无效");
 const jobs = createJobService({ appId, accountName, dataDir, api: createWechatApi({ appId, appSecret }) });
 const server = createWechatServer({ jobs, syncToken });
+server.on("error", (error) => {
+  console.error(error.code === "EADDRINUSE"
+    ? `端口 ${port} 已被占用，请先关闭已有的公众号服务启动窗口后再试。`
+    : "本机公众号服务未能监听，请检查端口和本机网络配置后再试。");
+  process.exitCode = 1;
+});
 server.listen(port, process.env.WECHAT_HOST || "127.0.0.1", () => {
   console.info(`公众号草稿服务已启动，端口 ${port}。公众号凭据不会输出到日志。`);
 });

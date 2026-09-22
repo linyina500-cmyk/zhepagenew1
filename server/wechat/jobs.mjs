@@ -25,7 +25,9 @@ export async function readSubmission(form) {
     if (values.length !== 1 || typeof values[0] !== "string") throw new RequestError("同步内容不完整，请重新确认内容");
     return values[0];
   };
-  const id = text("id"), title = text("title"), body = text("body");
+  // Multipart encoders normalize textarea newlines to CRLF. Restore the
+  // editor's LF representation before limits, fingerprints, and API readback.
+  const id = text("id"), title = text("title"), body = text("body").replace(/\r\n?/g, "\n");
   const expectedAccountId = text("expectedAccountId");
   if (!/^[a-f0-9]{20}$/.test(expectedAccountId)) throw new RequestError("请先连接并核对目标公众号");
   if (!JOB_ID.test(id)) throw new RequestError("草稿记录编号无效");

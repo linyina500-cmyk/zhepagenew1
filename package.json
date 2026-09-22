@@ -16,7 +16,7 @@
     "test:unit": "node build/test-unit.mjs",
     "lint": "eslint app lib worker functions server tests --ignore-pattern dist --ignore-pattern .next",
     "start:wechat": "node --env-file=server/wechat/.env server/wechat/start.mjs",
-    "pack:wechat": "mkdir -p dist-wechat && tar -czf dist-wechat/zhepage-wechat-service.tar.gz server/wechat/.env.example server/wechat/start.mjs server/wechat/http.mjs server/wechat/jobs.mjs server/wechat/README.md server/wechat/zhepage-wechat.service server/wechat/Caddyfile.example lib/wechat/api.mjs",
+    "pack:wechat": "mkdir -p dist-wechat && tar -czf dist-wechat/zhepage-wechat-service.tar.gz server/wechat/.env.example server/wechat/start.mjs server/wechat/http.mjs server/wechat/jobs.mjs server/wechat/local-setup.mjs server/wechat/local-start.mjs server/wechat/配置公众号.command server/wechat/启动公众号.command server/wechat/本机使用说明.md server/wechat/README.md server/wechat/zhepage-wechat.service server/wechat/Caddyfile.example lib/wechat/api.mjs",
     "db:generate": "drizzle-kit generate",
     "test:browser": "playwright test",
     "test:browser:list": "playwright test --list",
