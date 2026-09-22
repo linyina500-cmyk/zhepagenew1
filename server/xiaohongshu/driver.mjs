@@ -3,9 +3,10 @@ import { mkdir } from "node:fs/promises";
 
 const ORIGIN = "https://creator.xiaohongshu.com";
 const EDITOR_URL = `${ORIGIN}/publish/publish?from=menu_left&target=image`;
+const ACCOUNT_URL = `${ORIGIN}/new/home`;
 // These editor selectors were observed by the previous browser adapter.
-// Account links and draft links still require live acceptance testing. Missing
-// stable identity deliberately stops automation rather than guessing by title.
+// Draft links still require live acceptance testing. Missing stable identity
+// deliberately stops automation rather than guessing by title.
 export const SELECTORS = Object.freeze({
   title: 'input[placeholder*="标题"], [contenteditable="true"][placeholder*="标题"]',
   body: '.tiptap.ProseMirror[contenteditable="true"]',
@@ -27,6 +28,31 @@ export function validDraftRef(ref, imageCount) {
       && url.searchParams.get("target") === "image"
       && ["draft_id", "draftId", "note_id", "noteId"].some((key) => url.searchParams.get(key) === ref.id);
   } catch { return false; }
+}
+
+// Observed through the creator homepage's visible DOM on 2026-09-22.
+// The editor header exposes a nickname/logout menu, not a profile-ID link.
+export function readAccountEvidence() {
+  const visible = (element) => {
+    if (element.closest('[hidden], [aria-hidden="true"]')) return false;
+    const rect = element.getBoundingClientRect();
+    for (let node = element; node; node = node.parentElement) {
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+    }
+    return rect.width > 0 && rect.height > 0;
+  };
+  const cards = [...document.querySelectorAll(".home-card-wrapper .personal .base .text")].filter(visible);
+  if (cards.length !== 1) return null;
+  const card = cards[0];
+  const names = [...card.querySelectorAll(".account-name")].filter(visible);
+  const identifiers = [...card.querySelectorAll(".others.description-text > div")].filter(visible)
+    .map((element) => /^小红书账号\s*[:：]\s*([A-Za-z0-9_-]{1,64})$/u.exec((element.innerText ?? element.textContent ?? "").trim()))
+    .filter(Boolean);
+  if (names.length !== 1 || identifiers.length !== 1) return null;
+  const name = (names[0].innerText ?? names[0].textContent ?? "").trim();
+  if (!name || name.length > 100 || /[\r\n\0]/u.test(name)) return null;
+  return { identifier: identifiers[0][1], name };
 }
 
 // Kept self-contained so the same DOM reading can be tested without an account.
@@ -78,15 +104,6 @@ export function readPageEvidence({ selectors }) {
       failed: [...card.querySelectorAll(".mask.failed")].some(visible),
       processing: [...card.querySelectorAll(".mask.prerender, .processing-container, .mask.uploading, .progress-container")].some(visible) };
   });
-  const accounts = all('header a[href*="/user/profile/"], [role="banner"] a[href*="/user/profile/"]').flatMap((anchor) => {
-    try {
-      const url = new URL(anchor.href);
-      const match = /^\/user\/profile\/([a-f0-9]{24})\/?$/i.exec(url.pathname);
-      const name = (anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || "").trim();
-      return url.hostname === "www.xiaohongshu.com" && match && name ? [{ uid: match[1].toLowerCase(), name }] : [];
-    } catch { return []; }
-  });
-  const distinctAccounts = [...new Map(accounts.map((account) => [account.uid, account])).values()];
   const drafts = all("a[href]").flatMap((anchor) => {
     try {
       const url = new URL(anchor.href);
@@ -97,7 +114,7 @@ export function readPageEvidence({ selectors }) {
     } catch { return []; }
   });
   return { title: titles.length === 1 ? fieldText(titles[0]) : null, body: bodies.length === 1 ? fieldText(bodies[0]) : null,
-    images, account: distinctAccounts.length === 1 ? distinctAccounts[0] : null,
+    images,
     drafts: [...new Map(drafts.map((draft) => [draft.id, draft])).values()],
     blocked: all(".d-dialog, .el-dialog, .d-modal").length > 0 };
 }
@@ -134,10 +151,32 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
     await ensurePage();
     const currentUrl = new URL(page.url());
     if (currentUrl.origin !== ORIGIN) return { status: "needs_attention", message: "请将专用浏览器切回小红书创作服务平台" };
-    if (currentUrl.pathname.startsWith("/login")) return { status: "login_required", message: "请在打开的小红书专用浏览器中扫码登录" };
-    const current = await evidence();
-    if (!current.account) return { status: "needs_attention", message: "尚未从页面确认稳定的账号标识，请在专用浏览器核对登录；当前不会上传图片" };
-    return { status: "connected", account: { id: createHash("sha256").update(current.account.uid).digest("hex").slice(0, 20), name: current.account.name } };
+    let accountPage;
+    try {
+      // Read the current shared session afresh. Never navigate an editor that
+      // may contain work, and never reuse a previous successful account read.
+      accountPage = await context.newPage();
+      const budget = Math.min(timeoutMs, 10_000), deadline = Date.now() + budget;
+      await accountPage.goto(ACCOUNT_URL, { waitUntil: "domcontentloaded", timeout: budget });
+      while (Date.now() < deadline) {
+        const url = new URL(accountPage.url());
+        if (url.origin !== ORIGIN) break;
+        if (url.pathname.startsWith("/login")) return { status: "login_required", message: "请在打开的小红书专用浏览器中扫码登录" };
+        if (url.pathname !== "/new/home") break;
+        const account = await accountPage.evaluate(readAccountEvidence);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        if (account) return { status: "connected", account: {
+          id: createHash("sha256").update(`xiaohongshu-account:${account.identifier}`).digest("hex").slice(0, 20), name: account.name,
+        } };
+        await new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)));
+      }
+    } catch {
+      // Browser errors can contain URLs or page data; expose a fixed message.
+    } finally {
+      if (accountPage) await accountPage.close();
+    }
+    return { status: "needs_attention", message: "尚未从首页账号卡确认小红书账号标识，请核对专用窗口；当前不会上传图片" };
   }
   async function requireAccount(account) {
     const state = await accountState();

@@ -221,13 +221,13 @@ function config(overrides = {}) {
   return "# 私密配置示例，仅合成测试数据\n" + Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n");
 }
 
-test("old config import is a pure four-field parser supporting all generated quote forms", () => {
+test("config import separates the connection from optional account data and preserves quoted values", () => {
   const result = vault.parseLocalWechatConfig("\uFEFF" + config().replaceAll("\n", "\r\n"));
-  assert.deepEqual(result, { appId: first.appId, appSecret: first.appSecret, name: "测试名称 #一=二", token: "private-token" });
+  assert.deepEqual(result, { account: { appId: first.appId, appSecret: first.appSecret, name: "测试名称 #一=二" }, token: "private-token" });
   for (const value of ["'中文 $HOME 和 ` 字符'", '"中文 $HOME 和单引号\'"', "`含单'双\"引号`", String.raw`'保留\n路径'`]) {
-    assert.equal(vault.parseLocalWechatConfig(config({ WECHAT_ACCOUNT_NAME: value })).name, value.slice(1, -1));
+    assert.equal(vault.parseLocalWechatConfig(config({ WECHAT_ACCOUNT_NAME: value })).account.name, value.slice(1, -1));
   }
-  assert.deepEqual(Object.keys(result).sort(), ["appId", "appSecret", "name", "token"]);
+  assert.deepEqual(Object.keys(result).sort(), ["account", "token"]);
 });
 
 test("config import rejects malformed, ambiguous, and executable-looking input", () => {
@@ -237,8 +237,6 @@ test("config import rejects malformed, ambiguous, and executable-looking input",
     config({ WECHAT_APP_SECRET: "secret && run-a-command" }),
     config({ WECHAT_APP_SECRET: '"$(run-a-command)"' }),
     config({ WECHAT_APP_SECRET: '"${ANOTHER_SECRET}"' }),
-    config({ WECHAT_APP_SECRET: '"secret\\nsecond-line"' }),
-    config({ WECHAT_ACCOUNT_NAME: "''" }),
     config() + "\nWECHAT_APP_ID=another-account",
     config() + "\nNODE_OPTIONS=--inspect",
     config() + "\n__proto__=pollute",
@@ -247,4 +245,20 @@ test("config import rejects malformed, ambiguous, and executable-looking input",
     config() + "\0",
   ];
   for (const value of invalid) assert.throws(() => vault.parseLocalWechatConfig(value), (error) => /配置文件格式不支持/.test(error.message) && !error.message.includes(first.appSecret));
+});
+
+test("connection-only configuration imports without restoring account secrets to a file", () => {
+  const connection = '# Local connection only\nWECHAT_SYNC_TOKEN="test-connection-token"\nWECHAT_DATA_DIR="/local/jobs"\nWECHAT_HOST=127.0.0.1\nWECHAT_PORT=8788';
+  assert.deepEqual(vault.parseLocalWechatConfig(connection), { token: "test-connection-token" });
+  assert.deepEqual(vault.parseLocalWechatConfig(connection + '\nWECHAT_APP_ID=\nWECHAT_APP_SECRET=""\nWECHAT_ACCOUNT_NAME= # not stored here'), { token: "test-connection-token" });
+});
+
+test("incomplete account details and missing connection tokens have actionable secret-free errors", () => {
+  for (const accountPart of ["WECHAT_APP_ID=wx-partial", "WECHAT_APP_SECRET='private-secret'", "WECHAT_ACCOUNT_NAME='name only'"]) {
+    assert.throws(() => vault.parseLocalWechatConfig('WECHAT_SYNC_TOKEN="test-token"\n' + accountPart), (error) => /公众号资料不完整/.test(error.message) && !error.message.includes("private-secret"));
+  }
+  assert.throws(() => vault.parseLocalWechatConfig("WECHAT_DATA_DIR=/local/jobs"), /缺少有效的本机连接口令/);
+  for (const value of [config({ WECHAT_APP_SECRET: '"secret\\nsecond-line"' }), config({ WECHAT_ACCOUNT_NAME: "''" })]) {
+    assert.throws(() => vault.parseLocalWechatConfig(value), (error) => /公众号资料不完整或格式有误/.test(error.message) && !error.message.includes(first.appSecret));
+  }
 });

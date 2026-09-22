@@ -200,9 +200,9 @@ export async function clearDeviceVault(): Promise<void> {
   return queueWrite(() => transaction("readwrite", (_records, store) => { store.clear(); }));
 }
 
-/** Import only this app's old data file; never execute or expand shell syntax. */
-export function parseLocalWechatConfig(text: string): { appId: string; appSecret: string; name: string; token: string } {
-  const invalid = () => new Error("配置文件格式不支持，请选择原来的 config.env 文件，或手动填写公众号资料");
+/** Read connection settings and optional account data without executing shell syntax. */
+export function parseLocalWechatConfig(text: string): { token: string; account?: { appId: string; appSecret: string; name: string } } {
+  const invalid = () => new Error("配置文件格式不支持，请选择本机连接工具生成的 config.env 文件");
   if (typeof text !== "string" || text.length > 32768 || hasControl(text, true)) throw invalid();
   const allowed = new Set(["WECHAT_APP_ID", "WECHAT_APP_SECRET", "WECHAT_ACCOUNT_NAME", "WECHAT_SYNC_TOKEN", "WECHAT_DATA_DIR", "WECHAT_HOST", "WECHAT_PORT"]);
   const values = new Map<string, string>();
@@ -219,6 +219,8 @@ export function parseLocalWechatConfig(text: string): { appId: string; appSecret
       if (end < 0 || !/^\s*(?:#.*)?$/u.test(source.slice(end + 1))) throw invalid();
       value = source.slice(1, end);
       if (quote === '"') value = value.replace(/\\n/gu, "\n");
+    } else if (!source || source.startsWith("#")) {
+      value = "";
     } else {
       const plain = /^([A-Za-z0-9_.:/-]+)\s*(?:#.*)?$/u.exec(source);
       if (!plain) throw invalid();
@@ -227,8 +229,11 @@ export function parseLocalWechatConfig(text: string): { appId: string; appSecret
     if (/\$\(|\$\{/u.test(value)) throw invalid();
     values.set(match[1], value);
   }
-  try {
-    const account = accountInput({ appId: values.get("WECHAT_APP_ID") || "", appSecret: values.get("WECHAT_APP_SECRET") || "", name: values.get("WECHAT_ACCOUNT_NAME") || "" });
-    return { ...account, token: field(values.get("WECHAT_SYNC_TOKEN"), "连接口令") };
-  } catch { throw invalid(); }
+  let token: string;
+  try { token = field(values.get("WECHAT_SYNC_TOKEN"), "连接口令"); }
+  catch { throw new Error("配置文件缺少有效的本机连接口令，请重新运行本机连接工具生成配置。"); }
+  const account = { appId: values.get("WECHAT_APP_ID") || "", appSecret: values.get("WECHAT_APP_SECRET") || "", name: values.get("WECHAT_ACCOUNT_NAME") || "" };
+  if (!Object.values(account).some((value) => value.trim())) return { token };
+  try { return { token, account: accountInput(account) }; }
+  catch { throw new Error("配置文件中的公众号资料不完整或格式有误，请补全公众号名称、AppID 和 AppSecret；也可以只导入本机连接配置，再在页面添加公众号。"); }
 }

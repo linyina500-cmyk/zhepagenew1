@@ -48,7 +48,15 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
       const input = parseLocalWechatConfig(await file.text());
       signal.throwIfAborted();
       const target = await bind(input.token, signal);
-      await add({ appId: input.appId, appSecret: input.appSecret, name: input.name }, target, signal);
+      if (input.account) {
+        await add(input.account, target, signal);
+      } else {
+        const savedAccounts = await listAccounts();
+        signal.throwIfAborted();
+        setFeedback(savedAccounts.length
+          ? `本机已连接，已保留此浏览器的 ${savedAccounts.length} 个公众号，可直接勾选同步。`
+          : "本机已连接。此配置只包含连接信息，请在下方添加公众号。");
+      }
     });
   }
   function resetBinding() {
@@ -88,7 +96,7 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
   }
   return <details className="draft-sync-wechat-settings" open={!binding || !accounts.length || undefined}>
     <summary>{binding ? "添加或管理公众号" : "首次使用：连接这台电脑"}</summary>
-    <p className="draft-sync-small">账号密钥仅保存在当前浏览器。换设备或清除浏览器数据后，需要重新添加。</p>
+    <p className="draft-sync-small">账号密钥只保存在当前浏览器、当前网址。请使用同一个网址；换浏览器或清除数据后，需要重新添加。</p>
     <div className="draft-sync-wechat-fields">
       <div className="field-stack"><label htmlFor="wechat-connection-password">本机连接口令</label><input id="wechat-connection-password" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} placeholder={binding ? "更换口令时填写" : "填写启动工具中的连接口令"} /></div>
       <button type="button" disabled={busy || !token.trim()} onClick={() => run("正在连接本机服务…", async (signal) => { await bind(token, signal); signal.throwIfAborted(); setFeedback("本机服务已连接，可以添加公众号。"); })}>连接本机服务</button>
