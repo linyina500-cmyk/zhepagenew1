@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
+import { createWechatApi } from "../lib/wechat/api.mjs";
 import { createJobService, readSubmission } from "../server/wechat/jobs.mjs";
 import { createWechatServer } from "../server/wechat/http.mjs";
 
@@ -271,4 +272,48 @@ test("HTTP service requires a separate credential and exposes only draft operati
   assert.equal(f.calls.find(([kind]) => kind === "create")[1].body, input.get("body"));
   const read = await call(`${base}/jobs/${id}`, { headers });
   assert.equal((await read.json()).job.status, "saved");
+});
+
+test("HTTP preserves controlled WeChat errors as 424 without leaking secrets or retrying", async () => {
+  const syncToken = "test-only-connection-token-of-32-characters";
+  const secret = "fixture-secret-must-not-leak";
+  for (const scenario of ["whitelist", "network", "internal", "spoofed-name"]) {
+    let apiCalls = 0, connectionCalls = 0;
+    const api = createWechatApi({ appId: "wx-fixture", appSecret: secret, fetchImpl: async () => {
+      apiCalls++;
+      if (scenario === "whitelist") return Response.json({ errcode: 40164, errmsg: `invalid ip 203.0.113.27, secret=${secret}, access_token=${syncToken}` });
+      throw new Error(`https://api.weixin.qq.com/?access_token=${syncToken}&secret=${secret}`);
+    } });
+    const server = createWechatServer({ syncToken, jobs: { async checkConnection() {
+      connectionCalls++;
+      if (scenario === "internal" || scenario === "spoofed-name") {
+        const error = new Error(secret);
+        if (scenario === "spoofed-name") error.name = "WechatApiError";
+        throw error;
+      }
+      await api.checkConnection();
+    } } });
+    const request = Readable.from([]);
+    Object.assign(request, { url: "/api/wechat/account", method: "GET", headers: { authorization: `Bearer ${syncToken}` } });
+    const response = {
+      headersSent: false,
+      writeHead(status, headers) { this.status = status; this.headers = headers; this.headersSent = true; },
+      end(body) { this.body = body; },
+    };
+    // Exercise the real HTTP handler without opening a port or calling WeChat.
+    await server.listeners("request")[0](request, response);
+    const controlled = scenario === "whitelist" || scenario === "network";
+    assert.equal(response.status, controlled ? 424 : 502, scenario);
+    assert.equal(response.headers["Content-Type"], "application/json; charset=utf-8");
+    assert.equal(response.headers["Cache-Control"], "no-store");
+    const { error } = JSON.parse(response.body);
+    if (scenario === "whitelist") {
+      assert.match(error, /203\.0\.113\.27.*IP 白名单/u);
+      assert.match(error, /40164/u);
+    } else if (scenario === "network") assert.match(error, /不会自动重试/u);
+    else assert.equal(error, "公众号同步暂未完成，请读取状态并核对草稿箱");
+    for (const unsafe of [secret, syncToken, "https://", "access_token="]) assert.equal(response.body.includes(unsafe), false, scenario);
+    assert.equal(connectionCalls, 1, scenario);
+    assert.equal(apiCalls, controlled ? 1 : 0, scenario);
+  }
 });

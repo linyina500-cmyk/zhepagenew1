@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { WechatApiError } from "../../lib/wechat/api.mjs";
 import { MAX_REQUEST_BYTES, JOB_ID, RequestError, readSubmission } from "./jobs.mjs";
 
 function authorized(value, secret) {
@@ -49,8 +50,10 @@ export function createWechatServer({ jobs, syncToken }) {
       } finally { readingUpload = false; }
     } catch (error) {
       // Never serialize upstream fetch errors, credentials, headers, or URLs.
-      const status = error instanceof RequestError ? error.status : 502;
-      const message = error instanceof RequestError || error.name === "WechatApiError" ? error.message : "公众号同步暂未完成，请读取状态并核对草稿箱";
+      // A controlled WeChat failure is a dependency error, not an unreachable
+      // origin: tunnel providers can replace 502 responses with their own HTML.
+      const status = error instanceof RequestError ? error.status : error instanceof WechatApiError ? 424 : 502;
+      const message = error instanceof RequestError || error instanceof WechatApiError ? error.message : "公众号同步暂未完成，请读取状态并核对草稿箱";
       if (!response.headersSent) send(status, { error: message });
     }
   });

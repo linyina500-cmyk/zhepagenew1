@@ -36,7 +36,7 @@ test("workerd relays upstream JSON errors and refuses redirect credential forwar
     },
   });
   try {
-    for (const expectedStatus of [401, 502, 302]) {
+    for (const expectedStatus of [401, 424, 502, 302]) {
       status = expectedStatus;
       const response = await mf.dispatchFetch("https://preview.example/api/wechat/account", {
         headers: { Authorization: `Bearer ${token}` },
@@ -52,7 +52,7 @@ test("workerd relays upstream JSON errors and refuses redirect credential forwar
         assert.equal(body.error, expectedStatus === 401 ? "fixture-unauthorized" : "fixture-whitelist-error-40164");
       }
     }
-    assert.deepEqual(calls, Array.from({ length: 3 }, () => ({ url: upstream, authorization: `Bearer ${token}` })));
+    assert.deepEqual(calls, Array.from({ length: 4 }, () => ({ url: upstream, authorization: `Bearer ${token}` })));
     assert.ok(!calls.some((call) => call.url === location));
   } finally {
     await mf.dispose();
