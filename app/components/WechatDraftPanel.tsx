@@ -1,142 +1,197 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
-import { createWechatClient, type WechatAccount, type WechatJob } from "../../lib/wechat/client";
+import { createWechatClient, type WechatJob, type WechatPublication } from "../../lib/wechat/client";
+import { listAccounts, loadBinding, readAccountSecret, type Binding, type LocalWechatAccount } from "../../lib/wechat/deviceVault";
+import { wechatContentHash } from "../../lib/wechat/contentIdentity";
+import WechatAccountManager from "./WechatAccountManager";
 
 type Props = {
-  draft: LocalDraft;
-  view: "browser" | "results";
-  contentReady: boolean;
-  contentChanged: boolean;
-  busy: boolean;
+  draft: LocalDraft; view: "browser" | "results"; contentReady: boolean; contentChanged: boolean; busy: boolean;
   runOperation: (label: string, operation: (signal: AbortSignal) => Promise<void>) => Promise<void>;
   persistReceipt: (snapshot: LocalDraft, receipt: SyncReceipt, signal: AbortSignal) => Promise<LocalDraft>;
   onSubmitted: () => void;
 };
-const LABELS: Record<WechatJob["status"], string> = {
-  uploading: "正在上传图片", creating: "正在创建草稿", saved: "接口已核对草稿内容", needs_confirmation: "结果待核对", failed: "本次同步未完成",
-};
-const message = (error: unknown) => error instanceof Error ? error.message : "结果暂未确认，请读取状态并核对公众号草稿箱。";
+type Result = { job?: WechatJob; publication?: WechatPublication | null; text: string; error?: boolean };
+const publicationLabels: Record<WechatPublication["status"], string> = { submitting: "正在提交发表", publishing: "微信正在处理发表", published: "已发表", failed: "发表未成功", needs_confirmation: "发表结果待确认", removed: "内容已被移除", blocked: "暂时不能发表" };
+const message = (error: unknown) => error instanceof Error ? error.message : "结果暂未确认，请读取状态并核对公众号后台。";
+const publicationText = (publication: WechatPublication) => publication.status === "published" ? "这份内容已发表，请通过文章链接或公众号后台查看。" : publication.message;
 function receiptFor(job: WechatJob, previous: SyncReceipt): SyncReceipt {
-  return {
-    ...previous, draftId: job.draftId,
-    status: previous.status === "confirmed_by_user" ? "confirmed_by_user" : job.status === "saved" ? "saved" : job.status === "failed" ? "failed" : "needs_confirmation",
-    message: previous.status === "confirmed_by_user" ? previous.message : job.message,
-  };
+  const confirmed = previous.status === "confirmed_by_user" && job.status === "saved";
+  return { ...previous, draftId: job.draftId, status: confirmed ? "confirmed_by_user" : job.status === "saved" ? "saved" : job.status === "failed" ? "failed" : "needs_confirmation", message: confirmed ? previous.message : job.message };
 }
 
 export default function WechatDraftPanel({ draft, view, contentReady, contentChanged, busy, runOperation, persistReceipt, onSubmitted }: Props) {
-  // This component is removed on close or platform switch. The password is
-  // intentionally absent from every parent state and durable draft record.
-  const [password, setPassword] = useState("");
-  const [account, setAccount] = useState<WechatAccount | null>(null);
-  const [job, setJob] = useState<WechatJob | null>(null);
-  const [feedback, setFeedback] = useState<{ text: string; error: boolean } | null>(null);
-  const [allowNew, setAllowNew] = useState(false);
+  const [binding, setBinding] = useState<Binding | null>(null);
+  const [accounts, setAccounts] = useState<LocalWechatAccount[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [results, setResults] = useState<Record<string, Result>>({});
+  const [loading, setLoading] = useState(true);
+  const [feedback, setFeedback] = useState("");
+  const [confirmation, setConfirmation] = useState<{ draft: LocalDraft; accounts: LocalWechatAccount[] } | null>(null);
   const requestRef = useRef(false);
-  const receipts = draft.receipts.filter((item) => item.platform === "wechat" && item.jobId);
-  const receipt = account ? receipts.find((item) => item.accountId === account.id) : receipts.at(-1);
-  const otherAccountPending = receipts.find((item) => item.accountId !== account?.id && item.status === "needs_confirmation");
-  const matchesAccount = Boolean(account && receipt?.accountId === account.id);
-  const matchingJob = job && receipt?.jobId === job.id ? job : null;
-
-  function connect() {
-    if (!password.trim() || busy) return;
-    void runOperation("正在检查公众号连接…", async (signal) => {
-      setFeedback(null); setAccount(null); setJob(null); setAllowNew(false);
-      const target = await createWechatClient(password).getAccount(signal);
-      signal.throwIfAborted(); setAccount(target);
-      setFeedback({ error: false, text: "连接已确认。请核对下方公众号名称和标识，再同步当前图片。" });
-    });
+  useEffect(() => {
+    let live = true;
+    void Promise.all([loadBinding(), listAccounts()]).then(([storedBinding, storedAccounts]) => {
+      if (live) { setBinding(storedBinding); setAccounts(storedAccounts); }
+    }).catch((error) => { if (live) setFeedback(message(error)); }).finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, []);
+  const targets = accounts.filter((account) => selected.includes(account.id));
+  const receiptForAccount = (accountId: string, snapshot = draft) => snapshot.receipts.find((receipt) => receipt.platform === "wechat" && receipt.accountId === accountId && receipt.jobId);
+  function result(accountId: string, next: Partial<Result>) { setResults((current) => ({ ...current, [accountId]: { ...current[accountId], text: "", ...next } })); }
+  function changedAccounts(nextBinding: Binding | null, nextAccounts: LocalWechatAccount[], addedId?: string) {
+    setBinding(nextBinding); setAccounts(nextAccounts);
+    setSelected((current) => [...new Set([...current.filter((id) => nextAccounts.some((account) => account.id === id)), ...(addedId ? [addedId] : [])])]);
+    setConfirmation(null);
   }
-
-  function submit() {
-    if (!account || !contentReady || busy || requestRef.current || otherAccountPending || (receipt && !allowNew)) return;
-    const target = account;
-    const client = createWechatClient(password);
-    const pending: SyncReceipt = {
-      platform: "wechat", accountId: target.id, jobId: crypto.randomUUID(), status: "needs_confirmation",
-      message: "本次同步尚待确认。关闭或刷新后请先读取这次任务的状态，不要重复创建。",
-    };
-    requestRef.current = true;
-    void runOperation("正在同步到公众号草稿箱…", async (signal) => {
-      setFeedback(null); setJob(null); setAllowNew(false);
-      const staged = await persistReceipt(draft, pending, signal);
-      signal.throwIfAborted(); onSubmitted();
-      let lastJob: WechatJob | null = null;
-      try {
-        const initial = await client.createJob({ id: pending.jobId!, accountId: target.id, content: staged.content.wechat, images: staged.images }, signal);
-        signal.throwIfAborted(); lastJob = initial; setJob(initial);
-        const latest = await client.waitForJob(initial, signal, (progress) => { lastJob = progress; setJob(progress); });
+  async function clientForDevice(signal: AbortSignal) {
+    if (!binding) throw new Error("请先连接本机服务并添加公众号。");
+    const client = createWechatClient(binding.connectionToken);
+    const connection = await client.getConnection(signal);
+    signal.throwIfAborted();
+    if (connection.deviceId !== binding.deviceId) throw new Error("连接设备已改变，请先清除本机公众号账号，再连接新设备。");
+    return { client, binding };
+  }
+  async function connectAccount(client: ReturnType<typeof createWechatClient>, target: Binding, account: LocalWechatAccount, signal: AbortSignal) {
+    const secret = await readAccountSecret(account.id);
+    signal.throwIfAborted();
+    await client.connectAccount({ deviceId: target.deviceId, appId: secret.appId, appSecret: secret.appSecret, name: secret.name }, signal);
+    signal.throwIfAborted();
+  }
+  function batch(publish: boolean, approved?: { draft: LocalDraft; accounts: LocalWechatAccount[] }) {
+    const snapshot = approved?.draft || draft, batchAccounts = approved?.accounts || targets;
+    if (busy || requestRef.current || !binding || !contentReady || !batchAccounts.length || (publish && !approved)) return;
+    requestRef.current = true; setConfirmation(null);
+    void runOperation(publish ? "正在逐个公众号发表…" : "正在逐个公众号同步草稿…", async (signal) => {
+      setFeedback("");
+      const { client, binding: targetBinding } = await clientForDevice(signal);
+      const contentHash = await wechatContentHash(snapshot);
+      signal.throwIfAborted();
+      let staged = snapshot;
+      for (const account of batchAccounts) {
         signal.throwIfAborted();
-        await persistReceipt(staged, receiptFor(latest, pending), signal);
-        setFeedback({ error: latest.status === "failed" || latest.status === "needs_confirmation", text: latest.status === "saved"
-          ? "草稿内容已由接口读回核对。请打开公众号草稿箱，检查每张图片的实际显示。"
-          : ["uploading", "creating"].includes(latest.status) ? "服务器仍在处理，任务编号已保存在本机。可稍后点击“读取同步状态”，无需再次上传。" : latest.message });
-      } catch (error) {
-        // Closing stops only this wait. The pending receipt already survives a
-        // refresh, and no late result may overwrite another editing session.
-        if (signal.aborted) return;
-        const text = message(error);
-        await persistReceipt(staged, { ...pending, draftId: lastJob?.draftId, status: "needs_confirmation", message: text }, signal);
-        signal.throwIfAborted(); setFeedback({ error: true, text });
+        let previous = receiptForAccount(account.id, staged);
+        let activeJob: WechatJob | undefined;
+        result(account.id, { text: "正在连接…", error: false, publication: undefined });
+        try {
+          await connectAccount(client, targetBinding, account, signal);
+          if (previous?.jobId) {
+            const priorPublication = await client.getPublication(previous.jobId, account.id, signal);
+            signal.throwIfAborted();
+            if (priorPublication) {
+              result(account.id, { publication: priorPublication, text: publicationText(priorPublication) });
+              staged = await persistReceipt(staged, { ...previous, publicationAttempted: true, message: publicationText(priorPublication) }, signal);
+              if (previous.contentHash === contentHash) {
+                const latest = publish ? await client.waitForPublication(priorPublication, account.id, signal, (progress) => result(account.id, { publication: progress, text: publicationText(progress) })) : priorPublication;
+                signal.throwIfAborted();
+                staged = await persistReceipt(staged, { ...previous, publicationAttempted: true, message: publicationText(latest) }, signal);
+                signal.throwIfAborted(); result(account.id, { publication: latest, text: publicationText(latest), error: !["published", "submitting", "publishing"].includes(latest.status) });
+                continue;
+              }
+              if (["submitting", "publishing", "needs_confirmation"].includes(priorPublication.status)) throw new Error("上一内容的发表结果尚待确认，请先读取原任务状态；这次没有创建新草稿。");
+            } else if (previous.publicationAttempted) throw new Error("上一内容曾提交发表，但结果还未读到。请先核对原任务和公众号后台，这次没有重新提交。");
+            if (!priorPublication) {
+              activeJob = await client.getJob(previous.jobId, account.id, signal);
+              signal.throwIfAborted();
+              staged = await persistReceipt(staged, receiptFor(activeJob, previous), signal);
+              if (["uploading", "creating", "needs_confirmation"].includes(activeJob.status)) throw new Error("上一任务尚待确认，请先读取状态；这次没有重新上传或发表。");
+              if (previous.contentHash !== contentHash || activeJob.status === "failed") activeJob = undefined;
+            }
+            if (!activeJob) result(account.id, { publication: undefined, text: "正在保存新内容…" });
+          }
+          if (!activeJob) {
+            previous = { platform: "wechat", accountId: account.id, jobId: crypto.randomUUID(), contentHash, status: "needs_confirmation", message: "任务已记录，结果待确认。请读取原任务状态，不要重复提交。" };
+            staged = await persistReceipt(staged, previous, signal);
+            signal.throwIfAborted(); onSubmitted();
+            activeJob = await client.createJob({ id: previous.jobId!, accountId: account.id, content: staged.content.wechat, images: staged.images }, signal);
+            signal.throwIfAborted();
+            activeJob = await client.waitForJob(activeJob, signal, (job) => { result(account.id, { job, text: `图片 ${job.uploadedCount}/${job.imageCount} · ${job.message}` }); });
+            signal.throwIfAborted();
+            staged = await persistReceipt(staged, receiptFor(activeJob, previous), signal);
+          }
+          signal.throwIfAborted(); result(account.id, { job: activeJob, text: activeJob.status === "saved" ? "已同步到草稿箱，请核对图片实际显示。" : activeJob.message, error: activeJob.status !== "saved" });
+          if (!publish || activeJob.status !== "saved") continue;
+          const existing = await client.getPublication(activeJob.id, account.id, signal);
+          signal.throwIfAborted();
+          const publicationReceipt = receiptForAccount(account.id, staged)!;
+          if (!existing && publicationReceipt.publicationAttempted) throw new Error("这份草稿曾提交发表，但结果还未读到。请读取原任务并核对公众号后台，不要再次发表。");
+          if (!existing) {
+            staged = await persistReceipt(staged, { ...publicationReceipt, publicationAttempted: true }, signal);
+            signal.throwIfAborted();
+          }
+          let publication = existing || await client.submitPublication(activeJob.id, account.id, signal);
+          signal.throwIfAborted(); result(account.id, { publication, text: publication.message });
+          publication = await client.waitForPublication(publication, account.id, signal, (progress) => result(account.id, { publication: progress, text: progress.message }));
+          signal.throwIfAborted();
+          staged = await persistReceipt(staged, { ...receiptForAccount(account.id, staged)!, publicationAttempted: true, message: publicationText(publication) }, signal);
+          signal.throwIfAborted(); result(account.id, { publication, text: publicationText(publication), error: !["published", "submitting", "publishing"].includes(publication.status) });
+        } catch (error) {
+          if (signal.aborted) return;
+          const text = message(error);
+          // The pending ID was persisted before any create. Keep it on errors;
+          // a failed account must not prevent later selected accounts running.
+          result(account.id, { ...(activeJob ? { job: activeJob } : {}), text, error: true });
+        }
       }
     }).finally(() => { requestRef.current = false; });
   }
-
-  function read(verify = false) {
-    if (!account || !receipt?.jobId || !matchesAccount || busy) return;
-    const target = account, previous = receipt, snapshot = draft;
-    void runOperation(verify ? "正在重新核对公众号草稿内容…" : "正在读取公众号同步状态…", async (signal) => {
-      setFeedback(null);
-      const client = createWechatClient(password);
-      const latest = verify ? await client.verifyJob(previous.jobId!, target.id, signal) : await client.getJob(previous.jobId!, target.id, signal);
-      signal.throwIfAborted(); setJob(latest);
-      await persistReceipt(snapshot, receiptFor(latest, previous), signal);
+  function read(account: LocalWechatAccount, verify = false) {
+    const previous = receiptForAccount(account.id);
+    if (busy || !previous?.jobId) return;
+    void runOperation("正在读取公众号任务状态…", async (signal) => {
+      const { client, binding: target } = await clientForDevice(signal);
+      await connectAccount(client, target, account, signal);
+      const existing = await client.getPublication(previous.jobId!, account.id, signal);
       signal.throwIfAborted();
-      setFeedback({ error: latest.status === "failed" || latest.status === "needs_confirmation", text: latest.status === "saved"
-        ? "接口已核对草稿内容；图片是否正常显示，仍请在公众号草稿箱检查。" : latest.message });
+      if (existing) {
+        const publication = existing.publishId && ["submitting", "publishing", "needs_confirmation"].includes(existing.status) ? await client.refreshPublication(previous.jobId!, account.id, signal) : existing;
+        signal.throwIfAborted();
+        await persistReceipt(draft, { ...previous, publicationAttempted: true, message: publicationText(publication) }, signal);
+        signal.throwIfAborted(); result(account.id, { publication, text: publicationText(publication), error: !["published", "submitting", "publishing"].includes(publication.status) });
+        return;
+      }
+      if (previous.publicationAttempted) throw new Error("这份内容曾提交发表，但结果还未读到。请核对原任务和公众号后台，不要再次发表。");
+      const job = verify ? await client.verifyJob(previous.jobId!, account.id, signal) : await client.getJob(previous.jobId!, account.id, signal);
+      signal.throwIfAborted();
+      await persistReceipt(draft, receiptFor(job, previous), signal);
+      signal.throwIfAborted(); result(account.id, { job, publication: null, text: job.message, error: job.status === "failed" || job.status === "needs_confirmation" });
     });
   }
-
-  function confirmVisual() {
-    if (!receipt || !matchesAccount || busy) return;
+  function confirmVisual(account: LocalWechatAccount) {
+    const previous = receiptForAccount(account.id);
+    if (busy || !previous?.draftId) return;
     void runOperation("正在记录图片核对结果…", async (signal) => {
-      await persistReceipt(draft, { ...receipt, status: "confirmed_by_user", message: "你已在目标公众号草稿箱核对标题、文案、全部图片及顺序，并确认图片显示正常。这是人工确认。" }, signal);
-      signal.throwIfAborted(); setFeedback({ error: false, text: "已记录你的人工核对结果。" });
+      await persistReceipt(draft, { ...previous, status: "confirmed_by_user", message: "你已在目标公众号草稿箱核对标题、文案、全部图片及顺序，并确认图片显示正常。" }, signal);
     });
   }
-
   return <div className="draft-sync-wechat">
-    <section className={`draft-sync-service ${account ? "connected" : ""}`} aria-label="公众号服务连接">
-      <h3>{account ? "公众号已连接" : "连接公众号"}</h3>
-      <p>公众号通过官方接口同步为“多图＋短文”贴图草稿。连接检查只读取草稿接口，不会上传图片；点击同步后才上传图片。</p>
-      <div className="field-stack"><label htmlFor="wechat-connection-password">公众号连接口令</label><input id="wechat-connection-password" type="password" autoComplete="off" spellCheck={false} value={password} disabled={busy} onChange={(event) => { setPassword(event.target.value); setAccount(null); setJob(null); setFeedback(null); setAllowNew(false); }} /><small>填写服务器设置的连接口令，不是公众号 AppSecret。口令仅在当前窗口使用，关闭后清除。</small></div>
-      <button type="button" disabled={busy || !password.trim()} onClick={connect}>检查公众号连接</button>
-      {account && <p className="draft-sync-wechat-account" role="status"><strong>同步目标：{account.name}</strong><span>账号标识：{account.id}</span></p>}
+    <WechatAccountManager binding={binding} accounts={accounts} busy={busy || loading} runOperation={runOperation} onChange={changedAccounts} />
+    <section className="draft-sync-wechat-targets" aria-label="选择公众号">
+      <div className="draft-sync-wechat-heading"><h3>选择公众号</h3>{accounts.length > 0 && <label><input type="checkbox" checked={selected.length === accounts.length} disabled={busy} onChange={(event) => setSelected(event.target.checked ? accounts.map((account) => account.id) : [])} />全选</label>}</div>
+      {loading ? <p role="status">正在读取本机公众号…</p> : accounts.length === 0 ? <p>先添加公众号，即可勾选多个账号一起操作。</p> : <div className="draft-sync-wechat-account-list">{accounts.map((account) => {
+        const receipt = receiptForAccount(account.id), current = results[account.id];
+        const label = current?.publication ? publicationLabels[current.publication.status] : receipt?.publicationAttempted ? "发表状态待读取" : receipt?.status === "confirmed_by_user" ? "图片已人工核对" : receipt?.status === "saved" ? "草稿已保存" : receipt?.status === "failed" ? "同步未完成" : receipt ? "结果待核对" : "尚未同步";
+        return <article key={account.id} className="draft-sync-wechat-account-row" aria-label={`${account.name} 的结果`}>
+          <label className="draft-sync-wechat-account-choice"><input type="checkbox" checked={selected.includes(account.id)} disabled={busy} onChange={(event) => setSelected((ids) => event.target.checked ? [...ids, account.id] : ids.filter((id) => id !== account.id))} /><span><strong>{account.name}</strong><small>{account.appId}</small></span><b>{label}</b></label>
+          {(current?.text || receipt) && <p className={current?.error ? "draft-sync-message error" : "draft-sync-small"} role="status">{current?.text || receipt?.message}</p>}
+          {receipt && <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || !binding} onClick={() => read(account)}>读取 {account.name} 状态</button>{receipt.draftId && !receipt.publicationAttempted && !current?.publication && <><button type="button" disabled={busy || !binding} onClick={() => read(account, true)}>重新核对草稿</button>{receipt.status !== "confirmed_by_user" && <button type="button" disabled={busy} onClick={() => confirmVisual(account)}>图片显示正常</button>}</>}</div>}
+          {current?.publication?.urls.map((url, index) => <a key={url} href={url} target="_blank" rel="noopener noreferrer">查看已发表内容{current.publication!.urls.length > 1 ? ` ${index + 1}` : ""}</a>)}
+        </article>;
+      })}</div>}
     </section>
-    {(receipt || view === "results") && <section className="draft-sync-results" aria-label="公众号同步结果">
-      <h3>{contentChanged ? "上次同步记录（当前编辑尚未同步）" : "公众号草稿状态"}</h3>
-      {!receipt && <p>尚未向这个公众号同步当前草稿。</p>}
-      {receipt && <>
-        <p className="draft-sync-small">记录账号：{receipt.accountId} · 任务：{receipt.jobId}</p>
-        {matchingJob && <article className={`draft-sync-receipt ${matchingJob.status}`}><div><strong>{matchingJob.accountName} · {matchingJob.title}</strong><b>{LABELS[matchingJob.status]}</b></div><p>图片 {matchingJob.uploadedCount} / {matchingJob.imageCount} 张 · {matchingJob.message}</p></article>}
-        <article className={`draft-sync-receipt ${receipt.status}`} aria-label="公众号草稿核对记录"><div><strong>草稿核对记录</strong><b>{receipt.status === "confirmed_by_user" ? "用户已确认图片正常" : receipt.status === "saved" ? "接口已核对，图片显示待人工检查" : receipt.status === "failed" ? "尚未完成同步" : "结果待核对"}</b></div><p>{receipt.message}</p></article>
-        <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || !matchesAccount} onClick={() => read()}>读取同步状态</button><button type="button" disabled={busy || !matchesAccount || !(matchingJob?.draftId || receipt.draftId)} onClick={() => read(true)}>重新核对草稿内容</button></div>
-        {!matchesAccount && <p className="draft-sync-small">请连接记录对应的公众号后读取状态。</p>}
-        <p>打开目标公众号的草稿箱，检查标题、短文、全部图片的顺序和实际显示。接口核对与人工检查分别记录。</p>
-        <a className="draft-sync-platform-link" href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer">打开公众号草稿箱核对</a>
-        {receipt.status !== "confirmed_by_user" && <button type="button" disabled={busy || !matchesAccount} onClick={confirmVisual}>已在公众号草稿箱核对，图片显示正常</button>}
-      </>}
+    <section className="draft-sync-wechat-actions" aria-label="公众号操作">
+      <p>已选 {targets.length} 个公众号 · {draft.images.length} 张图片{contentChanged || view === "results" ? " · 每个账号分别保存结果" : ""}</p>
+      <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || loading || !binding || !targets.length || !contentReady} onClick={() => batch(false)}>同步到草稿箱</button><button type="button" className="primary" disabled={busy || loading || !binding || !targets.length || !contentReady} onClick={() => setConfirmation({ draft, accounts: targets })}>立即发布</button></div>
+      <p className="draft-sync-small">同一内容已保存的草稿会直接复用；结果不确定时只读取原任务，避免重复提交。</p>
+      <a href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer">打开公众号后台</a>
+    </section>
+    {confirmation && <section className="draft-sync-wechat-confirmation" aria-label="确认立即发布">
+      <h3>确认立即发布</h3><p>标题：<strong>{confirmation.draft.content.wechat.title}</strong></p><p>{confirmation.draft.images.length} 张图片 · {confirmation.accounts.length} 个公众号</p><ul>{confirmation.accounts.map((account) => <li key={account.id}>{account.name} <small>（{account.appId}）</small></li>)}</ul>
+      <p>确认后会立即提交微信发表；尚未保存的内容会先创建草稿。发表结果以微信返回为准。</p>
+      <div className="draft-sync-confirm-actions"><button type="button" disabled={busy} onClick={() => setConfirmation(null)}>取消</button><button type="button" className="primary" disabled={busy} onClick={() => batch(true, confirmation)}>确认立即发布</button></div>
     </section>}
-    {view === "browser" && <section className="draft-sync-service" aria-label="提交公众号草稿">
-      <h3>确认后同步到草稿箱</h3>
-      <p>将当前 {draft.images.length} 张图片按顺序上传，并创建一份贴图草稿。同步前会先保留完整本机存档。</p>
-      {otherAccountPending && <p className="draft-sync-message error">另一个公众号（{otherAccountPending.accountId}）仍有待核对任务，请先连接该账号核对结果。</p>}
-      {receipt && <label className="draft-sync-check"><input type="checkbox" checked={allowNew} disabled={busy || !matchesAccount} onChange={(event) => setAllowNew(event.target.checked)} /><span>我已在公众号草稿箱核对上一组结果，确认要另建一份草稿（可能与已有草稿重复）</span></label>}
-      <button type="button" className="primary" disabled={busy || !account || !contentReady || Boolean(otherAccountPending) || Boolean(receipt && !allowNew)} onClick={submit}>同步到公众号草稿箱</button>
-    </section>}
-    {feedback && <p className={`draft-sync-message ${feedback.error ? "error" : "success"}`} role={feedback.error ? "alert" : "status"}>{feedback.text}</p>}
+    {feedback && <p className="draft-sync-message error" role="alert">{feedback}</p>}
   </div>;
 }

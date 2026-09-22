@@ -159,3 +159,24 @@
 .draft-sync-wechat-account { display: grid; gap: 5px; padding: 12px; border-radius: 8px; background: #edf4ec; overflow-wrap: anywhere; }
 .draft-sync-wechat-account span { font-size: 12px; }
 .draft-sync-wechat .draft-sync-small { overflow-wrap: anywhere; }
+.draft-sync-wechat .draft-sync-wechat-settings { padding: 16px; border: 1px solid #e1d9ce; border-radius: 12px; background: #fbf8f3; }
+.draft-sync-wechat .draft-sync-wechat-settings summary { cursor: pointer; font-size: 14px; font-weight: 700; }
+.draft-sync-wechat .draft-sync-wechat-fields { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-bottom: 12px; }
+.draft-sync-wechat .draft-sync-wechat-fields .field-stack { flex: 1 1 180px; min-width: 0; margin: 10px 0 0; }
+.draft-sync-wechat .draft-sync-wechat-fields input { box-sizing: border-box; width: 100%; min-width: 0; }
+.draft-sync-wechat .draft-sync-wechat-manage-list { display: grid; gap: 8px; margin: 16px 0 0; padding: 0; list-style: none; }
+.draft-sync-wechat .draft-sync-wechat-manage-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.draft-sync-wechat .draft-sync-wechat-manage-list small, .draft-sync-wechat .draft-sync-wechat-account-choice small { display: block; color: #746e65; font-size: 11px; overflow-wrap: anywhere; }
+.draft-sync-wechat .draft-sync-wechat-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.draft-sync-wechat .draft-sync-wechat-heading label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.draft-sync-wechat .draft-sync-wechat-account-list { display: grid; gap: 10px; }
+.draft-sync-wechat .draft-sync-wechat-account-row { padding: 14px; border: 1px solid #e1d9ce; border-radius: 10px; background: #fff; }
+.draft-sync-wechat .draft-sync-wechat-account-choice { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.draft-sync-wechat .draft-sync-wechat-account-choice span { flex: 1; min-width: 0; }
+.draft-sync-wechat .draft-sync-wechat-account-choice b { color: #70674d; font-size: 11px; text-align: right; }
+.draft-sync-wechat .draft-sync-wechat-actions { padding: 16px; border-radius: 12px; background: #f4f6ef; }
+.draft-sync-wechat .draft-sync-wechat-actions > p { margin: 0 0 12px; font-size: 13px; }
+.draft-sync-wechat .draft-sync-wechat-actions a, .draft-sync-wechat .draft-sync-wechat-account-row > a { color: var(--brown); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+.draft-sync-wechat .draft-sync-wechat-confirmation { padding: 18px; border: 2px solid #ab7753; border-radius: 12px; background: #fff8ed; }
+.draft-sync-wechat .draft-sync-wechat-confirmation p, .draft-sync-wechat .draft-sync-wechat-confirmation li { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.draft-sync-wechat .draft-sync-wechat-confirmation small { color: #746e65; }

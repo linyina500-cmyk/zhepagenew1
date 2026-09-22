@@ -9,6 +9,8 @@ export type SyncReceipt = {
   message: string;
   draftId?: string;
   jobId?: string;
+  contentHash?: string;
+  publicationAttempted?: true;
   url?: string;
 };
 export type LocalDraft = {

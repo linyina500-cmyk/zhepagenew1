@@ -243,12 +243,12 @@ test("malformed image, excessive byte length and duplicate fields fail before su
   const invalidId = form("../../override"); await assert.rejects(readSubmission(invalidId), /编号无效/);
 });
 
-test("HTTP service requires a separate credential and exposes only draft operations", async (t) => {
+test("HTTP service scopes every job to a connected account and requires a separate credential", async (t) => {
   const f = await fixture(t), syncToken = "test-only-connection-token-of-32-characters";
-  const server = createWechatServer({ jobs: f.jobs, syncToken });
+  const server = createWechatServer({ accounts: { deviceId: "device-fixture", get: (id) => { assert.equal(id, f.jobs.account.id); return { jobs: f.jobs }; } }, syncToken });
   // Execute the real HTTP callback with streams; no external account or network.
   const handler = server.listeners("request")[0];
-  const base = "https://sync.example/api/wechat";
+  const base = `https://sync.example/api/wechat/accounts/${f.jobs.account.id}`;
   async function call(url, options) {
     const web = new Request(url, options);
     const body = Buffer.from(await web.arrayBuffer());
@@ -261,8 +261,8 @@ test("HTTP service requires a separate credential and exposes only draft operati
   }
   assert.equal((await call(`${base}/account`)).status, 401); assert.equal(f.calls.length, 0);
   const headers = { Authorization: `Bearer ${syncToken}` };
-  const account = await call(`${base}/account`, { headers });
-  assert.equal((await account.json()).account.name, "测试公众号");
+  const connection = await call("https://sync.example/api/wechat/connection", { headers });
+  assert.equal((await connection.json()).deviceId, "device-fixture");
   assert.equal((await call(`${base}/publish`, { method: "POST", headers })).status, 404);
   const input = form();
   const response = await call(`${base}/jobs`, { method: "POST", headers, body: input });
@@ -284,7 +284,7 @@ test("HTTP preserves controlled WeChat errors as 424 without leaking secrets or 
       if (scenario === "whitelist") return Response.json({ errcode: 40164, errmsg: `invalid ip 203.0.113.27, secret=${secret}, access_token=${syncToken}` });
       throw new Error(`https://api.weixin.qq.com/?access_token=${syncToken}&secret=${secret}`);
     } });
-    const server = createWechatServer({ syncToken, jobs: { async checkConnection() {
+    const server = createWechatServer({ syncToken, accounts: { async connect() {
       connectionCalls++;
       if (scenario === "internal" || scenario === "spoofed-name") {
         const error = new Error(secret);
@@ -293,8 +293,8 @@ test("HTTP preserves controlled WeChat errors as 424 without leaking secrets or 
       }
       await api.checkConnection();
     } } });
-    const request = Readable.from([]);
-    Object.assign(request, { url: "/api/wechat/account", method: "GET", headers: { authorization: `Bearer ${syncToken}` } });
+    const request = Readable.from([Buffer.from("{}")]);
+    Object.assign(request, { url: "/api/wechat/accounts/connect", method: "POST", headers: { authorization: `Bearer ${syncToken}`, "content-type": "application/json" } });
     const response = {
       headersSent: false,
       writeHead(status, headers) { this.status = status; this.headers = headers; this.headersSent = true; },

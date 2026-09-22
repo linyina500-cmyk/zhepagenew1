@@ -13,14 +13,14 @@ const require = createRequire(import.meta.url);
 const { Miniflare } = createRequire(require.resolve("wrangler/package.json"))("miniflare");
 
 test("workerd relays upstream JSON errors and refuses redirect credential forwarding", async () => {
-  const source = await readFile(new URL("../functions/api/wechat/[[path]].ts", import.meta.url), "utf8");
+  const source = await readFile(new URL("../lib/localSync/proxy.ts", import.meta.url), "utf8");
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   });
   const token = "a".repeat(64);
   const calls = [];
   let status = 401;
-  const upstream = "https://upstream.example/api/wechat/account";
+  const upstream = "https://upstream.example/api/wechat/connection";
   const location = "https://must-not-receive-credentials.example/destination";
   const mf = new Miniflare({
     modules: true,
@@ -38,7 +38,7 @@ test("workerd relays upstream JSON errors and refuses redirect credential forwar
   try {
     for (const expectedStatus of [401, 424, 502, 302]) {
       status = expectedStatus;
-      const response = await mf.dispatchFetch("https://preview.example/api/wechat/account", {
+      const response = await mf.dispatchFetch("https://preview.example/api/wechat/connection", {
         headers: { Authorization: `Bearer ${token}` },
       });
       assert.equal(response.status, expectedStatus === 302 ? 502 : expectedStatus);

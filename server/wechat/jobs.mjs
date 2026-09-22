@@ -154,6 +154,7 @@ export function createJobService({ dataDir, appId, accountName, api }) {
   }
   return {
     account,
+    busy: () => active.size > 0,
     async checkConnection() { await api.checkConnection(); return account; },
     submit(input) {
       const task = reservation.catch(() => {}).then(async () => {

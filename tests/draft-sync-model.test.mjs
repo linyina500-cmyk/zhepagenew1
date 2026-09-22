@@ -247,3 +247,15 @@ test("a stalled image decoder times out and releases its URL instead of leaving 
   await checked;
   assert.equal(revoke.mock.callCount(), 1);
 });
+
+test("receipts preserve publication attempts and content identity without collapsing equal IDs across platforms", async () => {
+  const source = makeDraft();
+  source.receipts = [
+    { platform: "wechat", accountId: "same", jobId: "12345678-1234-4123-8123-123456789abc", status: "saved", draftId: "wechat-draft", message: "已核对", contentHash: "a".repeat(64), publicationAttempted: true },
+    { platform: "xiaohongshu", accountId: "same", jobId: "12345678-1234-4123-8123-123456789abd", status: "needs_confirmation", message: "待核对" },
+  ];
+  assert.deepEqual(decodeLocalDraft(await encodeLocalDraft(source)).receipts, source.receipts);
+  for (const change of [{ contentHash: "invalid" }, { publicationAttempted: false }]) {
+    assert.throws(() => normalizeLocalDraft({ ...source, receipts: [{ ...source.receipts[0], ...change }] }), /不完整/);
+  }
+});

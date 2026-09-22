@@ -58,7 +58,7 @@ await writeFile(clientIndex, html, "utf8");
 wrangler.assets = {
   ...(wrangler.assets || {}),
   not_found_handling: "single-page-application",
-  run_worker_first: ["/api/import", "/api/image", "/api/wechat/*"],
+  run_worker_first: ["/api/import", "/api/image", "/api/wechat/*", "/api/xiaohongshu/*"],
 };
 await writeFile(wranglerPath, `${JSON.stringify(wrangler, null, 2)}\n`, "utf8");
 

@@ -59,6 +59,10 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
     const receipt = record(value);
     if (typeof receipt.status !== "string" || !["saved", "confirmed_by_user", "needs_confirmation", "failed"].includes(receipt.status)) throw invalidArchive();
     const draftId = receipt.draftId === undefined ? undefined : text(receipt.draftId, 512, true);
+    if (receipt.publicationAttempted !== undefined && receipt.publicationAttempted !== true) throw invalidArchive();
+    const publicationAttempted = receipt.publicationAttempted as true | undefined;
+    const contentHash = receipt.contentHash === undefined ? undefined : text(receipt.contentHash, 64, true);
+    if (contentHash && !/^[a-f0-9]{64}$/.test(contentHash)) throw invalidArchive();
     const jobId = receipt.jobId === undefined ? undefined : text(receipt.jobId, 36, true);
     if (jobId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) throw invalidArchive();
     if (receipt.status === "saved" && !draftId) throw invalidArchive();
@@ -69,9 +73,9 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
       // Platform navigation never needs credential-bearing query parameters.
       url = `${parsed.origin}${parsed.pathname}`;
     }
-    return { accountId: text(receipt.accountId, 200, true), platform: platform(receipt.platform), status: receipt.status as SyncReceipt["status"], message: text(receipt.message, 4000), ...(draftId ? { draftId } : {}), ...(jobId ? { jobId } : {}), ...(url ? { url } : {}) };
+    return { accountId: text(receipt.accountId, 200, true), platform: platform(receipt.platform), status: receipt.status as SyncReceipt["status"], message: text(receipt.message, 4000), ...(draftId ? { draftId } : {}), ...(jobId ? { jobId } : {}), ...(contentHash ? { contentHash } : {}), ...(publicationAttempted ? { publicationAttempted } : {}), ...(url ? { url } : {}) };
   });
-  if (new Set(receipts.map((receipt) => receipt.accountId)).size !== receipts.length) throw invalidArchive();
+  if (new Set(receipts.map((receipt) => `${receipt.platform}:${receipt.accountId}`)).size !== receipts.length) throw invalidArchive();
   return {
     schemaVersion: 1, id: text(draft.id, 200, true), updatedAt, sourceFormat: text(draft.sourceFormat, 40, true), images,
     content: { xiaohongshu: content(fields.xiaohongshu), wechat: content(fields.wechat) },
@@ -83,7 +87,7 @@ export async function encodeLocalDraft(draft: LocalDraft): Promise<StoredLocalDr
   const snapshot = normalizeLocalDraft(draft);
   // Private WebKit sessions cannot persist Blob/File values in IndexedDB.
   const images = await Promise.all(snapshot.images.map(async ({ blob, ...metadata }) => ({ ...metadata, mime: blob.type, bytes: await blob.arrayBuffer() })));
-  const receipts = snapshot.receipts.map(({ accountId, platform, status, message, draftId, jobId }) => ({ accountId, platform, status, message, ...(draftId ? { draftId } : {}), ...(jobId ? { jobId } : {}) }));
+  const receipts = snapshot.receipts.map(({ accountId, platform, status, message, draftId, jobId, contentHash, publicationAttempted }) => ({ accountId, platform, status, message, ...(draftId ? { draftId } : {}), ...(jobId ? { jobId } : {}), ...(contentHash ? { contentHash } : {}), ...(publicationAttempted ? { publicationAttempted } : {}) }));
   return { ...snapshot, images, receipts };
 }
 

@@ -36,10 +36,12 @@ test("server-renders the Zhepage application metadata", async () => {
 });
 
 test("built Worker serves the unconfigured WeChat API as JSON instead of the static page", async () => {
-  const response = await render("/api/wechat/account");
+  for (const path of ["/api/wechat/connection", "/api/xiaohongshu/account"]) {
+  const response = await render(path);
   assert.equal(response.status, 503);
   assert.match(response.headers.get("content-type"), /application\/json/);
   assert.match((await response.json()).error, /尚未配置/);
+  }
 });
 
 test("keeps the requested production defaults", async () => {

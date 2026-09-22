@@ -30,7 +30,7 @@
 
 第一次使用请阅读 [使用说明.md](使用说明.md)。
 
-开发分支新增草稿同步：小红书通过 Tampermonkey 和本站草稿助手脚本 0.3.0，使用当前浏览器已登录账号，将原图、标题和文案填入原生编辑器并保存草稿；公众号通过本机或服务器上的服务调用官方接口，将多张海报和短文创建为贴图草稿，并读取详情核对。当前准备免费 Mac＋Cloudflare Tunnel 测试方案，需本机开机、私密配置凭据及微信 IP 白名单，尚未接入真实账号；普通 Cloudflare 单独部署时会明确显示服务未配置。两平台均只保存草稿，实际图片显示需在平台重新打开核对。完整素材和独立文案可存到当前浏览器。使用方式与验证边界见 [DRAFT_SYNC.md](DRAFT_SYNC.md)，本机入口见 [本机使用说明](server/wechat/本机使用说明.md)，服务部署见 [公众号部署说明](server/wechat/README.md)。
+开发分支新增贴图同步：公众号可勾选多个账号，选择“同步到草稿箱”或确认后“立即发布”；小红书通过本机专用浏览器登录、保存并回读草稿。公众号凭据保存在当前浏览器的独立加密资料库，连接时经 HTTPS、Cloudflare 代理和 Tunnel 进入本机服务内存，不在云端持久保存。当前 Mac＋临时 Tunnel 方案用于预览测试，重启后需更新预览连接地址，尚未自动部署到正式网站。本轮公众号两张真实 PNG 草稿已保存、官方回读像素一致且用户已看到；立即发布及小红书新链路尚未完成真实验收。使用方法与验证边界见 [DRAFT_SYNC.md](DRAFT_SYNC.md)，启动步骤见 [本机使用说明](server/wechat/本机使用说明.md)，连接配置见 [服务说明](server/wechat/README.md)。
 
 自动排版的中文阅读层级参考了 [doocs/md](https://github.com/doocs/md)、[Markdown Nice](https://github.com/mdnice/markdown-nice) 与 [wechat-format](https://github.com/lyricat/wechat-format) 的公开设计思路，并按贴图分页场景重新实现。V4 提供“小红书爆款、财经深度长文、数据指数型、极简新闻型、重点卡片型”5 套结构版式；版式只管理信息层级，主题只管理颜色，两者可以独立切换。
 

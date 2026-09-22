@@ -226,6 +226,68 @@ test("invalid input is rejected before any account request", async () => {
   await assert.rejects(api.createDraft({ ...draft, imageMediaIds: [] }), TypeError);
   await assert.rejects(api.createDraft({ ...draft, imageMediaIds: Array(21).fill("picture") }), TypeError);
   await assert.rejects(api.verifyDraft({ draftId: "", ...draft }), TypeError);
+  await assert.rejects(api.submitPublication({ draftId: "" }), TypeError);
+  await assert.rejects(api.getPublication({ publishId: "" }), TypeError);
   assert.equal(calls.length, 0);
   assert.throws(() => createWechatApi({ appId, appSecret: "" }), TypeError);
+});
+
+test("publication sends only the verified draft ID and polls the returned task without submitting again", async () => {
+  const { api, calls } = fixture([tokenResponse(), jsonResponse({ errcode: 0, publish_id: "publish-1" }), jsonResponse({
+    publish_id: "publish-1", publish_status: 0, article_id: "article-1",
+    article_detail: { count: 1, item: [{ idx: 1, article_url: "https://mp.weixin.qq.com/s/fixture" }] },
+  })]);
+  assert.deepEqual(await api.submitPublication({ draftId: "draft-1" }), { publishId: "publish-1" });
+  const result = await api.getPublication({ publishId: "publish-1" });
+  assert.equal(result.status, "published");
+  assert.equal(result.articleId, "article-1");
+  assert.deepEqual(result.urls, ["https://mp.weixin.qq.com/s/fixture"]);
+  assert.deepEqual(calls.map(({ url }) => url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/freepublish/submit", "/cgi-bin/freepublish/get"]);
+  assert.deepEqual(JSON.parse(calls[1].options.body), { media_id: "draft-1" });
+  assert.deepEqual(JSON.parse(calls[2].options.body), { publish_id: "publish-1" });
+});
+
+test("all documented publication states map without claiming an incomplete success", async () => {
+  for (const [publish_status, status] of [[1, "publishing"], [2, "failed"], [3, "failed"], [4, "failed"], [5, "removed"], [6, "blocked"]]) {
+    const { api } = fixture([tokenResponse(), jsonResponse({ publish_id: "publish-1", publish_status })]);
+    const result = await api.getPublication({ publishId: "publish-1" });
+    assert.equal(result.status, status);
+    assert.deepEqual(result.urls, []);
+  }
+  const complete = { publish_id: "publish-1", publish_status: 0, article_id: "article-1", article_detail: { count: 1, item: [{ idx: 1, article_url: "https://mp.weixin.qq.com/s/fixture" }] } };
+  for (const patch of [
+    { publish_status: 99 }, { publish_status: "0" }, { publish_id: "another-task" },
+    { article_id: undefined }, { article_detail: undefined },
+    { article_detail: { count: 2, item: complete.article_detail.item } },
+    { article_detail: { count: 1, item: [{ idx: 1, article_url: "https://attacker.example/" }] } },
+    { article_detail: { count: 1, item: [{ idx: 1, article_url: "https://secret@mp.weixin.qq.com/" }] } },
+    { article_detail: { count: 1, item: [{ idx: 1, article_url: "javascript:alert(1)" }] } },
+  ]) {
+    const { api, calls } = fixture([tokenResponse(), jsonResponse({ ...complete, ...patch })]);
+    await assert.rejects(api.getPublication({ publishId: "publish-1" }), (error) => assertControlledError(error, "uncertain"));
+    assert.equal(calls.length, 2);
+  }
+});
+
+test("publication refusals are controlled and lost submit receipts never retry", async () => {
+  for (const errcode of [48001, 53503, 53504, 53505]) {
+    const { api, calls } = fixture([tokenResponse(), jsonResponse({ errcode, errmsg: `raw-error-detail ${appSecret} ${accessToken}` })]);
+    await assert.rejects(api.submitPublication({ draftId: "draft-1" }), (error) => {
+      assertControlledError(error, "rejected", errcode);
+      assert.match(error.message, errcode === 48001 ? /权限/u : /后台/u);
+      return true;
+    });
+    assert.equal(calls.length, 2);
+  }
+  for (const response of [
+    () => { throw new Error(`raw-error-detail ${accessToken}`); },
+    new Response("gateway failed", { status: 502 }),
+    jsonResponse({ errcode: 0 }), new Response("invalid json"),
+  ]) {
+    const { api, calls } = fixture([tokenResponse(), response]);
+    await assert.rejects(api.submitPublication({ draftId: "draft-1" }), (error) => {
+      assertControlledError(error, "uncertain"); assert.match(error.message, /发表.*不会自动重试/u); return true;
+    });
+    assert.equal(calls.length, 2);
+  }
 });

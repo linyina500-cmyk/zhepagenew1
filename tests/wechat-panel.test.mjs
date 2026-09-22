@@ -1,0 +1,172 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createHash, webcrypto } from "node:crypto";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+import ts from "typescript";
+import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
+
+Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
+const ids = ["a".repeat(20), "b".repeat(20)];
+const accounts = ids.map((id, index) => ({ id, appId: `wx-test-${index}`, name: `测试公众号${index + 1}` }));
+const fingerprint = (draft) => createHash("sha256").update(JSON.stringify([draft.content.wechat, draft.images.map((image) => image.id)])).digest("hex");
+
+async function fixture(context) {
+  const dom = installDom(); globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const filename = fileURLToPath(new URL("../app/components/WechatDraftPanel.tsx", import.meta.url));
+  const nativeRequire = createRequire(filename), React = nativeRequire("react"), { createRoot } = nativeRequire("react-dom/client"), { act } = React;
+  const binding = { deviceId: "local-test-device", connectionToken: "test-token" };
+  let saved = { schemaVersion: 1, id: "local-draft", updatedAt: new Date().toISOString(), sourceFormat: "wechat", images: [1, 2].map((id) => ({ id: String(id), name: `${id}.png`, blob: new Blob([`original-${id}`], { type: "image/png" }), width: 1080, height: 1440 })), content: { wechat: { title: "测试标题", body: "测试配文" }, xiaohongshu: { title: "", body: "" } }, selectedAccountIds: [], receipts: [] };
+  let busy = false, active, renderDraft, mounted = true, persistFailure = false, createOverride, publicationOverride, failAccount;
+  const creates = [], publications = [], connects = [], jobs = new Map(), published = new Map();
+  const client = {
+    getConnection: async () => ({ deviceId: binding.deviceId }),
+    connectAccount: async (input) => { connects.push(input); const account = accounts.find((item) => item.appId === input.appId); if (account.id === failAccount) throw new Error("此账号连接失败"); return account; },
+    getJob: async (id) => { const job = jobs.get(id); if (!job) throw new Error("任务不存在，请核对后台"); return job; },
+    async createJob(input, signal) {
+      const receipt = saved.receipts.find((item) => item.accountId === input.accountId);
+      assert.equal(receipt.jobId, input.id, "pending task must persist before upload");
+      assert.equal(receipt.contentHash, fingerprint(saved));
+      assert.equal(saved.images.length, input.images.length);
+      creates.push(input);
+      if (createOverride) return createOverride(input, signal);
+      const job = { id: input.id, accountId: input.accountId, accountName: accounts.find((item) => item.id === input.accountId).name, title: input.content.title, imageCount: 2, uploadedCount: 2, status: "saved", draftId: `draft-${input.accountId}`, message: "草稿已保存", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      jobs.set(job.id, job); return job;
+    },
+    waitForJob: async (job) => job,
+    verifyJob: async (id) => jobs.get(id),
+    getPublication: async (id) => published.get(id) || null,
+    refreshPublication: async (id) => published.get(id),
+    submitPublication: async (id, accountId) => {
+      assert.equal(saved.receipts.find((receipt) => receipt.accountId === accountId && receipt.jobId === id).publicationAttempted, true, "publication intent must persist before submission");
+      publications.push({ id, accountId }); if (publicationOverride) return publicationOverride(id, accountId);
+      const publication = { jobId: id, status: "published", articleId: "article", urls: [], message: "已发表", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }; published.set(id, publication); return publication;
+    },
+    waitForPublication: async (publication) => publication,
+  };
+  function loadComponent(path) {
+    const output = ts.transpileModule(readFileSync(path, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
+    const loaded = { exports: {} };
+    new Function("require", "module", "exports", output)((specifier) => {
+      if (specifier === "../../lib/wechat/client") return { createWechatClient: () => client };
+      if (specifier === "../../lib/wechat/contentIdentity") return { wechatContentHash: async (draft) => fingerprint(draft) };
+      if (specifier === "../../lib/wechat/deviceVault") return { loadBinding: async () => binding, listAccounts: async () => accounts, readAccountSecret: async (id) => ({ ...accounts.find((account) => account.id === id), appSecret: "private-browser-only" }) };
+      if (specifier === "./WechatAccountManager") return { __esModule: true, default: () => null };
+      return nativeRequire(specifier);
+    }, loaded, loaded.exports);
+    return loaded.exports.default;
+  }
+  const Panel = loadComponent(filename), container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  function Host() {
+    const [draft, setDraft] = React.useState(saved), [working, setWorking] = React.useState(false), [error, setError] = React.useState(""); renderDraft = setDraft;
+    return React.createElement(React.Fragment, null, React.createElement(Panel, { draft, view: "browser", contentReady: true, contentChanged: false, busy: working, onSubmitted() {},
+      runOperation: async (_label, operation) => { if (busy) return; busy = true; active = new AbortController(); setWorking(true); try { await operation(active.signal); } catch (error) { if (!active.signal.aborted && mounted) setError(error.message); } finally { busy = false; if (mounted) setWorking(false); } },
+      persistReceipt: async (snapshot, receipt, signal) => { signal.throwIfAborted(); if (persistFailure) throw new Error("存档空间不足"); saved = { ...snapshot, receipts: [...snapshot.receipts.filter((item) => !(item.platform === receipt.platform && item.accountId === receipt.accountId)), receipt] }; if (mounted) setDraft(saved); return saved; },
+    }), React.createElement("p", { role: "alert" }, error));
+  }
+  await act(async () => { root.render(React.createElement(Host)); });
+  const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+  async function click(text) {
+    const button = [...container.querySelectorAll("button")].find((node) => node.textContent === text);
+    assert.ok(button, `action: ${text}`); assert.equal(button.disabled, false, `enabled: ${text}`);
+    await act(async () => { button.click(); }); await settle();
+  }
+  async function select(index = null) {
+    const inputs = container.querySelectorAll('input[type="checkbox"]');
+    await act(async () => { inputs[index === null ? 0 : index + 1].click(); });
+  }
+  context.after(async () => { active?.abort(); mounted = false; await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = false; });
+  return { container, creates, publications, connects, jobs, published, click, select, settle, act, get saved() { return saved; },
+    set persistFailure(value) { persistFailure = value; }, set createOverride(value) { createOverride = value; }, set publicationOverride(value) { publicationOverride = value; }, set failAccount(value) { failAccount = value; },
+    close: async () => { active?.abort(); mounted = false; await act(async () => root.render(null)); },
+    changeContent: async () => { saved = { ...saved, content: { ...saved.content, wechat: { title: "新标题", body: "新内容" } } }; await act(async () => renderDraft(saved)); },
+  };
+}
+
+test("batch drafts persist each account before POST and one account failure leaves others runnable", async (context) => {
+  const f = await fixture(context); f.failAccount = ids[0]; await f.select(); await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 1); assert.equal(f.creates[0].accountId, ids[1]);
+  assert.equal(f.saved.receipts[0].accountId, ids[1]); assert.equal(f.publications.length, 0);
+  assert.match(f.container.textContent, /此账号连接失败/);
+  f.failAccount = undefined; await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 2, "the already saved second account must be reused");
+  assert.equal(f.saved.receipts.length, 2);
+  assert.equal(JSON.stringify(f.saved).includes("private-browser-only"), false);
+});
+
+test("publication requires a separate explicit confirmation and reuses matching saved drafts", async (context) => {
+  const f = await fixture(context); await f.select(); await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 2); await f.click("立即发布");
+  assert.equal(f.publications.length, 0); assert.match(f.container.querySelector('[aria-label="确认立即发布"]').textContent, /测试公众号1.*测试公众号2/s);
+  await f.click("取消"); assert.equal(f.publications.length, 0);
+  await f.click("立即发布"); await f.click("确认立即发布");
+  assert.equal(f.publications.length, 2); assert.equal(f.creates.length, 2);
+  await f.click("立即发布"); await f.click("确认立即发布");
+  assert.equal(f.publications.length, 2, "existing publications cannot be submitted twice");
+});
+
+test("sync after publication reports the article and does not rely on a possibly removed draft", async (context) => {
+  const f = await fixture(context); await f.select(0); await f.click("立即发布"); await f.click("确认立即发布");
+  const id = f.publications[0].id;
+  f.jobs.delete(id); // WeChat may remove the source draft after publication.
+  await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 1); assert.equal(f.publications.length, 1);
+  const row = f.container.querySelector('[aria-label="测试公众号1 的结果"]');
+  assert.match(row.textContent, /这份内容已发表/); assert.doesNotMatch(row.textContent, /草稿已保存|已同步到草稿箱|重新核对草稿/);
+  assert.match(f.saved.receipts[0].message, /已发表/);
+  await f.click("读取 测试公众号1 状态");
+  assert.match(row.textContent, /这份内容已发表/);
+  await f.click("立即发布"); await f.click("确认立即发布");
+  assert.equal(f.publications.length, 1);
+  await f.changeContent(); await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 2, "explicitly changed content may create a new draft after a known publication");
+  assert.equal(f.publications.length, 1); assert.equal(f.saved.receipts[0].publicationAttempted, undefined);
+});
+
+test("changed copy cannot publish an older saved draft", async (context) => {
+  const f = await fixture(context); await f.select(0); await f.click("同步到草稿箱");
+  const oldId = f.creates[0].id; await f.changeContent(); await f.click("立即发布"); await f.click("确认立即发布");
+  assert.equal(f.creates.length, 2); assert.notEqual(f.publications[0].id, oldId);
+  assert.equal(f.creates[1].content.title, "新标题");
+});
+
+test("an uncertain publication with no readback is never resubmitted or replaced by changed content", async (context) => {
+  const f = await fixture(context); await f.select(0);
+  f.publicationOverride = async () => { throw new Error("发表响应中断"); };
+  await f.click("立即发布"); await f.click("确认立即发布");
+  assert.equal(f.publications.length, 1); assert.equal(f.saved.receipts[0].publicationAttempted, true);
+  await f.click("立即发布"); await f.click("确认立即发布");
+  assert.equal(f.publications.length, 1); assert.match(f.container.textContent, /曾提交发表/);
+  await f.changeContent(); await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 1); assert.equal(f.saved.receipts[0].publicationAttempted, true);
+});
+
+test("storage failure prevents uploads, while uncertain tasks stay blocked without another POST", async (context) => {
+  const f = await fixture(context); await f.select(0); f.persistFailure = true; await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 0); assert.match(f.container.textContent, /存档空间不足/);
+  f.persistFailure = false; f.createOverride = async () => { throw new Error("结果未知"); };
+  await f.click("同步到草稿箱"); const pendingId = f.saved.receipts[0].jobId;
+  assert.equal(f.saved.receipts[0].status, "needs_confirmation"); await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 1); assert.equal(f.saved.receipts[0].jobId, pendingId);
+  assert.match(f.container.textContent, /任务不存在/);
+});
+
+test("closing an active request preserves pending identity and discards late results", async (context) => {
+  const f = await fixture(context); let finish;
+  f.createOverride = (input) => new Promise((resolve) => { finish = () => resolve({ id: input.id, accountId: input.accountId, status: "saved", draftId: "late" }); });
+  await f.select(0); await f.click("同步到草稿箱");
+  const pending = f.saved.receipts[0].jobId; await f.close(); await f.act(async () => finish());
+  assert.equal(f.saved.receipts[0].jobId, pending); assert.equal(f.saved.receipts[0].status, "needs_confirmation"); assert.equal(f.saved.receipts[0].draftId, undefined);
+});
+
+test("content identity includes original image bytes and order but ignores draft bookkeeping", async () => {
+  const { wechatContentHash } = loadDomModule("lib/wechat/contentIdentity.ts");
+  const images = ["first", "second"].map((text) => ({ blob: new Blob([text]) }));
+  const draft = { images, content: { wechat: { title: "标题", body: "一\n二" } } };
+  const original = await wechatContentHash(draft);
+  assert.match(original, /^[a-f0-9]{64}$/);
+  assert.equal(await wechatContentHash({ ...draft, id: "other", receipts: [{}] }), original);
+  assert.notEqual(await wechatContentHash({ ...draft, images: [...images].reverse() }), original);
+  assert.notEqual(await wechatContentHash({ ...draft, content: { wechat: { title: "新标题", body: "一\n二" } } }), original);
+});
