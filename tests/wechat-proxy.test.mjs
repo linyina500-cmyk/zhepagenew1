@@ -18,12 +18,31 @@ test("bridge forwards only the configured HTTPS endpoint and connection credenti
     assert.equal(String(url), "https://sync.example/api/wechat/account");
     assert.equal(options.headers.get("Authorization"), `Bearer ${token}`);
     assert.equal(options.headers.get("Cookie"), null);
-    assert.equal(options.redirect, "error");
+    assert.equal(options.redirect, "manual");
     return Response.json({ account: { id: "account-id", name: "测试公众号" } });
   });
   const response = await onRequest({ request: request("account", { headers: { Authorization: `Bearer ${token}`, Cookie: "private-session" } }), env });
   assert.equal(response.status, 200); assert.equal(response.headers.get("Cache-Control"), "no-store");
   assert.equal((await response.json()).account.name, "测试公众号");
+});
+
+test("bridge explicitly refuses every 3xx response before forwarding its body or Location", async (t) => {
+  let upstreamStatus;
+  const mock = t.mock.method(globalThis, "fetch", async (_url, options) => {
+    assert.equal(options.redirect, "manual");
+    return new Response(null, { status: upstreamStatus, headers: {
+      "Content-Type": "application/json", Location: "https://untrusted.example/collect-credentials",
+    } });
+  });
+  for (upstreamStatus = 300; upstreamStatus < 400; upstreamStatus++) {
+    const response = await onRequest({ request: request(), env });
+    assert.equal(response.status, 502);
+    assert.equal(response.headers.get("Location"), null);
+    const body = await response.text();
+    assert.match(body, /重定向/);
+    assert.doesNotMatch(body, /untrusted|collect-credentials|fixture-connection/);
+  }
+  assert.equal(mock.mock.callCount(), 100);
 });
 
 test("write bridge preserves all multipart image bytes and their order", async (t) => {

@@ -33,7 +33,13 @@ export async function onRequest({ request, env }: Context): Promise<Response> {
     },
   }));
   try {
-    const response = await fetch(upstream, { method: request.method, headers, body, redirect: "error", signal: AbortSignal.timeout(90_000) });
+    // workerd supports only manual/follow. Stop redirects explicitly so the
+    // connection credential can never be forwarded to a Location destination.
+    const response = await fetch(upstream, { method: request.method, headers, body, redirect: "manual", signal: AbortSignal.timeout(90_000) });
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      return json("公众号服务发生重定向，已停止转发。请检查服务地址并读取原同步记录，不要重复提交", 502);
+    }
     if (!(response.headers.get("Content-Type") || "").includes("application/json")) return json("公众号服务回应不完整，请读取同步状态后核对", 502);
     return new Response(response.body, { status: response.status, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
   } catch { return json("公众号服务暂未回应，请读取原同步记录并核对草稿箱，不要重复提交", 502); }
