@@ -82,10 +82,13 @@ test("readback requires a platform draft ID and complete upload count for a save
   assert.deepEqual(requests, [[`/api/wechat/jobs/${id}/verify`, "POST", undefined]]);
 });
 
-test("polling stops at its deadline and retains an unfinished task for manual reading", async () => {
+test("polling stops at its deadline and retains an unfinished task for manual reading", async (context) => {
+  context.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
   let calls = 0;
   const client = createWechatClient("pass", async () => { calls++; return reply({ job: job() }); });
-  const result = await client.waitForJob(job(), signal(), () => {}, 20);
+  const waiting = client.waitForJob(job(), signal(), () => {}, 20);
+  context.mock.timers.tick(20);
+  const result = await waiting;
   assert.equal(result.id, id); assert.equal(result.status, "uploading"); assert.equal(calls, 0);
   const saved = job({ status: "saved", uploadedCount: 2, draftId: "draft" });
   assert.equal(await client.waitForJob(saved, signal(), () => {}), saved); assert.equal(calls, 0);
