@@ -2,8 +2,8 @@
 
 ## baoyu-skills — MIT
 
-WeChat image-post editor selectors and the image-input/draft-button workflow in
-`platforms.mjs` are adapted from Jim Liu's baoyu-skills, commit
+The original image-input/draft-button workflow in `platforms.mjs` was adapted
+from Jim Liu's baoyu-skills, commit
 `8ae8c33a8d7c8c7c6de291b2c91ba1debe1d2766`:
 
 - [wechat-browser.ts](https://github.com/JimLiu/baoyu-skills/blob/8ae8c33a8d7c8c7c6de291b2c91ba1debe1d2766/skills/baoyu-post-to-wechat/scripts/wechat-browser.ts)
@@ -13,6 +13,10 @@ Modified 2026-09-10: removed local processes, CDP and filesystem access; use
 in-memory images inside an existing page; require an empty, unambiguous native
 image editor; upload sequentially; preserve text; only trigger explicitly labeled
 draft buttons; report unverified saves as needing confirmation.
+
+Modified 2026-09-22: removed the WeChat DOM adapter. Version 0.3.0 only operates
+the Xiaohongshu editor; WeChat uses a separate official-API service. The original
+workflow attribution and license remain with the browser script.
 
 ```text
 MIT License

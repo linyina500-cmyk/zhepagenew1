@@ -95,7 +95,7 @@ test("accepts the document's window through a userscript Proxy but rejects other
   assert.notEqual(source.scriptWindow, source.window.document.defaultView);
   assert.equal(source.scriptWindow.top, source.scriptWindow.self);
   const ping = { ...request(), action: "ping" };
-  assert.equal((await source.send(ping))[0].version, "0.2.1");
+  assert.equal((await source.send(ping))[0].version, "0.3.0");
   assert.equal((await source.send())[0].ok, true);
 
   const other = harness(t);
@@ -113,9 +113,9 @@ test("accepts the document's window through a userscript Proxy but rejects other
 
 test("the main application root accepts the same versioned prepare and status protocol", async (t) => {
   const source = harness(t, `${ORIGIN}/`, storage(), {}, true);
-  assert.equal((await source.send({ ...request(), action: "ping" }))[0].version, "0.2.1");
-  assert.equal((await source.send(request("wechat", "main-job", 3)))[0].job.imageCount, 3);
-  assert.equal((await source.send({ ...request("wechat"), action: "status" }))[0].job.id, "main-job");
+  assert.equal((await source.send({ ...request(), action: "ping" }))[0].version, "0.3.0");
+  assert.equal((await source.send(request("xiaohongshu", "main-job", 3)))[0].job.imageCount, 3);
+  assert.equal((await source.send({ ...request("xiaohongshu"), action: "status" }))[0].job.id, "main-job");
   for (const path of ["/browser-sync-check.html", "/browser-sync-check/", "/articles", "/login"]) {
     source.window.history.replaceState(null, "", path);
     assert.deepEqual(await source.send({ ...request(), action: "ping" }), []);
@@ -150,7 +150,7 @@ test("rejects unknown actions and platforms, malformed drafts, and platform imag
   const invalid = [
     { ...request(), action: "save" }, { ...request(), platform: "unknown" },
     { ...request(), draft: { ...request().draft, title: "a".repeat(21) } },
-    request("xiaohongshu", "draft-1", 19), request("wechat", "draft-1", 21),
+    request("xiaohongshu", "draft-1", 19), request("wechat"),
     { ...request(), draft: { ...request().draft, body: "文".repeat(1001) } },
     { ...request(), draft: { ...request().draft, body: Array.from({ length: 11 }, (_, index) => `#topic${index}`).join(" ") } },
     { ...request(), draft: { ...request().draft, images: [{ name: "large.png", mime: "image/png", dataUrl: large }] } },
@@ -174,11 +174,11 @@ test("verifies complete stored content before reporting prepared and exposes onl
   assert.equal(JSON.stringify(prepared).includes(PNG), false);
   const [status] = await source.send({ ...request(), action: "status" });
   assert.deepEqual(status.job, prepared.job);
-  assert.equal((await source.send({ ...request("wechat"), action: "status" }))[0].job, null);
+  assert.equal((await source.send({ ...request("wechat"), action: "status" }))[0].ok, false);
 });
 
 test("complete platform image counts and large images are stored separately and restored in order", async (t) => {
-  for (const [platform, count] of [["xiaohongshu", 18], ["wechat", 20]]) {
+  for (const [platform, count] of [["xiaohongshu", 18]]) {
     const source = harness(t);
     assert.equal((await source.send(request(platform, "full-article", count)))[0].job.imageCount, count);
     const manifest = source.values.get(key(platform));
@@ -208,7 +208,7 @@ test("complete platform image counts and large images are stored separately and 
 
 test("the total decoded image limit is enforced before any image is written", async (t) => {
   const source = harness(t);
-  const value = request("wechat", "too-large", 7);
+  const value = request("xiaohongshu", "too-large", 7);
   const full = `data:image/png;base64,${Buffer.alloc(10_000_000).toString("base64")}`;
   const remainder = 60 * 1024 * 1024 - 60_000_000 + 1;
   value.draft.images.forEach((image, index) => { image.dataUrl = index < 6 ? full : `data:image/png;base64,${Buffer.alloc(remainder).toString("base64")}`; });
@@ -232,9 +232,9 @@ test("never reports success when storage rejects, silently drops data, or change
   }
 });
 
-test("a failed image write clears only its new keys and preserves the other platform's ready task", async (t) => {
+test("a failed image write clears only its new keys and preserves unrelated stored data", async (t) => {
   const shared = storage();
-  const previous = seed(shared, job("wechat"));
+  const previous = seed(shared, job("unrelated"));
   const originalSet = shared.GM.setValue;
   shared.GM.setValue = async (name, value) => {
     await originalSet(name, value);
@@ -242,7 +242,7 @@ test("a failed image write clears only its new keys and preserves the other plat
   };
   const source = harness(t, SOURCE, shared);
   assert.equal((await source.send(request("xiaohongshu", "new-job", 3)))[0].ok, false);
-  assert.deepEqual(shared.values.get(key("wechat")), previous);
+  assert.deepEqual(shared.values.get(key("unrelated")), previous);
   assert.ok(previous.draft.images.every((reference) => shared.values.has(reference.key)));
   assert.equal([...shared.values.keys()].some((name) => name.includes(":new-job:")), false);
 });
@@ -420,42 +420,42 @@ test("preserves failed or interrupted fill results without retrying", async (t) 
 
 test("retains the pending marker if saving or the final result write fails", async (t) => {
   for (const failPersist of [false, true]) {
-    const shared = storage(); seed(shared, job("wechat", "filled"));
+    const shared = storage(); seed(shared, job("xiaohongshu", "filled"));
     let writes = 0;
     const original = shared.GM.setValue;
     if (failPersist) shared.GM.setValue = async (name, value) => { if (++writes === 2) throw new Error("quota"); await original(name, value); };
     let saves = 0;
-    const platform = harness(t, "https://mp.weixin.qq.com/", shared, { save: async () => { saves++; throw new Error("保存回执中断，请到草稿箱核对"); } });
+    const platform = harness(t, "https://creator.xiaohongshu.com/publish/publish", shared, { save: async () => { saves++; throw new Error("保存回执中断，请到草稿箱核对"); } });
     await platform.click("检查待传内容"); await platform.click("保存为平台草稿");
-    assert.equal(shared.values.get(key("wechat")).status, "needs_confirmation");
+    assert.equal(shared.values.get(key("xiaohongshu")).status, "needs_confirmation");
     assert.match(platform.text(), /保存回执中断/);
     await platform.click("保存为平台草稿"); assert.equal(saves, 1);
   }
 });
 
-test("keeps two platform tasks and manual cleanup independent even with equal task IDs", async (t) => {
-  const shared = storage(); const source = harness(t, SOURCE, shared);
-  for (const platform of ["xiaohongshu", "wechat"]) assert.equal((await source.send(request(platform)))[0].ok, true);
-  const xhs = harness(t, "https://creator.xiaohongshu.com/publish/publish", shared);
-  const wechat = harness(t, "https://mp.weixin.qq.com/", shared);
-  await wechat.click("检查待传内容"); await wechat.click("填入当前编辑器");
-  assert.equal(shared.values.get(key("xiaohongshu")).status, "ready");
-  assert.deepEqual(wechat.calls.find(([action]) => action === "fill"), ["fill", "wechat", request("wechat").draft]);
-  assert.deepEqual(xhs.calls, []);
-  await wechat.click("结束本次传图");
-  assert.equal(shared.values.has(key("wechat")), false);
-  assert.equal(shared.values.has(key("xiaohongshu")), true);
+test("WeChat requests are rejected and its pages never install a browser assistant", async (t) => {
+  const shared = storage();
+  const source = harness(t, SOURCE, shared);
+  for (const action of ["prepare", "status"]) {
+    const [result] = await source.send({ ...request("wechat"), action });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /未知平台/);
+  }
+  assert.deepEqual(shared.events, []);
+  const wechat = harness(t, "https://mp.weixin.qq.com/cgi-bin/appmsg?action=edit", shared);
+  assert.equal(wechat.window.document.getElementById("zhepage-browser-sync-panel"), null);
+  assert.deepEqual(wechat.calls, []);
 });
 
 test("ending a task resets the adapter only after verified cleanup and permits a second task on the same page", async (t) => {
-  for (const platformName of ["xiaohongshu", "wechat"]) {
+  for (const platformName of ["xiaohongshu"]) {
     const shared = storage();
     const source = harness(t, `${ORIGIN}/`, shared);
     let empty = true;
     let alreadyFilled = false;
     let fills = 0;
     let resets = 0;
-    const page = harness(t, platformName === "wechat" ? "https://mp.weixin.qq.com/" : "https://creator.xiaohongshu.com/publish/publish", shared, {
+    const page = harness(t, "https://creator.xiaohongshu.com/publish/publish", shared, {
       inspect: () => ({ ready: true, empty }),
       fill: async () => { assert.equal(alreadyFilled, false); alreadyFilled = true; empty = false; fills++; },
       reset: () => { assert.equal(shared.values.size, 0, "the manifest and every image deletion must already be verified"); alreadyFilled = false; resets++; return { reset: true }; },
@@ -483,36 +483,36 @@ test("ending a task resets the adapter only after verified cleanup and permits a
 
 test("missing-image cleanup and legacy inline tasks require explicit ending without migration", async (t) => {
   const shared = storage();
-  const legacy = { id: "legacy", platform: "wechat", status: "ready", createdAt: Date.now(), message: "Old trial", draft: request("wechat").draft };
-  shared.values.set(key("wechat"), legacy);
+  const legacy = { id: "legacy", platform: "xiaohongshu", status: "ready", createdAt: Date.now(), message: "Old trial", draft: request("xiaohongshu").draft };
+  shared.values.set(key("xiaohongshu"), legacy);
   const source = harness(t, SOURCE, shared);
   for (const action of ["prepare", "status"]) {
-    const [result] = await source.send({ ...request("wechat", "new-job"), action });
+    const [result] = await source.send({ ...request("xiaohongshu", "new-job"), action });
     assert.equal(result.ok, false);
     assert.match(result.message, /旧版/);
   }
-  assert.deepEqual(shared.values.get(key("wechat")), legacy);
+  assert.deepEqual(shared.values.get(key("xiaohongshu")), legacy);
   assert.deepEqual(shared.events, []);
-  const platform = harness(t, "https://mp.weixin.qq.com/", shared);
+  const platform = harness(t, "https://creator.xiaohongshu.com/publish/publish", shared);
   await platform.click("结束本次传图");
   assert.equal(shared.values.size, 0);
-  assert.equal((await source.send(request("wechat", "new-job")))[0].ok, true);
-  shared.values.delete(imageKey("wechat", "new-job", 0));
+  assert.equal((await source.send(request("xiaohongshu", "new-job")))[0].ok, true);
+  shared.values.delete(imageKey("xiaohongshu", "new-job", 0));
   await platform.click("结束本次传图");
   assert.equal(shared.values.size, 0, "an absent image does not prevent verified deletion of all remaining keys");
 });
 
 test("failed deletion retains the task and cannot reset the adapter or authorize another upload", async (t) => {
   const shared = storage();
-  seed(shared, job("wechat", "needs_confirmation"));
+  seed(shared, job("xiaohongshu", "needs_confirmation"));
   shared.GM.deleteValue = async () => {};
-  const platform = harness(t, "https://mp.weixin.qq.com/", shared);
+  const platform = harness(t, "https://creator.xiaohongshu.com/publish/publish", shared);
   await platform.click("结束本次传图");
   assert.match(platform.text(), /尚未清除/);
   assert.equal(platform.calls.filter(([action]) => action === "reset").length, 0);
   const source = harness(t, SOURCE, shared);
-  assert.equal((await source.send(request("wechat", "second")))[0].ok, false);
-  assert.equal(shared.values.get(key("wechat")).status, "needs_confirmation");
+  assert.equal((await source.send(request("xiaohongshu", "second")))[0].ok, false);
+  assert.equal(shared.values.get(key("xiaohongshu")).status, "needs_confirmation");
 });
 
 test("ready expiry verifies image deletion and does not silently discard a failed cleanup", async (t) => {
@@ -528,17 +528,17 @@ test("ready expiry verifies image deletion and does not silently discard a faile
 
 test("manual cleanup can recover invalid records but never claims a dropped delete succeeded", async (t) => {
   for (const corrupt of [{ status: "saved" }, { platform: "other" }, { createdAt: Date.now() + TTL }]) {
-    const shared = storage(); seed(shared, job("wechat"));
-    shared.values.set(key("wechat"), { ...shared.values.get(key("wechat")), ...corrupt });
-    const platform = harness(t, "https://mp.weixin.qq.com/", shared);
+    const shared = storage(); seed(shared, job("xiaohongshu"));
+    shared.values.set(key("xiaohongshu"), { ...shared.values.get(key("xiaohongshu")), ...corrupt });
+    const platform = harness(t, "https://creator.xiaohongshu.com/publish/publish", shared);
     await platform.click("检查待传内容"); assert.match(platform.text(), /记录无效/);
-    await platform.click("结束本次传图"); assert.equal(shared.values.has(key("wechat")), false);
+    await platform.click("结束本次传图"); assert.equal(shared.values.has(key("xiaohongshu")), false);
     assert.match(platform.text(), /已清除/);
   }
-  const shared = storage(); seed(shared, job("wechat", "needs_confirmation"));
+  const shared = storage(); seed(shared, job("xiaohongshu", "needs_confirmation"));
   shared.GM.deleteValue = async () => {};
-  const platform = harness(t, "https://mp.weixin.qq.com/", shared);
+  const platform = harness(t, "https://creator.xiaohongshu.com/publish/publish", shared);
   await platform.click("结束本次传图");
   assert.match(platform.text(), /尚未清除/);
-  assert.equal(shared.values.get(key("wechat")).status, "needs_confirmation");
+  assert.equal(shared.values.get(key("xiaohongshu")).status, "needs_confirmation");
 });

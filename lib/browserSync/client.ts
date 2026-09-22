@@ -1,7 +1,7 @@
 import type { DraftContent, DraftImage, DraftPlatform } from "../draftSync/types";
 import { imageMetadata, validateDraft } from "../draftSync/validation";
 
-export const BROWSER_SYNC_VERSION = "0.2.1";
+export const BROWSER_SYNC_VERSION = "0.3.0";
 export const BROWSER_SYNC_ORIGIN = "https://feature-local-draft-sync.zhepagenew.pages.dev";
 const CHANNEL = "zhepage-browser-sync-v1";
 const ID = /^[a-zA-Z0-9-]{1,80}$/;
@@ -34,7 +34,7 @@ function readJob(value: unknown): BrowserSyncJob {
     || !["ready", "filling", "filled", "needs_confirmation"].includes(job.status)
     || typeof job.title !== "string" || !job.title.trim() || [...job.title].length > 20
     || typeof job.message !== "string" || job.message.length > 4000
-    || !Number.isSafeInteger(job.imageCount) || job.imageCount < 1 || job.imageCount > 20) throw new Error("扩展返回的传图记录不完整");
+    || !Number.isSafeInteger(job.imageCount) || job.imageCount < 1 || job.imageCount > 18) throw new Error("扩展返回的传图记录不完整");
   return { id: job.id, status: job.status, message: job.message, title: job.title, imageCount: job.imageCount };
 }
 
@@ -98,7 +98,7 @@ export function createBrowserSyncClient(window: Window) {
   }
 
   async function getStatus(platform: DraftPlatform, signal?: AbortSignal): Promise<BrowserSyncJob | null> {
-    if (!["xiaohongshu", "wechat"].includes(platform)) throw new Error("未知平台");
+    if (platform !== "xiaohongshu") throw new Error("浏览器助手仅支持小红书，公众号请使用官方接口同步");
     const response = await request("status", { platform }, 30000, signal);
     if (response.job === null) return null;
     return readJob(response.job);
@@ -112,7 +112,8 @@ export function createBrowserSyncClient(window: Window) {
     const matches = (job: BrowserSyncJob | null) => Boolean(job && job.id === input.id && job.title === input.content.title && job.imageCount === input.images.length);
     try {
       assertActive(signal);
-      if (!ID.test(input.id) || !["xiaohongshu", "wechat"].includes(input.platform)) throw new Error("传图记录格式无效");
+      if (input.platform !== "xiaohongshu") throw new Error("浏览器助手仅支持小红书，公众号请使用官方接口同步");
+      if (!ID.test(input.id)) throw new Error("传图记录格式无效");
       const errors = validateDraft(input.platform, input.content, input.images.map(imageMetadata)).filter((issue) => issue.severity === "error");
       if (errors.length) throw new Error(errors.map((issue) => issue.message).join("\n"));
       if (input.images.some((image) => !image.name.trim() || image.name.length > 200)) throw new Error("图片名称为空或超过200个字符，请重新选择图片");

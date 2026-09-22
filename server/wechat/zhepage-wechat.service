@@ -1,0 +1,24 @@
+[Unit]
+Description=Zhepage WeChat draft sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zhepage
+Group=zhepage
+WorkingDirectory=/opt/zhepage-wechat
+EnvironmentFile=/etc/zhepage-wechat.env
+ExecStart=/usr/bin/node /opt/zhepage-wechat/server/wechat/start.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=720
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/zhepage-wechat
+
+[Install]
+WantedBy=multi-user.target

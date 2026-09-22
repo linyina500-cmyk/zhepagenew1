@@ -8,6 +8,7 @@ export type SyncReceipt = {
   status: "saved" | "confirmed_by_user" | "needs_confirmation" | "failed";
   message: string;
   draftId?: string;
+  jobId?: string;
   url?: string;
 };
 export type LocalDraft = {

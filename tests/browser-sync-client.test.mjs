@@ -61,7 +61,7 @@ test("client passes every original image byte and full caption through the captu
 
 test("platform image ceilings and 1000 Chinese characters are accepted without pilot truncation", async (context) => {
   const f = fixture(context), client = f.create();
-  for (const [platform, count] of [["xiaohongshu", 18], ["wechat", 20]]) {
+  for (const [platform, count] of [["xiaohongshu", 18]]) {
     const draft = input(count, platform); draft.content.body = "汉".repeat(1000);
     const result = await client.prepare(draft);
     assert.equal(result.imageCount, count);
@@ -69,6 +69,13 @@ test("platform image ceilings and 1000 Chinese characters are accepted without p
     assert.equal(sent.draft.body, draft.content.body);
     assert.equal(sent.draft.images.length, count);
   }
+});
+
+test("WeChat prepare and status are rejected before contacting the browser assistant", async (context) => {
+  const f = fixture(context), client = f.create();
+  await assert.rejects(client.prepare(input(2, "wechat")), /仅支持小红书/);
+  await assert.rejects(client.getStatus("wechat"), /仅支持小红书/);
+  assert.deepEqual(f.requests, []);
 });
 
 test("invalid content is rejected before any extension request", async (context) => {
@@ -98,7 +105,7 @@ test("ping retries only missing responses, caps attempts, and rejects obsolete s
   await flush(); await f.expire(3000); await f.expire(3000); await f.expire(3000); await missing;
   assert.equal(f.requests.length, 5);
   f.onRequest = (request) => f.respond(request, { version: "0.1.1" });
-  await assert.rejects(client.ping(), /0\.2\.1/);
+  await assert.rejects(client.ping(), /0\.3\.0/);
   assert.equal(f.requests.length, 6);
   assert.equal(f.timers.size, 0);
 });

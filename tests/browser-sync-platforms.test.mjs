@@ -14,10 +14,9 @@ function appendEditControl(preview) {
   control.append(button); preview.append(control);
 }
 
-function fixture(t, platform = "wechat") {
-  const wechat = platform === "wechat";
-  const dom = new JSDOM(`<h1>${wechat ? "贴图" : "上传图文"}</h1><div class="js_upload_btn_container"><input type="file" accept="image/png" multiple></div><input id="title" placeholder="标题"><div class="ProseMirror content-editor" contenteditable="true"></div><div class="img-preview-area"></div><button data-draft-save>${wechat ? "保存为草稿" : "暂存离开"}</button><button>发布</button>`, {
-    url: wechat ? "https://mp.weixin.qq.com/cgi-bin/appmsg?action=edit" : "https://creator.xiaohongshu.com/publish/publish?target=image",
+function fixture(t) {
+  const dom = new JSDOM(`<h1>上传图文</h1><div class="upload-container"><input type="file" accept="image/png" multiple></div><input id="title" placeholder="标题"><div class="ProseMirror content-editor" contenteditable="true"></div><div class="img-preview-area"></div><button data-draft-save>暂存离开</button><button>发布</button>`, {
+    url: "https://creator.xiaohongshu.com/publish/publish?target=image",
   });
   t.after(() => dom.window.close());
   const { window } = dom;
@@ -37,11 +36,11 @@ function fixture(t, platform = "wechat") {
   const uploaded = [];
   const appendPreview = (ready = true) => {
     const preview = document.createElement("div");
-    preview.className = wechat ? "pic_item" : "pr";
+    preview.className = "pr";
     const image = document.createElement("img");
     Object.defineProperties(image, { complete: { configurable: true, value: ready }, naturalWidth: { configurable: true, value: ready ? 1 : 0 } });
     preview.append(image);
-    if (!wechat) appendEditControl(preview);
+    appendEditControl(preview);
     document.querySelector(".img-preview-area").append(preview);
     return image;
   };
@@ -80,26 +79,24 @@ function installParagraphEditor(app, render) {
   return editor;
 }
 
-for (const platform of ["wechat", "xiaohongshu"]) {
-  test(`${platform}: an empty image editor receives ordered in-memory images and saves once without publishing`, async (t) => {
-    const app = fixture(t, platform);
-    let saved = 0;
-    let published = 0;
-    const [save, publish] = app.document.querySelectorAll("button");
-    save.addEventListener("click", () => saved++);
-    publish.addEventListener("click", () => published++);
-    assert.equal(app.adapter.inspect(platform).empty, true);
-    assert.equal((await app.adapter.fill(platform, draft)).status, "filled");
-    assert.deepEqual(app.uploaded.map((file) => file.name), ["1.png", "2.png"]);
-    assert.ok(app.uploaded.every((file) => file instanceof app.window.File && file.type === "image/png" && file.size > 50));
-    assert.equal(app.document.querySelector("#title").value, draft.title);
-    assert.equal(app.document.querySelector(".ProseMirror").textContent, draft.body);
-    assert.equal(app.adapter.save(platform).status, "needs_confirmation");
-    assert.throws(() => app.adapter.save(platform), /重复/);
-    assert.equal(saved, 1);
-    assert.equal(published, 0);
-  });
-}
+test(`xiaohongshu: an empty image editor receives ordered in-memory images and saves once without publishing`, async (t) => {
+  const app = fixture(t);
+  let saved = 0;
+  let published = 0;
+  const [save, publish] = app.document.querySelectorAll("button");
+  save.addEventListener("click", () => saved++);
+  publish.addEventListener("click", () => published++);
+  assert.equal(app.adapter.inspect("xiaohongshu").empty, true);
+  assert.equal((await app.adapter.fill("xiaohongshu", draft)).status, "filled");
+  assert.deepEqual(app.uploaded.map((file) => file.name), ["1.png", "2.png"]);
+  assert.ok(app.uploaded.every((file) => file instanceof app.window.File && file.type === "image/png" && file.size > 50));
+  assert.equal(app.document.querySelector("#title").value, draft.title);
+  assert.equal(app.document.querySelector(".ProseMirror").textContent, draft.body);
+  assert.equal(app.adapter.save("xiaohongshu").status, "needs_confirmation");
+  assert.throws(() => app.adapter.save("xiaohongshu"), /重复/);
+  assert.equal(saved, 1);
+  assert.equal(published, 0);
+});
 
 test("existing content, images, or ambiguous upload inputs are preserved without writing", async (t) => {
   for (const kind of ["text", "image", "ambiguous"]) {
@@ -108,18 +105,18 @@ test("existing content, images, or ambiguous upload inputs are preserved without
     if (kind === "image") app.appendPreview();
     if (kind === "ambiguous") app.input.after(app.input.cloneNode());
     const before = app.document.body.innerHTML;
-    await assert.rejects(app.adapter.fill("wechat", draft), /已有|唯一/);
+    await assert.rejects(app.adapter.fill("xiaohongshu", draft), /已有|唯一/);
     assert.equal(app.document.body.innerHTML, before);
     assert.equal(app.uploaded.length, 0);
   }
 });
 
-test("ordinary WeChat articles and non-image XHS pages cannot be imported", async (t) => {
+test("WeChat and non-image XHS pages cannot be imported", async (t) => {
   const article = fixture(t);
-  article.document.querySelector(".ProseMirror").classList.add("rich_media_content");
   assert.equal(article.adapter.inspect("wechat").ready, false);
-  await assert.rejects(article.adapter.fill("wechat", draft), /普通文章/);
-  const xhs = fixture(t, "xiaohongshu");
+  await assert.rejects(article.adapter.fill("wechat", draft), /原生图片编辑器/);
+  assert.equal(article.uploaded.length, 0);
+  const xhs = fixture(t);
   xhs.window.history.replaceState(null, "", "?target=video");
   await assert.rejects(xhs.adapter.fill("xiaohongshu", draft), /上传图文/);
 });
@@ -127,20 +124,20 @@ test("ordinary WeChat articles and non-image XHS pages cannot be imported", asyn
 test("saving stops on changed text, ambiguous draft buttons, or a publish-only page", async (t) => {
   for (const kind of ["changed", "ambiguous", "publish-only"]) {
     const app = fixture(t);
-    await app.adapter.fill("wechat", draft);
+    await app.adapter.fill("xiaohongshu", draft);
     const save = app.document.querySelector("[data-draft-save]");
     if (kind === "changed") app.document.querySelector("#title").value = "其他内容";
     if (kind === "ambiguous") save.after(save.cloneNode(true));
     if (kind === "publish-only") save.remove();
     let clicks = 0;
     app.document.querySelectorAll("button").forEach((button) => button.addEventListener("click", () => clicks++));
-    assert.throws(() => app.adapter.save("wechat"), /发生变化|唯一/);
+    assert.throws(() => app.adapter.save("xiaohongshu"), /发生变化|唯一/);
     assert.equal(clicks, 0);
   }
 });
 
 test("XHS continues through its first-upload transition using the add input, not the replacement input", async (t) => {
-  const app = fixture(t, "xiaohongshu");
+  const app = fixture(t);
   app.document.querySelector(".ProseMirror").className = "tiptap ProseMirror";
   let replacements = 0;
   app.input.addEventListener("change", () => {
@@ -170,32 +167,30 @@ test("XHS continues through its first-upload transition using the add input, not
   assert.equal(app.document.querySelector(".tiptap").textContent, fullDraft.body);
 });
 
-for (const platform of ["wechat", "xiaohongshu"]) {
-  test(`${platform}: ending a completed job permits a second group on the same page, preserving the first editor until cleared`, async (t) => {
-    const app = fixture(t, platform);
-    await app.adapter.fill(platform, draft);
-    app.adapter.save(platform);
-    await assert.rejects(app.adapter.fill(platform, draft), /已处理过一次/);
-    const before = app.document.body.innerHTML;
-    assert.equal(app.adapter.reset(platform).reset, true);
-    await assert.rejects(app.adapter.fill(platform, draft), /新建空白/);
-    assert.equal(app.document.body.innerHTML, before);
-    // Simulate the platform opening a fresh editor without a full page reload.
-    app.document.querySelector("#title").value = "";
-    app.document.querySelector(".ProseMirror").textContent = "";
-    app.document.querySelector(".img-preview-area").replaceChildren();
-    app.input.files = [];
-    const next = { ...draft, title: "第二组实际文案", body: "这是第二次上传\n图片仍按原顺序" };
-    assert.equal((await app.adapter.fill(platform, next)).status, "filled");
-    assert.equal(app.document.querySelector("#title").value, next.title);
-    assert.equal(app.document.querySelector(".ProseMirror").textContent, next.body);
-    assert.equal(app.adapter.save(platform).status, "needs_confirmation");
-    assert.equal(app.uploaded.length, 4);
-  });
-}
+test(`xiaohongshu: ending a completed job permits a second group on the same page, preserving the first editor until cleared`, async (t) => {
+  const app = fixture(t);
+  await app.adapter.fill("xiaohongshu", draft);
+  app.adapter.save("xiaohongshu");
+  await assert.rejects(app.adapter.fill("xiaohongshu", draft), /已处理过一次/);
+  const before = app.document.body.innerHTML;
+  assert.equal(app.adapter.reset("xiaohongshu").reset, true);
+  await assert.rejects(app.adapter.fill("xiaohongshu", draft), /新建空白/);
+  assert.equal(app.document.body.innerHTML, before);
+  // Simulate the platform opening a fresh editor without a full page reload.
+  app.document.querySelector("#title").value = "";
+  app.document.querySelector(".ProseMirror").textContent = "";
+  app.document.querySelector(".img-preview-area").replaceChildren();
+  app.input.files = [];
+  const next = { ...draft, title: "第二组实际文案", body: "这是第二次上传\n图片仍按原顺序" };
+  assert.equal((await app.adapter.fill("xiaohongshu", next)).status, "filled");
+  assert.equal(app.document.querySelector("#title").value, next.title);
+  assert.equal(app.document.querySelector(".ProseMirror").textContent, next.body);
+  assert.equal(app.adapter.save("xiaohongshu").status, "needs_confirmation");
+  assert.equal(app.uploaded.length, 4);
+});
 
 test("an in-progress job cannot be reset, and a partial failure reports its confirmed image count", async (t) => {
-  const app = fixture(t, "xiaohongshu");
+  const app = fixture(t);
   let changes = 0;
   app.input.addEventListener("change", () => {
     assert.equal(app.adapter.reset().reset, false);
@@ -206,24 +201,22 @@ test("an in-progress job cannot be reset, and a partial failure reports its conf
   assert.equal(app.uploaded.length, 2);
 });
 
-for (const platform of ["wechat", "xiaohongshu"]) {
-  test(`${platform}: ProseMirror paragraph readback preserves multiline copy and every empty line despite browser layout spacing`, async (t) => {
-    const bodies = [
-      "第一组：核对两张图片，顺序为01、02。\n第二行：检查标题和多段文案完整保留。\n\n仅保存草稿，不公开发布。",
-      "\n开头空行要保留\n\n\n连续空行要保留\n",
-    ];
-    for (const body of bodies) {
-      const app = fixture(t, platform), editor = installParagraphEditor(app);
-      let saved = 0;
-      app.document.querySelector("[data-draft-save]").addEventListener("click", () => saved++);
-      assert.equal((await app.adapter.fill(platform, { ...draft, body })).status, "filled");
-      assert.notEqual(editor.innerText, body, "the browser's visual spacing is not the original copy");
-      assert.equal(editor.querySelectorAll("p").length, body.split("\n").length);
-      assert.equal(app.adapter.save(platform).status, "needs_confirmation");
-      assert.equal(saved, 1);
-    }
-  });
-}
+test(`xiaohongshu: ProseMirror paragraph readback preserves multiline copy and every empty line despite browser layout spacing`, async (t) => {
+  const bodies = [
+    "第一组：核对两张图片，顺序为01、02。\n第二行：检查标题和多段文案完整保留。\n\n仅保存草稿，不公开发布。",
+    "\n开头空行要保留\n\n\n连续空行要保留\n",
+  ];
+  for (const body of bodies) {
+    const app = fixture(t), editor = installParagraphEditor(app);
+    let saved = 0;
+    app.document.querySelector("[data-draft-save]").addEventListener("click", () => saved++);
+    assert.equal((await app.adapter.fill("xiaohongshu", { ...draft, body })).status, "filled");
+    assert.notEqual(editor.innerText, body, "the browser's visual spacing is not the original copy");
+    assert.equal(editor.querySelectorAll("p").length, body.split("\n").length);
+    assert.equal(app.adapter.save("xiaohongshu").status, "needs_confirmation");
+    assert.equal(saved, 1);
+  }
+});
 
 test("ProseMirror readback preserves genuine BR nodes and inline text while ignoring only its final placeholder", async (t) => {
   const variants = [
@@ -231,7 +224,7 @@ test("ProseMirror readback preserves genuine BR nodes and inline text while igno
     { body: "第一行\n\n后段", html: '<p>第一行<br><br class="ProseMirror-trailingBreak"></p><p>后段</p>' },
   ];
   for (const { body, html } of variants) {
-    const app = fixture(t, "xiaohongshu");
+    const app = fixture(t);
     installParagraphEditor(app, (editor) => { editor.innerHTML = html; });
     assert.equal((await app.adapter.fill("xiaohongshu", { ...draft, body })).status, "filled");
     assert.equal(app.adapter.save("xiaohongshu").status, "needs_confirmation");
@@ -241,7 +234,7 @@ test("ProseMirror readback preserves genuine BR nodes and inline text while igno
 test("saving still rejects edited ProseMirror text, removed empty paragraphs, and removed genuine line breaks", async (t) => {
   const body = "第一段\n同段软换行\n\n末段";
   for (const change of ["text", "empty-paragraph", "hard-break"]) {
-    const app = fixture(t, "xiaohongshu");
+    const app = fixture(t);
     const editor = installParagraphEditor(app, (element) => {
       element.innerHTML = '<p>第一段<br>同段软换行</p><p><br class="ProseMirror-trailingBreak"></p><p>末段</p>';
     });
@@ -257,7 +250,7 @@ test("saving still rejects edited ProseMirror text, removed empty paragraphs, an
 });
 
 test("unsupported ProseMirror structure falls back without silently omitting unexpected text", async (t) => {
-  const app = fixture(t, "xiaohongshu");
+  const app = fixture(t);
   installParagraphEditor(app, (editor) => {
     const paragraph = app.document.createElement("p"); paragraph.textContent = draft.body;
     const unknown = app.document.createElement("div"); unknown.textContent = "编辑器额外出现的正文";
@@ -268,7 +261,7 @@ test("unsupported ProseMirror structure falls back without silently omitting une
 });
 
 test("a platform error with a final full stop is reported without repeated punctuation", async (t) => {
-  const app = fixture(t, "xiaohongshu");
+  const app = fixture(t);
   app.document.execCommand = () => { throw new Error("平台拒绝填写。"); };
   await assert.rejects(app.adapter.fill("xiaohongshu", draft), (error) => {
     assert.match(error.message, /已确认 2\/2 张图片。平台拒绝填写。请核对平台内容/);
@@ -278,7 +271,7 @@ test("a platform error with a final full stop is reported without repeated punct
 });
 
 test("XHS waits through visible blob prerender and upload states before each next image or any copy", async (t) => {
-  const app = fixture(t, "xiaohongshu"), polls = [];
+  const app = fixture(t), polls = [];
   const originalSetTimeout = app.window.setTimeout.bind(app.window);
   t.mock.method(app.window, "setTimeout", (callback, delay, ...args) => {
     if (delay === 200) { polls.push(callback); return polls.length; }
@@ -329,7 +322,7 @@ test("XHS waits through visible blob prerender and upload states before each nex
 });
 
 test("XHS stops immediately on a failed second image, retains the first, and supports a new group after explicit reset", async (t) => {
-  const app = fixture(t, "xiaohongshu");
+  const app = fixture(t);
   const originalSetTimeout = app.window.setTimeout.bind(app.window);
   let polls = 0;
   t.mock.method(app.window, "setTimeout", (callback, delay, ...args) => {

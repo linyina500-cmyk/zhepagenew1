@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadDomModule } from "./helpers/load-dom-module.mjs";
 
-const { normalizeLocalDraft, encodeLocalDraft, decodeLocalDraft, saveLocalDraft } = loadDomModule("lib/draftSync/localDraftStore.ts");
+const { normalizeLocalDraft, encodeLocalDraft, decodeLocalDraft, saveLocalDraft, loadLocalDraft } = loadDomModule("lib/draftSync/localDraftStore.ts");
 const { countCharacters, countHashtags, DRAFT_LIMITS, validateDraft, readDraftImage } = loadDomModule("lib/draftSync/validation.ts");
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGMQPNj5HwAEnQJbj/CYfgAAAABJRU5ErkJggg==", "base64");
 const jpeg = Buffer.from("/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAT/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAgf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCgAkgf/9k=", "base64");
@@ -85,6 +85,36 @@ test("image read failure rejects saving before IndexedDB can open or replace an 
   assert.equal(opens, 0);
 });
 
+test("a slow old Blob save cannot overwrite a later dialog's recovery record", async (context) => {
+  const previousIndexedDB = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+  const writes = []; let stored, finishOldRead;
+  const database = {
+    close() {},
+    transaction() {
+      const transaction = { objectStore: () => ({
+        put(value) { writes.push(value.id); stored = value; return {}; },
+        get() { return { result: stored }; },
+      }) };
+      queueMicrotask(() => transaction.oncomplete());
+      return transaction;
+    },
+  };
+  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: { open() { const request = { result: database }; queueMicrotask(() => request.onsuccess()); return request; } } });
+  context.after(() => { if (previousIndexedDB) Object.defineProperty(globalThis, "indexedDB", previousIndexedDB); else delete globalThis.indexedDB; });
+  const old = makeDraft(), current = makeDraft();
+  old.id = "old-dialog"; current.id = "new-dialog";
+  context.mock.method(old.images[0].blob, "arrayBuffer", () => new Promise((resolve) => { finishOldRead = () => resolve(Uint8Array.from(png).buffer); }));
+  const oldSave = saveLocalDraft(old);
+  await Promise.resolve();
+  const currentSave = saveLocalDraft(current);
+  assert.deepEqual(writes, []);
+  const readAfterReopen = loadLocalDraft();
+  finishOldRead();
+  await Promise.all([oldSave, currentSave]);
+  assert.deepEqual(writes, ["old-dialog", "new-dialog"]);
+  assert.equal((await readAfterReopen).id, "new-dialog");
+});
+
 test("unfinished copy and image counts can be archived before platform validation is resolved", () => {
   const source = makeDraft();
   source.content.xiaohongshu.title = "尚待缩短的标题".repeat(20);
@@ -127,16 +157,27 @@ test("platform validation counts Unicode characters and distinguishes size advic
   assert.ok(mixed.some((issue) => issue.code === "image-resolution"));
 });
 
-test("WeChat browser drafts accept 700 to 1000 Chinese characters while still enforcing the character limit", () => {
+test("WeChat official drafts enforce the tool's independent UTF-8 byte and character limits without truncation", () => {
   const images = [{ ...metadata, height: 1350 }];
   assert.equal(DRAFT_LIMITS.wechat.body, 1000);
-  for (const length of [700, 900, 1000]) {
-    const body = "中".repeat(length);
-    assert.ok(Buffer.byteLength(body, "utf8") > 2048, "The fixture must exceed the removed API byte limit");
-    assert.deepEqual(validateDraft("wechat", { title: "标题", body }, images), [], `${length} Chinese characters must be accepted`);
-  }
+  const exactBytes = "中".repeat(682) + "ab";
+  assert.equal(Buffer.byteLength(exactBytes, "utf8"), 2048);
+  assert.deepEqual(validateDraft("wechat", { title: "标题", body: exactBytes }, images), []);
+  assert.deepEqual(validateDraft("wechat", { title: "标题", body: exactBytes + "c" }, images).map((issue) => issue.code), ["body-bytes"]);
+  assert.deepEqual(validateDraft("wechat", { title: "标题", body: "a".repeat(1001) }, images).map((issue) => issue.code), ["body-long"]);
   const exceeded = validateDraft("wechat", { title: "标题", body: "中".repeat(1001) }, images);
-  assert.deepEqual(exceeded.map((issue) => issue.code), ["body-long"]);
+  assert.deepEqual(exceeded.map((issue) => issue.code), ["body-long", "body-bytes"]);
+});
+
+test("an unconfirmed WeChat job identity survives archive encoding without persisting a connection password", async () => {
+  const source = makeDraft();
+  const jobId = "76f6dbe5-a12d-4fe2-8ee7-35e6e988ab8e";
+  source.receipts.push({ accountId: "wechat-account", platform: "wechat", status: "needs_confirmation", jobId, message: "等待读取", password: "not-for-storage" });
+  const restored = decodeLocalDraft(await encodeLocalDraft(source));
+  assert.deepEqual(restored.receipts, [{ accountId: "wechat-account", platform: "wechat", status: "needs_confirmation", jobId, message: "等待读取" }]);
+  assert.equal(restored.receipts[0].draftId, undefined, "a task ID cannot be mistaken for a platform draft ID");
+  source.receipts[0].jobId = "not-a-uuid";
+  assert.throws(() => normalizeLocalDraft(source), /本机存档不完整/);
 });
 
 test("hashtag counting supports whitespace-separated Chinese and English topics without counting closing hashes or Markdown headings", () => {

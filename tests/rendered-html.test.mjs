@@ -35,6 +35,13 @@ test("server-renders the Zhepage application metadata", async () => {
   assert.match(html, /og-zhepage\.png/);
 });
 
+test("built Worker serves the unconfigured WeChat API as JSON instead of the static page", async () => {
+  const response = await render("/api/wechat/account");
+  assert.equal(response.status, 503);
+  assert.match(response.headers.get("content-type"), /application\/json/);
+  assert.match((await response.json()).error, /尚未配置/);
+});
+
 test("keeps the requested production defaults", async () => {
   const [page, css, editor, packageJson, readme, guide, articleImporter] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),

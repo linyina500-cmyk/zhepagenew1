@@ -3,6 +3,14 @@ import type { DraftContent, DraftPlatform, LocalDraft, SyncReceipt } from "./typ
 const DATABASE = "zhepage-local-draft-sync";
 const STORE = "drafts";
 const KEY = "current";
+// A dialog can close while Blob encoding is still running. Keep writes ordered
+// across dialog instances so a late old save cannot replace a new recovery ID.
+let pendingWrite: Promise<void> = Promise.resolve();
+function queueWrite(operation: () => Promise<void>) {
+  const write = pendingWrite.then(operation);
+  pendingWrite = write.catch(() => {});
+  return write;
+}
 
 type StoredDraftImage = Omit<LocalDraft["images"][number], "blob"> & { mime: string; bytes: ArrayBuffer };
 type StoredLocalDraft = Omit<LocalDraft, "images" | "receipts"> & { images: StoredDraftImage[]; receipts: Omit<SyncReceipt, "url">[] };
@@ -51,6 +59,8 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
     const receipt = record(value);
     if (typeof receipt.status !== "string" || !["saved", "confirmed_by_user", "needs_confirmation", "failed"].includes(receipt.status)) throw invalidArchive();
     const draftId = receipt.draftId === undefined ? undefined : text(receipt.draftId, 512, true);
+    const jobId = receipt.jobId === undefined ? undefined : text(receipt.jobId, 36, true);
+    if (jobId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) throw invalidArchive();
     if (receipt.status === "saved" && !draftId) throw invalidArchive();
     let url: string | undefined;
     if (receipt.url !== undefined) {
@@ -59,7 +69,7 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
       // Platform navigation never needs credential-bearing query parameters.
       url = `${parsed.origin}${parsed.pathname}`;
     }
-    return { accountId: text(receipt.accountId, 200, true), platform: platform(receipt.platform), status: receipt.status as SyncReceipt["status"], message: text(receipt.message, 4000), ...(draftId ? { draftId } : {}), ...(url ? { url } : {}) };
+    return { accountId: text(receipt.accountId, 200, true), platform: platform(receipt.platform), status: receipt.status as SyncReceipt["status"], message: text(receipt.message, 4000), ...(draftId ? { draftId } : {}), ...(jobId ? { jobId } : {}), ...(url ? { url } : {}) };
   });
   if (new Set(receipts.map((receipt) => receipt.accountId)).size !== receipts.length) throw invalidArchive();
   return {
@@ -73,7 +83,7 @@ export async function encodeLocalDraft(draft: LocalDraft): Promise<StoredLocalDr
   const snapshot = normalizeLocalDraft(draft);
   // Private WebKit sessions cannot persist Blob/File values in IndexedDB.
   const images = await Promise.all(snapshot.images.map(async ({ blob, ...metadata }) => ({ ...metadata, mime: blob.type, bytes: await blob.arrayBuffer() })));
-  const receipts = snapshot.receipts.map(({ accountId, platform, status, message, draftId }) => ({ accountId, platform, status, message, ...(draftId ? { draftId } : {}) }));
+  const receipts = snapshot.receipts.map(({ accountId, platform, status, message, draftId, jobId }) => ({ accountId, platform, status, message, ...(draftId ? { draftId } : {}), ...(jobId ? { jobId } : {}) }));
   return { ...snapshot, images, receipts };
 }
 
@@ -113,6 +123,7 @@ async function withStore<T>(mode: IDBTransactionMode, operation: (store: IDBObje
 }
 
 export async function loadLocalDraft(): Promise<LocalDraft | null> {
+  await pendingWrite;
   const draft = await withStore<unknown>("readonly", (store) => store.get(KEY));
   if (draft === undefined) return null;
   try { return decodeLocalDraft(draft); }
@@ -120,11 +131,14 @@ export async function loadLocalDraft(): Promise<LocalDraft | null> {
 }
 
 export async function saveLocalDraft(draft: LocalDraft): Promise<void> {
-  // Finish asynchronous reads before creating the single write transaction.
-  const snapshot = await encodeLocalDraft(draft);
-  await withStore("readwrite", (store) => store.put(snapshot, KEY));
+  const snapshot = normalizeLocalDraft(draft);
+  await queueWrite(async () => {
+    // Finish asynchronous reads before creating the single write transaction.
+    const encoded = await encodeLocalDraft(snapshot);
+    await withStore("readwrite", (store) => store.put(encoded, KEY));
+  });
 }
 
 export async function clearLocalDraft(): Promise<void> {
-  await withStore("readwrite", (store) => store.delete(KEY));
+  await queueWrite(async () => { await withStore("readwrite", (store) => store.delete(KEY)); });
 }

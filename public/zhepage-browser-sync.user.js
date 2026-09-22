@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         折页 · 浏览器传图验证
 // @namespace    https://feature-local-draft-sync.zhepagenew.pages.dev/browser-sync
-// @version      0.2.1
-// @description  在当前浏览器中，把完整文章图片和文案填入小红书图文或公众号贴图编辑器。不会发布。
+// @version      0.3.0
+// @description  在当前浏览器中，把完整文章图片和文案填入小红书图文编辑器。不会发布。
 // @match        https://feature-local-draft-sync.zhepagenew.pages.dev/
 // @match        https://feature-local-draft-sync.zhepagenew.pages.dev/browser-sync-check
 // @match        https://creator.xiaohongshu.com/publish/*
-// @match        https://mp.weixin.qq.com/cgi-bin/*
 // @grant        GM.setValue
 // @grant        GM.getValue
 // @grant        GM.deleteValue
@@ -18,36 +17,40 @@
 // ==/UserScript==
 
 // # Browser platform adapter notices
-// 
+//
 // ## baoyu-skills — MIT
-// 
-// WeChat image-post editor selectors and the image-input/draft-button workflow in
-// `platforms.mjs` are adapted from Jim Liu's baoyu-skills, commit
+//
+// The original image-input/draft-button workflow in `platforms.mjs` was adapted
+// from Jim Liu's baoyu-skills, commit
 // `8ae8c33a8d7c8c7c6de291b2c91ba1debe1d2766`:
-// 
+//
 // - [wechat-browser.ts](https://github.com/JimLiu/baoyu-skills/blob/8ae8c33a8d7c8c7c6de291b2c91ba1debe1d2766/skills/baoyu-post-to-wechat/scripts/wechat-browser.ts)
 // - [wechat-agent-browser.ts](https://github.com/JimLiu/baoyu-skills/blob/8ae8c33a8d7c8c7c6de291b2c91ba1debe1d2766/skills/baoyu-post-to-wechat/scripts/wechat-agent-browser.ts)
-// 
+//
 // Modified 2026-09-10: removed local processes, CDP and filesystem access; use
 // in-memory images inside an existing page; require an empty, unambiguous native
 // image editor; upload sequentially; preserve text; only trigger explicitly labeled
 // draft buttons; report unverified saves as needing confirmation.
-// 
+//
+// Modified 2026-09-22: removed the WeChat DOM adapter. Version 0.3.0 only operates
+// the Xiaohongshu editor; WeChat uses a separate official-API service. The original
+// workflow attribution and license remain with the browser script.
+//
 // ```text
 // MIT License
-// 
+//
 // Copyright (c) 2026 Jim Liu
-// 
+//
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
 // in the Software without restriction, including without limitation the rights
 // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 // copies of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
-// 
+//
 // The above copyright notice and this permission notice shall be included in all
 // copies or substantial portions of the Software.
-// 
+//
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -56,37 +59,37 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 // ```
-// 
+//
 // ## OpenCLI — Apache-2.0
-// 
+//
 // Xiaohongshu image-editor selectors are adapted from [jackwener/OpenCLI](https://github.com/jackwener/OpenCLI/blob/8271afc67e8504bda94c147f446ee29775d08274/clis/xiaohongshu/publish.js),
 // commit `8271afc67e8504bda94c147f446ee29775d08274`.
-// 
+//
 // Copyright 2025 jackwener. Licensed under Apache License 2.0. The complete upstream
 // license is included in [LICENSE-APACHE-2.0.txt](./LICENSE-APACHE-2.0.txt). The upstream
 // tree at this commit does not contain a NOTICE file.
-// 
+//
 // Include this notice (including the MIT license above) and the complete
 // LICENSE-APACHE-2.0.txt when distributing the script, including in bundled builds.
-// 
+//
 // Modified 2026-09-10: retained only image-editor selectors; removed network account
 // lookup, browser management and private component-method invocation; only an exact
 // visible draft-button label can trigger a save.
-// 
+//
 //                                  Apache License
 //                            Version 2.0, January 2004
 //                         http://www.apache.org/licenses/
-// 
+//
 //    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-// 
+//
 //    1. Definitions.
-// 
+//
 //       "License" shall mean the terms and conditions for use, reproduction,
 //       and distribution as defined by Sections 1 through 9 of this document.
-// 
+//
 //       "Licensor" shall mean the copyright owner or entity authorized by
 //       the copyright owner that is granting the License.
-// 
+//
 //       "Legal Entity" shall mean the union of the acting entity and all
 //       other entities that control, are controlled by, or are under common
 //       control with that entity. For the purposes of this definition,
@@ -94,24 +97,24 @@
 //       direction or management of such entity, whether by contract or
 //       otherwise, or (ii) ownership of fifty percent (50%) or more of the
 //       outstanding shares, or (iii) beneficial ownership of such entity.
-// 
+//
 //       "You" (or "Your") shall mean an individual or Legal Entity
 //       exercising permissions granted by this License.
-// 
+//
 //       "Source" form shall mean the preferred form for making modifications,
 //       including but not limited to software source code, documentation
 //       source, and configuration files.
-// 
+//
 //       "Object" form shall mean any form resulting from mechanical
 //       transformation or translation of a Source form, including but
 //       not limited to compiled object code, generated documentation,
 //       and conversions to other media types.
-// 
+//
 //       "Work" shall mean the work of authorship, whether in Source or
 //       Object form, made available under the License, as indicated by a
 //       copyright notice that is included in or attached to the work
 //       (an example is provided in the Appendix below).
-// 
+//
 //       "Derivative Works" shall mean any work, whether in Source or Object
 //       form, that is based on (or derived from) the Work and for which the
 //       editorial revisions, annotations, elaborations, or other modifications
@@ -119,7 +122,7 @@
 //       of this License, Derivative Works shall not include works that remain
 //       separable from, or merely link (or bind by name) to the interfaces of,
 //       the Work and Derivative Works thereof.
-// 
+//
 //       "Contribution" shall mean any work of authorship, including
 //       the original version of the Work and any modifications or additions
 //       to that Work or Derivative Works thereof, that is intentionally
@@ -133,18 +136,18 @@
 //       Licensor for the purpose of discussing and improving the Work, but
 //       excluding communication that is conspicuously marked or otherwise
 //       designated in writing by the copyright owner as "Not a Contribution."
-// 
+//
 //       "Contributor" shall mean Licensor and any individual or Legal Entity
 //       on behalf of whom a Contribution has been received by the Licensor and
 //       subsequently incorporated within the Work.
-// 
+//
 //    2. Grant of Copyright License. Subject to the terms and conditions of
 //       this License, each Contributor hereby grants to You a perpetual,
 //       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
 //       copyright license to reproduce, prepare Derivative Works of,
 //       publicly display, publicly perform, sublicense, and distribute the
 //       Work and such Derivative Works in Source or Object form.
-// 
+//
 //    3. Grant of Patent License. Subject to the terms and conditions of
 //       this License, each Contributor hereby grants to You a perpetual,
 //       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
@@ -160,24 +163,24 @@
 //       or contributory patent infringement, then any patent licenses
 //       granted to You under this License for that Work shall terminate
 //       as of the date such litigation is filed.
-// 
+//
 //    4. Redistribution. You may reproduce and distribute copies of the
 //       Work or Derivative Works thereof in any medium, with or without
 //       modifications, and in Source or Object form, provided that You
 //       meet the following conditions:
-// 
+//
 //       (a) You must give any other recipients of the Work or
 //           Derivative Works a copy of this License; and
-// 
+//
 //       (b) You must cause any modified files to carry prominent notices
 //           stating that You changed the files; and
-// 
+//
 //       (c) You must retain, in the Source form of any Derivative Works
 //           that You distribute, all copyright, patent, trademark, and
 //           attribution notices from the Source form of the Work,
 //           excluding those notices that do not pertain to any part of
 //           the Derivative Works; and
-// 
+//
 //       (d) If the Work includes a "NOTICE" text file as part of its
 //           distribution, then any Derivative Works that You distribute must
 //           include a readable copy of the attribution notices contained
@@ -194,14 +197,14 @@
 //           or as an addendum to the NOTICE text from the Work, provided
 //           that such additional attribution notices cannot be construed
 //           as modifying the License.
-// 
+//
 //       You may add Your own copyright statement to Your modifications and
 //       may provide additional or different license terms and conditions
 //       for use, reproduction, or distribution of Your modifications, or
 //       for any such Derivative Works as a whole, provided Your use,
 //       reproduction, and distribution of the Work otherwise complies with
 //       the conditions stated in this License.
-// 
+//
 //    5. Submission of Contributions. Unless You explicitly state otherwise,
 //       any Contribution intentionally submitted for inclusion in the Work
 //       by You to the Licensor shall be under the terms and conditions of
@@ -209,12 +212,12 @@
 //       Notwithstanding the above, nothing herein shall supersede or modify
 //       the terms of any separate license agreement you may have executed
 //       with Licensor regarding such Contributions.
-// 
+//
 //    6. Trademarks. This License does not grant permission to use the trade
 //       names, trademarks, service marks, or product names of the Licensor,
 //       except as required for reasonable and customary use in describing the
 //       origin of the Work and reproducing the content of the NOTICE file.
-// 
+//
 //    7. Disclaimer of Warranty. Unless required by applicable law or
 //       agreed to in writing, Licensor provides the Work (and each
 //       Contributor provides its Contributions) on an "AS IS" BASIS,
@@ -224,7 +227,7 @@
 //       PARTICULAR PURPOSE. You are solely responsible for determining the
 //       appropriateness of using or redistributing the Work and assume any
 //       risks associated with Your exercise of permissions under this License.
-// 
+//
 //    8. Limitation of Liability. In no event and under no legal theory,
 //       whether in tort (including negligence), contract, or otherwise,
 //       unless required by applicable law (such as deliberate and grossly
@@ -236,7 +239,7 @@
 //       work stoppage, computer failure or malfunction, or any and all
 //       other commercial damages or losses), even if such Contributor
 //       has been advised of the possibility of such damages.
-// 
+//
 //    9. Accepting Warranty or Additional Liability. While redistributing
 //       the Work or Derivative Works thereof, You may choose to offer,
 //       and charge a fee for, acceptance of support, warranty, indemnity,
@@ -247,23 +250,23 @@
 //       defend, and hold each Contributor harmless for any liability
 //       incurred by, or claims asserted against, such Contributor by reason
 //       of your accepting any such warranty or additional liability.
-// 
+//
 //    END OF TERMS AND CONDITIONS
-// 
+//
 //    Copyright 2025 jackwener
-// 
+//
 //    Licensed under the Apache License, Version 2.0 (the "License");
 //    you may not use this file except in compliance with the License.
 //    You may obtain a copy of the License at
-// 
+//
 //        http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 //    Unless required by applicable law or agreed to in writing, software
 //    distributed under the License is distributed on an "AS IS" BASIS,
 //    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 //    See the License for the specific language governing permissions and
 //    limitations under the License.
-// 
+//
 
 (function installBrowserSync({ window, document, GM }, createPlatformAdapter) {
   const ORIGIN = "https://feature-local-draft-sync.zhepagenew.pages.dev";
@@ -271,8 +274,8 @@
   const TTL = 30 * 60 * 1000;
   const IMAGE_LIMIT = 10_000_000;
   const TOTAL_IMAGE_LIMIT = 60 * 1024 * 1024;
-  const IMAGE_COUNTS = { xiaohongshu: 18, wechat: 20 };
-  const platforms = ["xiaohongshu", "wechat"];
+  const IMAGE_COUNTS = { xiaohongshu: 18 };
+  const platforms = ["xiaohongshu"];
   // Tampermonkey wraps window; MessageEvent.source uses the document's window.
   const sourceWindow = document.defaultView;
   if (!sourceWindow || window.top !== window.self) return;
@@ -324,7 +327,7 @@
     if (!value || !platforms.includes(value.platform) || !validId(value.id)) throw new Error("待传内容格式无效");
     const { title, body, images } = value.draft || {};
     validateContent(title, body);
-    if (!Array.isArray(images) || images.length < 1 || images.length > IMAGE_COUNTS[value.platform]) throw new Error(`${value.platform === "wechat" ? "公众号贴图" : "小红书"}本次需要 1–${IMAGE_COUNTS[value.platform]} 张图片`);
+    if (!Array.isArray(images) || images.length < 1 || images.length > IMAGE_COUNTS[value.platform]) throw new Error(`小红书本次需要 1–${IMAGE_COUNTS[value.platform]} 张图片`);
     let total = 0;
     const clean = images.map((image, index) => {
       const result = validateImage(image);
@@ -395,7 +398,7 @@
       const message = event.data;
       if (!isSource() || event.source !== sourceWindow || event.origin !== ORIGIN || message?.channel !== CHANNEL || message.kind !== "request" || typeof message.id !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(message.id)) return;
       try {
-        if (message.action === "ping") return reply(message.id, { ok: true, version: "0.2.1" });
+        if (message.action === "ping") return reply(message.id, { ok: true, version: "0.3.0" });
         if (!platforms.includes(message.platform)) throw new Error("未知平台");
         if (message.action === "status") {
           if (saving) throw new Error("上一组图片仍在写入和核对，请稍候再读取传图状态，不要重复准备");
@@ -417,7 +420,7 @@
     return;
   }
 
-  const platform = window.location.origin === "https://creator.xiaohongshu.com" ? "xiaohongshu" : window.location.origin === "https://mp.weixin.qq.com" ? "wechat" : null;
+  const platform = window.location.origin === "https://creator.xiaohongshu.com" ? "xiaohongshu" : null;
   if (!platform || document.getElementById("zhepage-browser-sync-panel")) return;
   const adapter = createPlatformAdapter({ window, document });
   const host = document.createElement("div");
@@ -429,7 +432,7 @@
   const section = document.createElement("section");
   section.setAttribute("aria-label", "折页浏览器传图");
   const title = document.createElement("h2"); title.textContent = "折页 · 浏览器传图";
-  const note = document.createElement("small"); note.textContent = "请先进入空白的图文/贴图编辑器。";
+  const note = document.createElement("small"); note.textContent = "请先进入空白的小红书图文编辑器。";
   const description = document.createElement("p"); description.textContent = "点击检查，读取这台浏览器中准备的内容。";
   const preview = document.createElement("div"); preview.className = "images";
   const message = document.createElement("p"); message.setAttribute("role", "status");
@@ -456,7 +459,7 @@
     current = await read(platform);
     preview.replaceChildren();
     if (!current) { description.textContent = "没有待传内容，或已超过 30 分钟。请返回折页重新准备。"; message.textContent = ""; return; }
-    description.textContent = `${current.draft.title}\n${current.draft.images.length} 张图片 · ${platform === "wechat" ? "公众号贴图" : "小红书图文"}`;
+    description.textContent = `${current.draft.title}\n${current.draft.images.length} 张图片 · 小红书图文`;
     for (const image of await readImages(current)) {
       const img = document.createElement("img"); img.src = image.dataUrl; img.alt = image.name; preview.append(img);
     }
@@ -468,7 +471,7 @@
     if (!current || job?.id !== current.id) throw new Error("请先检查本次待传内容");
     if (job.status !== "ready") throw new Error("本次内容已开始处理，请核对平台页面，不要重复导入");
     const inspection = await adapter.inspect(platform);
-    if (!inspection?.ready || !inspection.empty) throw new Error(inspection?.message || "请先进入空白的图文/贴图编辑器，再填入本次内容");
+    if (!inspection?.ready || !inspection.empty) throw new Error(inspection?.message || "请先进入空白的小红书图文编辑器，再填入本次内容");
     const images = await readImages(job);
     if (!same(await GM.getValue(key(platform), null), job)) throw new Error("待传内容状态已经变化，请重新检查，不要重复导入");
     job.status = "filling"; job.message = "正在填入平台编辑器，请保持此页打开";
@@ -509,14 +512,6 @@
 })({ window, document, GM }, function createPlatformAdapter({ window, document }) {
   // Keep every dependency inside this function: the userscript serializes it.
   const configs = {
-    wechat: {
-      origin: "https://mp.weixin.qq.com", path: /^\/cgi-bin\/appmsg/,
-      input: '.js_upload_btn_container input[type="file"]', title: "#title",
-      body: '.ProseMirror[contenteditable="true"], .js_pmEditorArea[contenteditable="true"]',
-      images: '.weui-desktop-upload__thumb, .pic_item, [class*="upload__thumb"]',
-      progress: '[class*="upload_loading"], [class*="uploading"], .weui-desktop-upload__loading',
-      dialog: ".weui-desktop-dialog__wrp", save: "保存为草稿", maximum: 20,
-    },
     xiaohongshu: {
       origin: "https://creator.xiaohongshu.com", path: /^\/publish\/publish\/?$/,
       input: 'input[type="file"][accept*="image"], input[type="file"][accept*=".jpg"], input[type="file"][accept*=".png"], input[type="file"][accept*=".jpeg"]',
@@ -584,39 +579,32 @@
     const config = configs[platform];
     const url = new window.URL(window.location.href);
     if (!config || url.origin !== config.origin || !config.path.test(url.pathname)) stop("请先打开该平台的原生图片编辑器");
-    if (platform === "xiaohongshu" && url.searchParams.get("target") !== "image") stop("请打开小红书的上传图文页面，当前页面不能导入");
+    if (url.searchParams.get("target") !== "image") stop("请打开小红书的上传图文页面，当前页面不能导入");
     // XHS mounts both an add-images input and a single-image replacement input
     // after the first upload. Only the multiple input appends to the image list.
-    const imageLists = platform === "xiaohongshu" ? all(".img-list").filter(visible) : [];
+    const imageLists = all(".img-list").filter(visible);
     if (imageLists.length > 1) stop("发现多个图片编辑区，请只保留一个空白图片编辑器");
     const inputs = all(config.input).filter((element) => !disabled(element) &&
-      (platform !== "xiaohongshu" || (element.multiple && (!imageLists.length || imageLists[0].contains(element)))));
+      element.multiple && (!imageLists.length || imageLists[0].contains(element)));
     if (inputs.length > 1) stop("无法唯一确认添加图片的入口，请检查当前编辑器");
     if (requireInput && !inputs.length) stop("图片上传入口尚未就绪，请稍候再试");
     const title = unique(config.title);
     const body = unique(config.body, title);
-    if (platform === "wechat") {
-      const labeled = all('h1, h2, h3, [role="heading"], .weui-desktop-breadcrum, .weui-desktop-panel__title')
-        .some((element) => visible(element) && /^(?:贴图|图文|图文消息|图片消息)(?:编辑)?$/.test(value(element).trim()));
-      if (document.querySelector(".rich_media_content") || !title || !body || (!labeled && !body.matches(".js_pmEditorArea"))) {
-        stop("尚不能确认公众号原生贴图编辑器，请打开贴图；普通文章不支持此操作");
-      }
-    }
     if ((title && disabled(title)) || (body && disabled(body))) stop("当前编辑区域不可填写，请先完成页面上的提示");
     const candidates = all(config.images).filter(visible);
     const images = candidates.filter((element) => !candidates.some((other) => other !== element && other.contains(element)));
     const hasImageMarker = (element, selector) => [...element.querySelectorAll(selector)].some(visible);
-    const failedImage = platform === "xiaohongshu" ? images.findIndex((element) => hasImageMarker(element, ".mask.failed")) : -1;
-    const processingImages = platform === "xiaohongshu" && images.some((element) => hasImageMarker(element, ".mask.prerender, .processing-container, .mask.uploading, .progress-container"));
+    const failedImage = images.findIndex((element) => hasImageMarker(element, ".mask.failed"));
+    const processingImages = images.some((element) => hasImageMarker(element, ".mask.prerender, .processing-container, .mask.uploading, .progress-container"));
     const previewsReady = images.every((element) => {
       const image = element.matches("img") ? element : element.querySelector("img");
       // A decoded XHS blob preview can appear before upload starts. Wait for
       // the native processing masks to clear and its edit control to mount.
       // These UI signals do not prove that a remote image URL is available.
-      return image?.complete && image.naturalWidth > 0 && (platform !== "xiaohongshu" || Boolean(element.querySelector(".image-editor-control .edit-btn")));
+      return image?.complete && image.naturalWidth > 0 && Boolean(element.querySelector(".image-editor-control .edit-btn"));
     });
     const blocked = failedImage >= 0 || processingImages || !previewsReady || all(`${config.progress}, ${config.dialog}`).some(visible);
-    const existingId = [...url.searchParams].some(([key, item]) => item && /^(?:draft_?id|note_?id|appmsgid|appmsg_id)$/i.test(key));
+    const existingId = [...url.searchParams].some(([key, item]) => item && /^(?:draft_?id|note_?id)$/i.test(key));
     const existing = Boolean(value(title).trim() || value(body).trim() || images.length || inputs[0]?.files?.length || existingId);
     return { config, input: inputs[0], title, body, images, failedImage, blocked, existing };
   }
