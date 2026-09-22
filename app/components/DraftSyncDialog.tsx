@@ -239,6 +239,12 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
     if (operationRef.current) return;
     setFeedback(null); setStep(next);
   }
+  const contentCheck = draft && issues.length > 0 ? <section className="draft-sync-validation" aria-label="同步前检查">
+    <h3>{contentReady ? "图片提示" : "请先完成以下检查"}</h3>
+    <ul>{displayIssues.map((issue, index) => <li key={`${issue.code}-${issue.imageId || index}`} className={issue.severity}><b>{limit.label}：</b>{issue.message}</li>)}</ul>
+    {!!warnings.length && <label className="draft-sync-check"><input type="checkbox" checked={acceptedWarnings === warningsKey} disabled={Boolean(busy)} onChange={(event) => setAcceptedWarnings(event.target.checked ? warningsKey : "")} /><span>我已核对图片，沿用当前尺寸和比例</span></label>}
+    {step !== "content" && errors.length > 0 && <button type="button" disabled={Boolean(busy)} onClick={() => goToStep("content")}>返回修改内容</button>}
+  </section> : null;
   async function persistWechatReceipt(snapshot: LocalDraft, nextReceipt: SyncReceipt, signal: AbortSignal) {
     signal.throwIfAborted();
     const known = receiptSnapshotRef.current;
@@ -314,9 +320,9 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
           </section>
         </>}
         {step === "results" && platformTabs}
-        {open && platform === "wechat" && draft && step !== "content" && <WechatDraftPanel key={draft.id} draft={draft} view={step} contentReady={contentReady} contentChanged={contentChanged.wechat} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, wechat: false })); }} />}
-        {open && platform === "xiaohongshu" && draft && step !== "content" && <XiaohongshuDraftPanel key={draft.id} draft={draft} contentReady={contentReady} contentChanged={contentChanged.xiaohongshu} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, xiaohongshu: false })); }} />}
-        {draft && step !== "results" && !!issues.length && <section className="draft-sync-validation" aria-label="同步前检查"><h3>同步前检查</h3><ul>{displayIssues.map((issue, index) => <li key={`${issue.code}-${issue.imageId || index}`} className={issue.severity}><b>{limit.label}：</b>{issue.message}</li>)}</ul>{!!warnings.length && <label className="draft-sync-check"><input type="checkbox" checked={acceptedWarnings === warningsKey} disabled={Boolean(busy)} onChange={(event) => setAcceptedWarnings(event.target.checked ? warningsKey : "")} /><span>我已核对图片，沿用当前尺寸和比例</span></label>}</section>}
+        {open && platform === "wechat" && draft && step !== "content" && <WechatDraftPanel key={draft.id} draft={draft} view={step} contentReady={contentReady} contentCheck={contentCheck} contentChanged={contentChanged.wechat} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, wechat: false })); }} />}
+        {open && platform === "xiaohongshu" && draft && step !== "content" && <XiaohongshuDraftPanel key={draft.id} draft={draft} contentReady={contentReady} contentCheck={contentCheck} contentChanged={contentChanged.xiaohongshu} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, xiaohongshu: false })); }} />}
+        {step === "content" && contentCheck}
 
       </div>
       <footer className="draft-sync-footer">

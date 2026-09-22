@@ -237,25 +237,46 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await page.goto(server.origin);
     let dialog = await prepareRealImages(page);
     await choosePlatform(dialog, "wechat");
-    await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("真实海报贴图草稿");
+    await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("这是一个超过二十个字符需要用户缩短的公众号贴图标题");
     await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("多张海报完整同步。\n\n这一行也保留。\n");
     await expect(dialog.locator(".draft-sync-validation li").filter({ hasText: "并非平台强制要求" })).toHaveCount(1);
-    await dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true }).check();
-    await dialog.getByRole("button", { name: "下一步：选择公众号", exact: true }).click();
+    // The step navigation can reach accounts before content is ready. The
+    // action area must explain every content blocker and let users resolve it.
+    await dialog.locator(".draft-sync-steps button").nth(1).click();
     expect(requests).toEqual([]);
     const connectionConfig = { name: "config.env", mimeType: "text/plain", buffer: Buffer.from("WECHAT_SYNC_TOKEN=browser-test-password\nWECHAT_HOST=127.0.0.1\nWECHAT_PORT=8788\nWECHAT_DATA_DIR=./data\n") };
-    await dialog.locator('.draft-sync-wechat-settings input[type="file"]').setInputFiles(connectionConfig);
+    const connectionInput = dialog.getByLabel("本机连接口令", { exact: true });
+    await expect(connectionInput).toBeHidden();
+    await expect(dialog.getByRole("button", { name: "导入本机配置", exact: true })).toHaveClass("primary");
+    await expect(dialog.getByText("选择 config.env，自动连接，无需手动填写。", { exact: true })).toBeVisible();
+    for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await dialog.locator(".draft-sync-wechat-settings").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `test-results/wechat-first-connection-${viewport.width}.png` });
+    }
+    await page.setViewportSize({ width: 1110, height: 770 });
+    await dialog.getByText("手动输入连接口令", { exact: true }).click();
+    await expect(connectionInput).toBeVisible();
+    await connectionInput.fill("browser-test-password");
+    await expect(dialog.getByRole("button", { name: "连接本机服务", exact: true })).toBeEnabled();
+    await connectionInput.clear();
+    await dialog.getByText("手动输入连接口令", { exact: true }).click();
+    await expect(connectionInput).toBeHidden();
+    expect(requests).toEqual([]);
+    const configChooser = page.waitForEvent("filechooser");
+    await dialog.getByRole("button", { name: "导入本机配置", exact: true }).click();
+    await (await configChooser).setFiles(connectionConfig);
     await expect(dialog.getByRole("status").filter({ hasText: "此配置只包含连接信息，请在下方添加公众号" })).toBeVisible();
     expect(requests).toEqual(["GET /api/wechat/connection"]);
     for (const account of accounts) {
       const settings = dialog.locator(".draft-sync-wechat-settings");
-      if (!(await settings.evaluate((element) => (element as HTMLDetailsElement).open))) await settings.locator("summary").click();
+      if (!(await settings.evaluate((element) => (element as HTMLDetailsElement).open))) await settings.locator(":scope > summary").click();
       await dialog.getByLabel("公众号名称", { exact: true }).fill(account.name);
       await dialog.getByLabel("AppID", { exact: true }).fill(account.appId);
       await dialog.getByLabel("AppSecret", { exact: true }).fill(account.appSecret);
       await dialog.getByRole("button", { name: "保存并连接公众号", exact: true }).click();
       await expect(dialog.getByRole("article", { name: `${account.name} 的结果` })).toBeVisible();
-      await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeEnabled();
+      await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeDisabled();
     }
     expect(uploads).toHaveLength(0);
     const callsBeforeImport = requests.length;
@@ -263,12 +284,29 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await expect(dialog.getByRole("status").filter({ hasText: "已保留此浏览器的 2 个公众号" })).toBeVisible();
     expect(requests.slice(callsBeforeImport)).toEqual(["GET /api/wechat/connection"]);
     await expect(dialog.locator(".draft-sync-wechat-account-row")).toHaveCount(2);
+    const actions = dialog.getByRole("region", { name: "公众号操作", exact: true });
+    await expect(actions.getByRole("region", { name: "同步前检查", exact: true })).toContainText("标题最多 20 个字符");
+    await actions.getByRole("button", { name: "返回修改内容", exact: true }).click();
+    await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("真实海报贴图草稿");
+    await dialog.locator(".draft-sync-steps button").nth(1).click();
+    await dialog.getByLabel("全选", { exact: true }).check();
+    await expect(actions.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeDisabled();
+    // Results previously hid the validation entirely, leaving both actions
+    // permanently disabled with no explanation or way to confirm the images.
+    await dialog.locator(".draft-sync-steps button").nth(2).click();
+    await expect(actions.getByRole("region", { name: "同步前检查", exact: true })).toBeVisible();
+    expect(uploads).toHaveLength(0); expect(publications.size).toBe(0);
+    await actions.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true }).check();
+    await expect(actions.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeEnabled();
+    await expect(actions.getByRole("button", { name: "立即发布", exact: true })).toBeEnabled();
+    expect(uploads).toHaveLength(0); expect(publications.size).toBe(0);
+    await dialog.locator(".draft-sync-steps button").nth(1).click();
     // Account checkboxes must never inherit the global full-width text-input rule.
     // Check both the user's laptop size and narrow screens before any upload.
     for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
       const settings = dialog.locator(".draft-sync-wechat-settings");
-      if (await settings.evaluate((element) => (element as HTMLDetailsElement).open)) await settings.locator("summary").click();
+      if (await settings.evaluate((element) => (element as HTMLDetailsElement).open)) await settings.locator(":scope > summary").click();
       const rows = await dialog.locator(".draft-sync-wechat-account-choice").evaluateAll((nodes) => nodes.map((node) => {
         const box = node.getBoundingClientRect(), checkbox = node.querySelector("input")!.getBoundingClientRect(), name = node.querySelector("strong")!.getBoundingClientRect();
         return { height: box.height, checkboxWidth: checkbox.width, checkboxHeight: checkbox.height, nameWidth: name.width, overflow: node.scrollWidth - node.clientWidth };

@@ -153,3 +153,16 @@ test("a partial account config fails before changing the connection or saved acc
   assert.notEqual(f.container.querySelector('[role="alert"]').textContent, "");
   assert.equal(f.container.querySelector('[role="status"]'), null);
 });
+
+
+test("first connection prioritizes config import and keeps manual credentials collapsed", async (context) => {
+  const f = await fixture(context, { empty: true });
+  const importButton = [...f.container.querySelectorAll("button")].find((button) => button.textContent === "导入本机配置");
+  assert.ok(importButton.classList.contains("primary"));
+  assert.match(f.container.querySelector(".draft-sync-wechat-import").textContent, /选择 config.env，自动连接，无需手动填写/);
+  const manual = f.container.querySelector(".draft-sync-wechat-manual");
+  assert.equal(manual.open, false);
+  assert.equal(manual.querySelector("summary").textContent, "手动输入连接口令");
+  assert.ok(manual.querySelector("#wechat-connection-password"));
+  assert.deepEqual(f.calls, []);
+});

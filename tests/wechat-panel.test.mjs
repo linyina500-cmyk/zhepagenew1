@@ -12,7 +12,7 @@ const ids = ["a".repeat(20), "b".repeat(20)];
 const accounts = ids.map((id, index) => ({ id, appId: `wx-test-${index}`, name: `测试公众号${index + 1}` }));
 const fingerprint = (draft) => createHash("sha256").update(JSON.stringify([draft.content.wechat, draft.images.map((image) => image.id)])).digest("hex");
 
-async function fixture(context) {
+async function fixture(context, options = {}) {
   const dom = installDom(); globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const filename = fileURLToPath(new URL("../app/components/WechatDraftPanel.tsx", import.meta.url));
   const nativeRequire = createRequire(filename), React = nativeRequire("react"), { createRoot } = nativeRequire("react-dom/client"), { act } = React;
@@ -51,7 +51,7 @@ async function fixture(context) {
     new Function("require", "module", "exports", output)((specifier) => {
       if (specifier === "../../lib/wechat/client") return { createWechatClient: () => client };
       if (specifier === "../../lib/wechat/contentIdentity") return { wechatContentHash: async (draft) => fingerprint(draft) };
-      if (specifier === "../../lib/wechat/deviceVault") return { loadBinding: async () => binding, listAccounts: async () => accounts, readAccountSecret: async (id) => ({ ...accounts.find((account) => account.id === id), appSecret: "private-browser-only" }) };
+      if (specifier === "../../lib/wechat/deviceVault") return { loadBinding: async () => options.unbound ? null : binding, listAccounts: async () => options.loading ? new Promise(() => {}) : accounts, readAccountSecret: async (id) => ({ ...accounts.find((account) => account.id === id), appSecret: "private-browser-only" }) };
       if (specifier === "./WechatAccountManager") return { __esModule: true, default: () => null };
       return nativeRequire(specifier);
     }, loaded, loaded.exports);
@@ -60,7 +60,7 @@ async function fixture(context) {
   const Panel = loadComponent(filename), container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   function Host() {
     const [draft, setDraft] = React.useState(saved), [working, setWorking] = React.useState(false), [error, setError] = React.useState(""); renderDraft = setDraft;
-    return React.createElement(React.Fragment, null, React.createElement(Panel, { draft, view: "browser", contentReady: true, contentChanged: false, busy: working, onSubmitted() {},
+    return React.createElement(React.Fragment, null, React.createElement(Panel, { draft, view: "browser", contentReady: options.contentReady ?? true, contentCheck: options.contentCheck ? React.createElement("section", { "aria-label": "同步前检查" }, options.contentCheck) : undefined, contentChanged: false, busy: working || options.busy, onSubmitted() {},
       runOperation: async (_label, operation) => { if (busy) return; busy = true; active = new AbortController(); setWorking(true); try { await operation(active.signal); } catch (error) { if (!active.signal.aborted && mounted) setError(error.message); } finally { busy = false; if (mounted) setWorking(false); } },
       persistReceipt: async (snapshot, receipt, signal) => { signal.throwIfAborted(); if (persistFailure) throw new Error("存档空间不足"); saved = { ...snapshot, receipts: [...snapshot.receipts.filter((item) => !(item.platform === receipt.platform && item.accountId === receipt.accountId)), receipt] }; if (mounted) setDraft(saved); return saved; },
     }), React.createElement("p", { role: "alert" }, error));
@@ -169,4 +169,65 @@ test("content identity includes original image bytes and order but ignores draft
   assert.equal(await wechatContentHash({ ...draft, id: "other", receipts: [{}] }), original);
   assert.notEqual(await wechatContentHash({ ...draft, images: [...images].reverse() }), original);
   assert.notEqual(await wechatContentHash({ ...draft, content: { wechat: { title: "新标题", body: "一\n二" } } }), original);
+});
+
+
+function mainActionHints(container) {
+  const region = container.querySelector('[aria-label="公众号操作"]');
+  return [...region.querySelectorAll("button")].map((button) => {
+    const descriptionId = button.getAttribute("aria-describedby");
+    return { text: button.textContent, disabled: button.disabled,
+      describedBy: descriptionId ? container.ownerDocument.getElementById(descriptionId)?.textContent : undefined };
+  });
+}
+
+test("selected accounts with incomplete content see their checks immediately beside the disabled actions", async (context) => {
+  const f = await fixture(context, { contentReady: false, contentCheck: "请确认这 6 张图片沿用当前比例" });
+  await f.select(0);
+  const region = f.container.querySelector('[aria-label="公众号操作"]');
+  assert.match(region.querySelector('[aria-label="同步前检查"]').textContent, /这 6 张图片/);
+  for (const action of mainActionHints(f.container)) {
+    assert.equal(action.disabled, true);
+    assert.match(action.describedBy, /请确认这 6 张图片沿用当前比例/);
+  }
+  assert.equal(f.creates.length, 0); assert.equal(f.publications.length, 0);
+});
+
+test("disabled actions explain missing selection and clear the hint once an account is selected", async (context) => {
+  const f = await fixture(context);
+  for (const action of mainActionHints(f.container)) {
+    assert.equal(action.disabled, true); assert.match(action.describedBy, /勾选至少一个公众号/);
+  }
+  await f.select(0);
+  for (const action of mainActionHints(f.container)) { assert.equal(action.disabled, false); assert.equal(action.describedBy, undefined); }
+});
+
+test("missing connection takes priority over missing selection and content", async (context) => {
+  const f = await fixture(context, { unbound: true, contentReady: false });
+  for (const action of mainActionHints(f.container)) {
+    assert.equal(action.disabled, true); assert.match(action.describedBy, /导入本机配置/);
+  }
+});
+
+test("incomplete content without a supplied check still explains why actions are disabled", async (context) => {
+  const f = await fixture(context, { contentReady: false });
+  await f.select(0);
+  for (const action of mainActionHints(f.container)) {
+    assert.equal(action.disabled, true); assert.match(action.describedBy, /完成图片和文案检查/);
+  }
+});
+
+test("busy action hint has priority over connection and selection", async (context) => {
+  const f = await fixture(context, { busy: true, unbound: true, contentReady: false });
+  for (const action of mainActionHints(f.container)) {
+    assert.equal(action.disabled, true); assert.equal(action.describedBy, "正在处理，请稍候。");
+  }
+});
+
+
+test("loading action hint has priority before connection and accounts are known", async (context) => {
+  const f = await fixture(context, { loading: true, unbound: true, contentReady: false });
+  for (const action of mainActionHints(f.container)) {
+    assert.equal(action.disabled, true); assert.equal(action.describedBy, "正在读取公众号，请稍候。");
+  }
 });

@@ -96,13 +96,20 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
   }
   return <details className="draft-sync-wechat-settings" open={!binding || !accounts.length || undefined}>
     <summary>{binding ? "添加或管理公众号" : "首次使用：连接这台电脑"}</summary>
-    <p className="draft-sync-small">账号密钥只保存在当前浏览器、当前网址。请使用同一个网址；换浏览器或清除数据后，需要重新添加。</p>
-    <div className="draft-sync-wechat-fields">
-      <div className="field-stack"><label htmlFor="wechat-connection-password">本机连接口令</label><input id="wechat-connection-password" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} placeholder={binding ? "更换口令时填写" : "填写启动工具中的连接口令"} /></div>
-      <button type="button" disabled={busy || !token.trim()} onClick={() => run("正在连接本机服务…", async (signal) => { await bind(token, signal); signal.throwIfAborted(); setFeedback("本机服务已连接，可以添加公众号。"); })}>连接本机服务</button>
-      <button type="button" disabled={busy} onClick={() => fileRef.current?.click()}>导入本机配置</button>
+    <div className="draft-sync-wechat-import">
+      <p className="draft-sync-small">选择 config.env，自动连接，无需手动填写。</p>
+      <button type="button" className={binding ? undefined : "primary"} disabled={busy} onClick={() => fileRef.current?.click()}>导入本机配置</button>
       <input ref={fileRef} type="file" accept=".env,text/plain" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) importConfig(file); }} />
     </div>
+    <details className="draft-sync-wechat-manual">
+      <summary>手动输入连接口令</summary>
+      <p className="draft-sync-small">打开 config.env，复制 WECHAT_SYNC_TOKEN 等号后的内容；如有引号，不要复制引号。</p>
+      <div className="draft-sync-wechat-fields">
+        <div className="field-stack"><label htmlFor="wechat-connection-password">本机连接口令</label><input id="wechat-connection-password" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} placeholder={binding ? "更换口令时填写" : "粘贴配置文件中的连接口令"} /></div>
+        <button type="button" disabled={busy || !token.trim()} onClick={() => run("正在连接本机服务…", async (signal) => { await bind(token, signal); signal.throwIfAborted(); setFeedback("本机服务已连接，可以添加公众号。"); })}>连接本机服务</button>
+      </div>
+    </details>
+    <p className="draft-sync-small">账号密钥只保存在当前浏览器、当前网址。请使用同一个网址；换浏览器或清除数据后，需要重新添加。</p>
     {binding && <form onSubmit={(event) => { event.preventDefault(); run("正在保存并连接公众号…", (signal) => add({ appId, appSecret: secret, name }, binding, signal)); }}>
       <h4>添加公众号</h4>
       <p className="draft-sync-small">在微信开发者平台找到 AppID 和 AppSecret，复制到下方。</p>

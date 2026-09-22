@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
 import { createWechatClient, type WechatJob, type WechatPublication } from "../../lib/wechat/client";
 import { listAccounts, loadBinding, readAccountSecret, type Binding, type LocalWechatAccount } from "../../lib/wechat/deviceVault";
@@ -12,6 +12,7 @@ type Props = {
   runOperation: (label: string, operation: (signal: AbortSignal) => Promise<void>) => Promise<void>;
   persistReceipt: (snapshot: LocalDraft, receipt: SyncReceipt, signal: AbortSignal) => Promise<LocalDraft>;
   onSubmitted: () => void;
+  contentCheck?: ReactNode;
 };
 type Result = { job?: WechatJob; publication?: WechatPublication | null; text: string; error?: boolean };
 const publicationLabels: Record<WechatPublication["status"], string> = { submitting: "正在提交发表", publishing: "微信正在处理发表", published: "已发表", failed: "发表未成功", needs_confirmation: "发表结果待确认", removed: "内容已被移除", blocked: "暂时不能发表" };
@@ -22,7 +23,7 @@ function receiptFor(job: WechatJob, previous: SyncReceipt): SyncReceipt {
   return { ...previous, draftId: job.draftId, status: confirmed ? "confirmed_by_user" : job.status === "saved" ? "saved" : job.status === "failed" ? "failed" : "needs_confirmation", message: confirmed ? previous.message : job.message };
 }
 
-export default function WechatDraftPanel({ draft, contentReady, contentChanged, busy, runOperation, persistReceipt, onSubmitted }: Props) {
+export default function WechatDraftPanel({ draft, contentReady, contentChanged, busy, runOperation, persistReceipt, onSubmitted, contentCheck }: Props) {
   const [binding, setBinding] = useState<Binding | null>(null);
   const [accounts, setAccounts] = useState<LocalWechatAccount[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -41,6 +42,10 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
     return () => { live = false; };
   }, []);
   const targets = accounts.filter((account) => selected.includes(account.id));
+  const actionHintId = useId();
+  const contentCheckId = useId();
+  const actionHint = busy ? "正在处理，请稍候。" : loading ? "正在读取公众号，请稍候。" : !binding ? "请先导入本机配置，连接这台电脑。" : !targets.length ? "请先勾选至少一个公众号。" : !contentReady && !contentCheck ? "请先完成图片和文案检查，再继续。" : "";
+  const actionDescription = actionHint ? actionHintId : !contentReady ? contentCheckId : undefined;
   const receiptForAccount = (accountId: string, snapshot = draft) => snapshot.receipts.find((receipt) => receipt.platform === "wechat" && receipt.accountId === accountId && receipt.jobId);
   function result(accountId: string, next: Partial<Result>) { setResults((current) => ({ ...current, [accountId]: { ...current[accountId], text: "", ...next } })); }
   function changedAccounts(nextBinding: Binding | null, nextAccounts: LocalWechatAccount[], addedId?: string) {
@@ -185,7 +190,9 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
     </section>
     <section className="draft-sync-wechat-actions" aria-label="公众号操作">
       <p>已选 {targets.length} 个公众号 · {draft.images.length} 张图片{contentChanged && draft.receipts.some((receipt) => receipt.platform === "wechat") ? " · 当前内容有更新" : ""}</p>
-      <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || loading || !binding || !targets.length || !contentReady} onClick={() => batch(false)}>同步到草稿箱</button><button type="button" className="primary" disabled={busy || loading || !binding || !targets.length || !contentReady} onClick={() => setConfirmation({ draft, accounts: targets })}>立即发布</button></div>
+      {contentCheck && <div id={contentCheckId}>{contentCheck}</div>}
+      {actionHint && <p id={actionHintId} className="draft-sync-small" role="status">{actionHint}</p>}
+      <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || loading || !binding || !targets.length || !contentReady} aria-describedby={actionDescription} onClick={() => batch(false)}>同步到草稿箱</button><button type="button" className="primary" disabled={busy || loading || !binding || !targets.length || !contentReady} aria-describedby={actionDescription} onClick={() => setConfirmation({ draft, accounts: targets })}>立即发布</button></div>
       <p className="draft-sync-small">需要定时发布？先存草稿，再去公众号后台设置时间。</p>
       <a href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer">打开公众号后台</a>
     </section>
