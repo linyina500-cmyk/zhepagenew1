@@ -4,7 +4,7 @@ import { createHash, webcrypto } from "node:crypto";
 Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
 import { loadDomModule } from "./helpers/load-dom-module.mjs";
 
-const { createWechatClient, WechatUnconfirmedError } = loadDomModule("lib/wechat/client.ts");
+const { createWechatClient, WechatUnconfirmedError, WechatRequestError } = loadDomModule("lib/wechat/client.ts");
 const id = "76f6dbe5-a12d-4fe2-8ee7-35e6e988ab8e";
 const appId = "wx-test-account";
 const accountId = createHash("sha256").update(appId).digest("hex").slice(0, 20);
@@ -22,7 +22,53 @@ test("connection checks are read-only and credentials stay in the Authorization 
   assert.equal(calls[0].options.method, "GET"); assert.equal(calls[0].options.body, undefined);
   assert.deepEqual(calls[0].options.headers, { Authorization: "Bearer connection-password" });
   assert.equal(calls[0].options.redirect, "error");
-  await assert.rejects(createWechatClient("pass", async () => reply({ error: "公众号同步服务尚未配置" }, 503)).getConnection(signal()), /尚未配置/);
+});
+
+test("connection failures explain how to reconnect and retain HTTP status for recovery", async () => {
+  for (const status of [401, 502, 503]) {
+    const expected = status === 401 ? "连接信息已失效，请在连接设置中重新连接这台电脑。" : "暂时连不上本机助手。请先打开折页同步助手，再在连接设置中点击连接这台电脑。";
+    for (const response of [() => reply({ error: "连接口令错误或服务回应不完整" }, status), () => new Response("upstream unavailable", { status })]) {
+      let calls = 0;
+      const client = createWechatClient("pass", async () => { calls++; return response(); });
+      await assert.rejects(client.getConnection(signal()), (error) => error instanceof WechatRequestError && error.status === status && error.message === expected);
+      assert.equal(calls, 1, "connection checks do not retry automatically");
+    }
+  }
+});
+
+test("network and malformed connection responses direct users back to the local assistant", async () => {
+  const responses = [
+    async () => { throw new TypeError("Failed to fetch"); },
+    async () => { throw new Error("socket closed"); },
+    async () => new Response("invalid json"),
+    ...[null, [], {}, { deviceId: "" }, { deviceId: "device", busy: "yes" }].map((value) => async () => reply(value)),
+  ];
+  for (const fetcher of responses) {
+    await assert.rejects(createWechatClient("pass", fetcher).getConnection(signal()), (error) => error.message === "暂时连不上本机助手。请先打开折页同步助手，再在连接设置中点击连接这台电脑。");
+  }
+});
+
+test("connection checks preserve other HTTP failures and do not rewrite job errors", async () => {
+  for (const status of [403, 404, 409]) {
+    await assert.rejects(createWechatClient("pass", async () => reply({ error: "原有任务保护提示" }, status)).getConnection(signal()), (error) => error instanceof WechatRequestError && error.status === status && error.message === "原有任务保护提示");
+  }
+  for (const status of [401, 502, 503]) {
+    await assert.rejects(createWechatClient("pass", async () => reply({ error: "原任务读取失败，请勿重复提交" }, status)).getJob(id, accountId, signal()), (error) => error instanceof WechatRequestError && error.status === status && error.message === "原任务读取失败，请勿重复提交");
+  }
+});
+
+test("connection cancellation preserves its reason without a reconnect warning", async () => {
+  const reason = new Error("用户已关闭窗口");
+  const stopped = new AbortController(); stopped.abort(reason);
+  let calls = 0;
+  await assert.rejects(createWechatClient("pass", async () => { calls++; return reply({ deviceId: "device" }); }).getConnection(stopped.signal), (error) => error === reason);
+  assert.equal(calls, 0);
+  const controller = new AbortController();
+  const waiting = createWechatClient("pass", async (_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }))).getConnection(controller.signal);
+  controller.abort(reason);
+  await assert.rejects(waiting, (error) => error === reason);
+  const abort = new DOMException("request aborted", "AbortError");
+  await assert.rejects(createWechatClient("pass", async () => { throw abort; }).getConnection(signal()), (error) => error === abort);
 });
 
 test("create sends complete original images in order and exact independent copy once", async () => {

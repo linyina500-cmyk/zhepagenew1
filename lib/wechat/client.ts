@@ -107,9 +107,22 @@ export function createWechatClient(password: string, fetcher: typeof fetch = fet
   }
   return {
     async getConnection(signal: AbortSignal): Promise<{ deviceId: string; busy?: boolean }> {
-      const data = await request("/connection", signal);
-      if (!nonempty(data.deviceId) || (data.busy !== undefined && typeof data.busy !== "boolean")) throw new Error("本机服务未返回有效设备状态，请重新连接。");
-      return { deviceId: data.deviceId, ...(typeof data.busy === "boolean" ? { busy: data.busy } : {}) };
+      const unavailable = "暂时连不上本机助手。请先打开折页同步助手，再在连接设置中点击连接这台电脑。";
+      try {
+        const data = await request("/connection", signal);
+        signal.throwIfAborted();
+        if (!nonempty(data.deviceId) || (data.busy !== undefined && typeof data.busy !== "boolean")) throw new Error(unavailable);
+        return { deviceId: data.deviceId, ...(typeof data.busy === "boolean" ? { busy: data.busy } : {}) };
+      } catch (error) {
+        signal.throwIfAborted();
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        if (error instanceof WechatRequestError) {
+          if (error.status === 401) throw new WechatRequestError("连接信息已失效，请在连接设置中重新连接这台电脑。", error.status);
+          if (error.status === 502 || error.status === 503) throw new WechatRequestError(unavailable, error.status);
+          throw error;
+        }
+        throw new Error(unavailable);
+      }
     },
     async connectAccount(input: { deviceId: string; appId: string; appSecret: string; name: string }, signal: AbortSignal): Promise<WechatAccount> {
       const expectedId = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input.appId))), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 20);
