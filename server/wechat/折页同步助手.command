@@ -24,8 +24,5 @@ if [ -z "$NODE_BIN" ] || ! "$NODE_BIN" -e 'const [major, minor] = process.versio
   exit 1
 fi
 
-printf '正在启动折页同步助手。同步期间请保持这个窗口打开。\n'
-printf '启动后回到折页网页，点击“连接这台电脑”，无需寻找配置文件或填写口令。\n'
-# The supervisor owns service/tunnel startup and shutdown. Only its file path
-# is passed to Node; no credential is loaded or printed by this shell entry.
-exec "$NODE_BIN" "$SCRIPT_DIR/local-start.mjs"
+# macOS owns the background supervisor. This launcher may exit independently.
+exec "$NODE_BIN" "$SCRIPT_DIR/local-control.mjs" "${1:-start}"
