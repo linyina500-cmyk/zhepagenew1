@@ -1,35 +1,28 @@
 "use client";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
 import { createXhsClient, type XhsAccount, type XhsJob } from "../../lib/xiaohongshu/client";
 import { createWechatClient } from "../../lib/wechat/client";
-import { loadBinding, saveBinding, type Binding } from "../../lib/wechat/deviceVault";
+import type { Binding } from "../../lib/wechat/deviceVault";
 type Props = {
   draft: LocalDraft; contentReady: boolean; contentCheck?: ReactNode; contentChanged: boolean; busy: boolean;
+  binding: Binding;
   runOperation: (label: string, operation: (signal: AbortSignal) => Promise<void>) => Promise<void>;
   persistReceipt: (draft: LocalDraft, receipt: SyncReceipt, signal: AbortSignal) => Promise<LocalDraft>;
   onSubmitted: () => void;
 };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "尚未完成，请读取状态并核对专用窗口。";
-export default function XiaohongshuDraftPanel({ draft, contentReady, contentCheck, contentChanged, busy, runOperation, persistReceipt, onSubmitted }: Props) {
-  const [binding, setBinding] = useState<Binding | null>(null), [token, setToken] = useState("");
+export default function XiaohongshuDraftPanel({ draft, contentReady, contentCheck, contentChanged, busy, runOperation, persistReceipt, onSubmitted, binding }: Props) {
   const [account, setAccount] = useState<XhsAccount | null>(null), [job, setJob] = useState<XhsJob | null>(null);
   const [feedback, setFeedback] = useState("");
   const [checked, setChecked] = useState(false), [allowNew, setAllowNew] = useState(false);
   const receipt = draft.receipts.find((item) => item.platform === "xiaohongshu" && item.accountId === account?.id);
   const pending = receipt?.status === "needs_confirmation" && !job?.acknowledged;
-  useEffect(() => {
-    let active = true;
-    void loadBinding().then((value) => { if (active) setBinding(value); }).catch((error) => { if (active) setFeedback(errorText(error)); });
-    return () => { active = false; };
-  }, []);
   async function client(signal: AbortSignal) {
-    const secret = binding?.connectionToken || token.trim();
+    const secret = binding.connectionToken;
     const connection = await createWechatClient(secret).getConnection(signal);
-    if (binding && connection.deviceId !== binding.deviceId) throw new Error("连接的不是原来绑定的电脑，请先检查本机服务地址。");
-    const next = { deviceId: connection.deviceId, connectionToken: secret };
-    if (!binding) await saveBinding(next);
-    signal.throwIfAborted(); setBinding(next); setToken("");
+    if (connection.deviceId !== binding.deviceId) throw new Error("连接的不是原来绑定的电脑，请在连接设置中核对。");
+    signal.throwIfAborted();
     return createXhsClient(secret);
   }
   function run(label: string, operation: (signal: AbortSignal) => Promise<void>) {
@@ -72,11 +65,10 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChec
     });
   }
   return <div className="draft-sync-xhs">
-    <section className="draft-sync-service" aria-label="小红书本机连接"><h3>连接小红书</h3>
-      <p>首次使用先扫码登录，再检查账号。以后可直接检查账号并存草稿。</p>
-      {!binding && <div className="field-stack"><label htmlFor="xhs-connection-token">本机连接口令</label><input id="xhs-connection-token" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} /><small>已连接公众号时，无需再次填写。</small></div>}
-      <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || !(binding || token.trim())} onClick={() => run("正在打开小红书专用窗口…", async (signal) => { await (await client(signal)).openLogin(signal); signal.throwIfAborted(); setAccount(null); setFeedback("请在本机专用窗口扫码，完成后点击“检查小红书账号”。"); })}>打开专用窗口登录</button>
-      <button type="button" disabled={busy || !(binding || token.trim())} onClick={() => run("正在检查小红书账号…", async (signal) => { const value = await (await client(signal)).getAccount(signal); signal.throwIfAborted(); setAccount(value); setJob(null); setAllowNew(false); })}>检查小红书账号</button></div>
+    <section className="draft-sync-service" aria-label="小红书本机连接"><h3>{account ? "小红书账号" : "登录小红书"}</h3>
+      <p>{account ? "已确认账号，可以把图片存到草稿箱。" : "打开登录窗口扫码，完成后点击“我已登录”。"}</p>
+      <div className="draft-sync-confirm-actions"><button type="button" className={account ? undefined : "primary"} disabled={busy} onClick={() => run("正在打开小红书专用窗口…", async (signal) => { await (await client(signal)).openLogin(signal); signal.throwIfAborted(); setAccount(null); setFeedback("请在打开的窗口扫码，再回到这里点击“我已登录”。"); })}>{account ? "切换账号" : "打开登录窗口"}</button>
+      <button type="button" disabled={busy} onClick={() => run("正在确认小红书账号…", async (signal) => { const value = await (await client(signal)).getAccount(signal); signal.throwIfAborted(); setAccount(value); setJob(null); setAllowNew(false); })}>{account ? "刷新账号" : "我已登录"}</button></div>
       {account && <p role="status">已连接：<strong>{account.name}</strong></p>}
     </section>
     {receipt && <section className="draft-sync-results" aria-label="小红书同步结果"><h3>{contentChanged ? "上次结果 · 当前内容有更新" : "小红书草稿状态"}</h3>
@@ -85,11 +77,11 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChec
       {pending && <><p>保存结果尚未确认。请在小红书窗口打开草稿，检查文字和全部图片。</p><label className="draft-sync-check"><input type="checkbox" disabled={busy} checked={checked} onChange={(event) => setChecked(event.target.checked)} /><span>我已检查草稿，并保存或退出了当前编辑</span></label><button type="button" disabled={busy || !checked} onClick={() => read("acknowledge")}>结束本次任务</button></>}
       {job?.acknowledged && <p>已结束本次任务。保存结果以小红书草稿箱为准。</p>}
     </section>}
-    <section className="draft-sync-service"><h3>保存到小红书</h3><p>共 {draft.images.length} 张图片，按当前顺序存入草稿箱。</p>
+    {account && <section className="draft-sync-service"><h3>保存到小红书</h3><p>共 {draft.images.length} 张图片，按当前顺序存入草稿箱。</p>
       {contentCheck}
       {receipt && !pending && <label className="draft-sync-check"><input type="checkbox" checked={allowNew} disabled={busy} onChange={(event) => setAllowNew(event.target.checked)} /><span>另存一份新草稿，保留上次内容</span></label>}
       <button type="button" className="primary" disabled={busy || !account || !contentReady || pending || Boolean(receipt && !allowNew)} onClick={submit}>同步到小红书草稿箱</button>
-    </section>
+    </section>}
     {feedback && <p className="draft-sync-message" role="status">{feedback}</p>}
   </div>;
 }

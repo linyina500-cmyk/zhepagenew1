@@ -53,7 +53,7 @@ async function main() {
   }
   if (!cloudflared) throw new Error("尚未安装 Cloudflare Tunnel，请先按“本机使用说明.md”完成安装。");
 
-  console.info("正在启动公众号草稿服务。同步期间请保持此窗口打开、电脑联网且不休眠。");
+  console.info("正在启动折页同步助手。同步期间请保持此窗口打开、电脑联网且不休眠。");
   const service = launch(process.execPath, ["--env-file", configPath, resolve(serviceDir, "start.mjs")], {
     ...cleanEnv, WECHAT_HOST: "127.0.0.1", WECHAT_PORT: "8788",
   });
@@ -62,9 +62,9 @@ async function main() {
   service.stderr.on("data", (chunk) => {
     serviceError = (serviceError + chunk.toString()).slice(-2_000);
     // Recognize one controlled startup failure, never forward raw diagnostics.
-    if (serviceError.includes("已被占用")) stop("端口 8788 已被占用，请先关闭之前的公众号启动窗口，再重新启动。", true);
+    if (serviceError.includes("已被占用")) stop("端口 8788 或 8789 已被占用，请先关闭之前的启动窗口，再重新启动。", true);
   });
-  startupTimer = setTimeout(() => stop("本机服务未能启动，请检查配置和端口 8788 是否被占用。", true), 20_000);
+  startupTimer = setTimeout(() => stop("本机服务未能启动，请检查配置和端口 8788、8789 是否被占用。", true), 20_000);
   service.stdout.on("data", (chunk) => {
     serviceOutput = (serviceOutput + chunk.toString()).slice(-2_000);
     if (tunnel || stopping || !serviceOutput.includes("公众号草稿服务已启动")) return;
@@ -81,9 +81,8 @@ async function main() {
       clearTimeout(tunnelTimer);
       void writeFile(publicUrlPath, `${url}\n`, { mode: 0o600 }).then(() => {
         if (stopping) return;
-        console.info(`本次测试服务地址：${url}`);
-        console.info("地址已保存到本机 tunnel-url.txt。首次使用需把它接入折页测试网页，重启后地址会改变。");
-        console.info("地址生成不代表微信连接已通过；还需配置微信 IP 白名单，并在折页检查公众号连接。");
+        console.info("折页同步助手已就绪。请回到折页网页，点击“连接这台电脑”。");
+        console.info("连接信息自动保存在当前浏览器，无需选择配置文件或填写口令。");
         console.info("完成同步后按 Control+C 关闭；如有正在上传的任务，请等待保存结束。");
       }).catch(() => stop("无法保存测试地址，请检查本机配置目录是否可写。", true));
     };

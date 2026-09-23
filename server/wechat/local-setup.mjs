@@ -47,12 +47,12 @@ async function setup() {
   const ask = (prompt) => readline.question(prompt, { signal: controller.signal });
 
   try {
-    process.stdout.write("公众号同步 · 本机连接配置\n这里只生成本机连接口令。AppSecret 请在折页网页中添加，仅在该浏览器加密保存。\n\n");
+    process.stdout.write("折页同步助手 · 首次准备\n这里准备这台电脑的连接。公众号资料请在折页网页中添加，仅在该浏览器加密保存。\n\n");
     if (existing) {
-      process.stdout.write("已有配置。重新配置会更换设备连接口令，原浏览器需要先移除账号再重新绑定；草稿任务记录会保留。\n");
-      const choice = await ask("输入 1 重新配置；输入 2 或直接回车仅显示位置：");
+      process.stdout.write("这台电脑已准备好。重新配置会更换连接，原浏览器需要先移除账号再重新绑定；草稿任务记录会保留。\n");
+      const choice = await ask("直接回车保留现有连接；只有需要重置时才输入 1：");
       if (choice !== "1") {
-        process.stdout.write(`未修改已有配置。私密文件位置：\n${configPath}\n`);
+        process.stdout.write("已保留现有连接。双击“折页同步助手.command”，再回到折页网页点击“连接这台电脑”。\n");
         return;
       }
     }
@@ -71,7 +71,7 @@ async function setup() {
       if (existing) await rename(temporaryPath, configPath);
       else await link(temporaryPath, configPath); // Never replace a file created by another setup window.
     } finally { await unlink(temporaryPath).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
-    process.stdout.write(`\n配置已保存，尚未连接公众号或上传内容。\n私密文件位置：\n${configPath}\n\n在本机打开该文件，复制 WECHAT_SYNC_TOKEN 等号后的连接口令，粘贴到折页的“本机连接口令”。请勿发送到聊天。\n下一步双击“启动公众号.command”。\n`);
+    process.stdout.write("\n这台电脑已准备好，尚未上传任何内容。\n下一步双击“折页同步助手.command”，再回到折页网页点击“连接这台电脑”。无需寻找配置文件或填写口令。\n");
   } finally { readline.close(); }
 }
 

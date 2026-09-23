@@ -94,6 +94,19 @@
 .draft-sync-step-heading h3 { font-size: 20px; }
 .draft-sync-step-heading h3:focus { outline: none; }
 .draft-sync-step-heading p, .draft-sync-result-guidance { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.draft-sync-connection { margin: 0 0 18px; padding: 24px; border: 1px solid #dfdad3; border-radius: 12px; background: #faf9f7; }
+.draft-sync-connection > h3 { font-size: 18px; }
+.draft-sync-connection > .draft-sync-small { margin: 10px 0 18px; font-size: 12px; }
+.draft-sync-connection .primary { min-height: 44px; padding: 11px 24px; font-size: 13px; }
+.draft-sync-connection summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; }
+.draft-sync-connection-help { margin-top: 18px; }
+.draft-sync-connection-saved { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+.draft-sync-connection:has(.draft-sync-connection-saved) { padding: 13px 16px; border-color: #dce7dd; background: #f7faf7; }
+.draft-sync-connection-saved > strong { display: flex; align-items: center; gap: 8px; color: #426c4d; font-size: 12px; }
+.draft-sync-connection-saved > strong::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #64926b; }
+.draft-sync-connection-saved > details { max-width: 100%; }
+.draft-sync-connection-saved > details[open] { flex-basis: 100%; }
+.draft-sync-connection .draft-sync-wechat-confirmation { margin-top: 18px; padding: 18px; border: 1px solid #e1c9b1; border-radius: 10px; background: #fffaf3; font-size: 12px; line-height: 1.8; }
 .draft-sync-service { padding: 20px; border: 1px solid #dbcbbc; border-radius: 12px; background: #fbf8f3; }
 .draft-sync-service > p { color: #625b55; font-size: 12px; line-height: 1.85; }
 .draft-sync-service.connected { padding: 16px 18px; border-color: #d0e1d3; background: #f6faf6; }
@@ -127,6 +140,7 @@
   .draft-sync-steps { gap: 4px; padding: 10px 16px; }
   .draft-sync-dialog .draft-sync-steps button { gap: 6px; padding: 7px 4px; font-size: 11px; }
   .draft-sync-service { padding: 16px; }
+  .draft-sync-connection { padding: 20px 16px; }
   .draft-sync-image-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .draft-sync-archive { padding: 13px; }
   .draft-sync-footer { flex-direction: column; align-items: stretch; padding: 12px 16px; gap: 11px; }
@@ -171,10 +185,6 @@
 .draft-sync-wechat .draft-sync-wechat-settings { padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: #faf9f7; }
 .draft-sync-wechat-settings form { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .draft-sync-wechat-settings h4 { margin: 0; font-size: 13px; }
-.draft-sync-wechat-import { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 16px 0; }
-.draft-sync-wechat-import > p { flex: 1 1 240px; margin: 0; }
-.draft-sync-wechat-import > .primary { min-height: 40px; padding: 10px 18px; font-size: 12px; }
-.draft-sync-wechat .draft-sync-wechat-settings .draft-sync-wechat-manual > summary { color: var(--muted); font-size: 12px; font-weight: 500; }
 
 .draft-sync-dialog .draft-sync-reset-connection { display: block; margin-top: 18px; padding: 4px 0; min-height: 28px; border-color: transparent; color: var(--muted); font-size: 11px; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
 .draft-sync-wechat .draft-sync-wechat-settings summary { cursor: pointer; font-size: 14px; font-weight: 700; }

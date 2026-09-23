@@ -51,7 +51,7 @@ async function fixture(context, options = {}) {
     new Function("require", "module", "exports", output)((specifier) => {
       if (specifier === "../../lib/wechat/client") return { createWechatClient: () => client };
       if (specifier === "../../lib/wechat/contentIdentity") return { wechatContentHash: async (draft) => fingerprint(draft) };
-      if (specifier === "../../lib/wechat/deviceVault") return { loadBinding: async () => options.unbound ? null : binding, listAccounts: async () => options.loading ? new Promise(() => {}) : accounts, readAccountSecret: async (id) => ({ ...accounts.find((account) => account.id === id), appSecret: "private-browser-only" }) };
+      if (specifier === "../../lib/wechat/deviceVault") return { readAccountSecret: async (id) => ({ ...accounts.find((account) => account.id === id), appSecret: "private-browser-only" }) };
       if (specifier === "./WechatAccountManager") return { __esModule: true, default: () => null };
       return nativeRequire(specifier);
     }, loaded, loaded.exports);
@@ -60,7 +60,7 @@ async function fixture(context, options = {}) {
   const Panel = loadComponent(filename), container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   function Host() {
     const [draft, setDraft] = React.useState(saved), [working, setWorking] = React.useState(false), [error, setError] = React.useState(""); renderDraft = setDraft;
-    return React.createElement(React.Fragment, null, React.createElement(Panel, { draft, view: "browser", contentReady: options.contentReady ?? true, contentCheck: options.contentCheck ? React.createElement("section", { "aria-label": "同步前检查" }, options.contentCheck) : undefined, contentChanged: false, busy: working || options.busy, onSubmitted() {},
+    return React.createElement(React.Fragment, null, React.createElement(Panel, { draft, binding, accounts: options.accounts ?? accounts, onAccountsChange() {}, view: "browser", contentReady: options.contentReady ?? true, contentCheck: options.contentCheck ? React.createElement("section", { "aria-label": "同步前检查" }, options.contentCheck) : undefined, contentChanged: false, busy: working || options.busy, onSubmitted() {},
       runOperation: async (_label, operation) => { if (busy) return; busy = true; active = new AbortController(); setWorking(true); try { await operation(active.signal); } catch (error) { if (!active.signal.aborted && mounted) setError(error.message); } finally { busy = false; if (mounted) setWorking(false); } },
       persistReceipt: async (snapshot, receipt, signal) => { signal.throwIfAborted(); if (persistFailure) throw new Error("存档空间不足"); saved = { ...snapshot, receipts: [...snapshot.receipts.filter((item) => !(item.platform === receipt.platform && item.accountId === receipt.accountId)), receipt] }; if (mounted) setDraft(saved); return saved; },
     }), React.createElement("p", { role: "alert" }, error));
@@ -202,11 +202,12 @@ test("disabled actions explain missing selection and clear the hint once an acco
   for (const action of mainActionHints(f.container)) { assert.equal(action.disabled, false); assert.equal(action.describedBy, undefined); }
 });
 
-test("missing connection takes priority over missing selection and content", async (context) => {
-  const f = await fixture(context, { unbound: true, contentReady: false });
+test("a bound browser without public accounts cannot upload or publish", async (context) => {
+  const f = await fixture(context, { accounts: [] });
   for (const action of mainActionHints(f.container)) {
-    assert.equal(action.disabled, true); assert.match(action.describedBy, /导入本机配置/);
+    assert.equal(action.disabled, true); assert.match(action.describedBy, /勾选至少一个公众号/);
   }
+  assert.equal(f.creates.length, 0); assert.equal(f.publications.length, 0);
 });
 
 test("incomplete content without a supplied check still explains why actions are disabled", async (context) => {
@@ -217,17 +218,9 @@ test("incomplete content without a supplied check still explains why actions are
   }
 });
 
-test("busy action hint has priority over connection and selection", async (context) => {
-  const f = await fixture(context, { busy: true, unbound: true, contentReady: false });
+test("busy action hint has priority over account selection", async (context) => {
+  const f = await fixture(context, { busy: true, contentReady: false });
   for (const action of mainActionHints(f.container)) {
     assert.equal(action.disabled, true); assert.equal(action.describedBy, "正在处理，请稍候。");
-  }
-});
-
-
-test("loading action hint has priority before connection and accounts are known", async (context) => {
-  const f = await fixture(context, { loading: true, unbound: true, contentReady: false });
-  for (const action of mainActionHints(f.container)) {
-    assert.equal(action.disabled, true); assert.equal(action.describedBy, "正在读取公众号，请稍候。");
   }
 });

@@ -4,165 +4,98 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import ts from "typescript";
-import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
+import { installDom } from "./helpers/load-dom-module.mjs";
 
-const { WechatRequestError } = loadDomModule("lib/wechat/client.ts");
-const { parseLocalWechatConfig } = loadDomModule("lib/wechat/deviceVault.ts");
-const resetText = "重置本机连接";
-const confirmText = "确认清除本机公众号绑定";
-
-async function fixture(context, { empty = false } = {}) {
+async function fixture(context, { empty = false, unbound = false, busy = false } = {}) {
   const dom = installDom(); globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const filename = fileURLToPath(new URL("../app/components/WechatAccountManager.tsx", import.meta.url));
   const nativeRequire = createRequire(filename), React = nativeRequire("react"), { act } = React, { createRoot } = nativeRequire("react-dom/client");
-  const calls = []; let connection = async () => ({ deviceId: "old-device", busy: false }), disconnect = async () => {}, active;
-  let currentBinding = { deviceId: "old-device", connectionToken: "old-token" }, currentAccounts = ["a", "b"].map((value) => ({ id: value.repeat(20), appId: `wx-${value}`, name: `公众号${value}` }));
-  if (empty) { currentBinding = null; currentAccounts = []; }
-  const client = { connectAccount: async (input) => { calls.push("connect-account"); return { id: "c".repeat(20), appId: input.appId, name: input.name }; }, getConnection: async () => { calls.push("connection"); return connection(); }, disconnectAccount: async (id) => { calls.push(`disconnect:${id}`); await disconnect(id); } };
+  const calls = []; let connection = async () => ({ deviceId: "local-device", busy: false }), active, addedId;
+  const binding = unbound ? null : { deviceId: "local-device", connectionToken: "private-token" };
+  let accounts = empty ? [] : ["a", "b"].map((value) => ({ id: value.repeat(20), appId: `wx-${value}`, name: `公众号${value}` }));
+  const client = {
+    getConnection: async () => { calls.push("connection"); return connection(); },
+    connectAccount: async () => { calls.push("connect-account"); },
+    disconnectAccount: async (id) => { calls.push(`disconnect:${id}`); },
+  };
   const { outputText } = ts.transpileModule(readFileSync(filename, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } });
   const loaded = { exports: {} };
   new Function("require", "module", "exports", outputText)((specifier) => {
-    if (specifier === "../../lib/wechat/client") return { createWechatClient: () => client, WechatRequestError };
+    if (specifier === "../../lib/wechat/client") return { createWechatClient: () => client };
     if (specifier === "../../lib/wechat/deviceVault") return {
-      clearDeviceVault: async () => { calls.push("clear-vault"); },
-      parseLocalWechatConfig,
-      saveBinding: async () => { calls.push("save-binding"); },
-      listAccounts: async () => currentAccounts,
-      saveAccount: async (input) => {
-        calls.push("save-account");
-        const account = { id: "c".repeat(20), appId: input.appId, name: input.name };
-        currentAccounts = [...currentAccounts, account];
-        return account;
-      },
+      listAccounts: async () => accounts,
+      saveAccount: async (input) => { calls.push("save-account"); const account = { id: "c".repeat(20), appId: input.appId, name: input.name }; accounts = [...accounts, account]; return account; },
+      removeAccount: async (id) => { calls.push(`remove:${id}`); accounts = accounts.filter((account) => account.id !== id); },
     };
     return nativeRequire(specifier);
   }, loaded, loaded.exports);
   const Manager = loaded.exports.default, container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   function Host() {
-    const [binding, setBinding] = React.useState(currentBinding), [accounts, setAccounts] = React.useState(currentAccounts), [busy, setBusy] = React.useState(false), [error, setError] = React.useState("");
-    return React.createElement(React.Fragment, null, React.createElement(Manager, { binding, accounts, busy, onChange(next, items) { currentBinding = next; currentAccounts = items; setBinding(next); setAccounts(items); },
-      runOperation: async (_label, operation) => { active = new AbortController(); setBusy(true); setError(""); try { await operation(active.signal); } catch (error) { if (!active.signal.aborted) setError(error.message); } finally { setBusy(false); } },
+    const [items, setItems] = React.useState(accounts), [working, setWorking] = React.useState(busy), [error, setError] = React.useState("");
+    return React.createElement(React.Fragment, null, React.createElement(Manager, { binding, accounts: items, busy: working, onChange(nextBinding, nextAccounts, nextId) { assert.deepEqual(nextBinding, binding); accounts = nextAccounts; addedId = nextId; setItems(nextAccounts); },
+      runOperation: async (_label, operation) => { active = new AbortController(); setWorking(true); setError(""); try { await operation(active.signal); } catch (error) { if (!active.signal.aborted) setError(error.message); } finally { setWorking(false); } },
     }), React.createElement("p", { role: "alert" }, error));
   }
   await act(async () => root.render(React.createElement(Host)));
-  async function click(text) {
-    const button = [...container.querySelectorAll("button")].find((node) => node.textContent === text);
-    assert.ok(button, `visible action: ${text}`); assert.equal(button.disabled, false, `enabled action: ${text}`);
-    await act(async () => button.click());
-  }
+  const button = (text) => [...container.querySelectorAll("button")].find((node) => (node.getAttribute("aria-label") || node.textContent) === text);
   context.after(async () => { active?.abort(); await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = false; });
-  return { container, calls, click, act, get binding() { return currentBinding; }, get accounts() { return currentAccounts; }, set connection(value) { connection = value; }, set disconnect(value) { disconnect = value; },
-    acknowledgeStopped: () => act(async () => { container.querySelector('[aria-label="清除本机公众号绑定"] input[type="checkbox"]').click(); }),
+  return { container, calls, button, act, get accounts() { return accounts; }, get addedId() { return addedId; }, set connection(value) { connection = value; },
+    click: async (text) => { const node = button(text); assert.ok(node); assert.equal(node.disabled, false); await act(async () => node.click()); },
+    fill: async (id, value) => { const input = container.querySelector(`#${id}`); await act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set.call(input, value); input.dispatchEvent(new dom.window.Event("input", { bubbles: true })); }); },
+    submit: () => act(async () => container.querySelector("form").dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }))),
     abort: () => active.abort(),
-    importConfig: async (contents) => {
-      const input = container.querySelector('input[type="file"]');
-      Object.defineProperty(input, "files", { configurable: true, value: [new File([contents], "config.env", { type: "text/plain" })] });
-      await act(async () => input.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
-    },
   };
 }
 
-test("recovery needs confirmation and disconnects every idle account before clearing only the vault", async (context) => {
-  const f = await fixture(context); await f.click(resetText);
-  assert.deepEqual(f.calls, []); assert.match(f.container.textContent, /海报、图片和同步记录会保留/);
-  await f.click("取消清除"); assert.deepEqual(f.calls, []);
-  await f.click(resetText); await f.click(confirmText);
-  assert.deepEqual(f.calls, ["connection", `disconnect:${"a".repeat(20)}`, `disconnect:${"b".repeat(20)}`, "clear-vault"]);
-  assert.equal(f.binding, null); assert.deepEqual(f.accounts, []);
+test("account manager only presents account settings and defaults existing accounts to collapsed", async (context) => {
+  const f = await fixture(context);
+  const details = f.container.querySelector("details");
+  assert.equal(details.open, false); assert.equal(details.querySelector("summary").textContent, "管理公众号");
+  assert.equal(f.container.querySelector('input[type="file"]'), null);
+  assert.equal(f.container.querySelector("#wechat-connection-password"), null);
+  assert.doesNotMatch(f.container.textContent, /重置本机连接|选择连接文件|private-token/);
 });
 
-test("an unreachable old connection requires explicit shutdown acknowledgment and a fresh check", async (context) => {
-  const f = await fixture(context); f.connection = async () => { throw new WechatRequestError("旧口令失效", 401); };
-  await f.click(resetText); await f.click(confirmText);
-  assert.deepEqual(f.calls, ["connection"]); assert.match(f.container.textContent, /退出服务时清除/);
-  const confirm = [...f.container.querySelectorAll("button")].find((button) => button.textContent === confirmText);
-  assert.equal(confirm.disabled, true); assert.equal(f.accounts.length, 2);
-  await f.acknowledgeStopped(); await f.click(confirmText);
-  assert.deepEqual(f.calls, ["connection", "connection", "clear-vault"]); assert.equal(f.binding, null);
+test("new account form is open and reports the added id after saving and connecting", async (context) => {
+  const f = await fixture(context, { empty: true });
+  assert.equal(f.container.querySelector("details").open, true);
+  await f.fill("wechat-account-name", "新增测试公众号"); await f.fill("wechat-account-appid", "wx-add-test"); await f.fill("wechat-account-secret", "private-account-secret");
+  assert.equal(f.button("保存并连接公众号").disabled, false);
+  await f.submit();
+  assert.deepEqual(f.calls, ["connection", "save-account", "connect-account"]);
+  assert.equal(f.accounts[0].name, "新增测试公众号"); assert.equal(f.addedId, "c".repeat(20));
+  assert.equal(f.container.querySelector("#wechat-account-secret").value, "");
 });
 
-test("changed device identity follows the shutdown-confirmed recovery path", async (context) => {
-  const f = await fixture(context); f.connection = async () => ({ deviceId: "new-device" });
-  await f.click(resetText); await f.click(confirmText);
-  assert.equal(f.calls.includes("clear-vault"), false);
-  await f.acknowledgeStopped(); await f.click(confirmText);
-  assert.equal(f.calls.at(-1), "clear-vault");
-  assert.equal(f.calls.some((call) => call.startsWith("disconnect:")), false, "never disconnect an unrelated device");
+test("removing an account disconnects the current device before removing browser credentials", async (context) => {
+  const f = await fixture(context); await f.click("移除 公众号a");
+  assert.deepEqual(f.calls, ["connection", `disconnect:${"a".repeat(20)}`, `remove:${"a".repeat(20)}`]);
+  assert.deepEqual(f.accounts.map((account) => account.name), ["公众号b"]);
 });
 
-test("known busy tasks block recovery even after the user acknowledged an offline service", async (context) => {
-  const f = await fixture(context); f.connection = async () => { throw new Error("offline"); };
-  await f.click(resetText); await f.click(confirmText); await f.acknowledgeStopped();
-  f.connection = async () => ({ deviceId: "old-device", busy: true });
-  await f.click(confirmText);
-  assert.equal(f.calls.includes("clear-vault"), false); assert.match(f.container.textContent, /仍在处理任务/); assert.equal(f.accounts.length, 2);
+test("changed device identity blocks removal without clearing an account", async (context) => {
+  const f = await fixture(context); f.connection = async () => ({ deviceId: "other-device" });
+  await f.click("移除 公众号a");
+  assert.deepEqual(f.calls, ["connection"]); assert.equal(f.accounts.length, 2); assert.match(f.container.querySelector('[role="alert"]').textContent, /设备已改变/);
 });
 
-test("a task becoming busy during disconnect cannot be treated as an offline bypass", async (context) => {
-  const f = await fixture(context); f.disconnect = async () => { throw new WechatRequestError("仍在处理", 409); };
-  await f.click(resetText); await f.click(confirmText);
-  assert.equal(f.calls.includes("clear-vault"), false); assert.match(f.container.textContent, /仍在处理任务/);
-  assert.equal(f.container.querySelector('[aria-label="清除本机公众号绑定"] input[type="checkbox"]'), null);
-});
-
-test("aborting a delayed recovery never performs a late local clear", async (context) => {
+test("aborted device checks never cause a late removal", async (context) => {
   const f = await fixture(context); let finish;
   f.connection = () => new Promise((resolve) => { finish = resolve; });
-  await f.click(resetText); await f.click(confirmText); f.abort();
-  await f.act(async () => finish({ deviceId: "old-device", busy: false }));
+  await f.click("移除 公众号a"); f.abort();
+  await f.act(async () => finish({ deviceId: "local-device" }));
   assert.deepEqual(f.calls, ["connection"]); assert.equal(f.accounts.length, 2);
 });
 
-
-test("connection-only config imports without replacing or reconnecting saved accounts", async (context) => {
-  const f = await fixture(context), originalAccounts = [...f.accounts];
-  await f.importConfig("WECHAT_SYNC_TOKEN=imported-token\nWECHAT_HOST=127.0.0.1\nWECHAT_PORT=8788\nWECHAT_DATA_DIR=./data\n");
-  assert.deepEqual(f.calls, ["connection", "save-binding"]);
-  assert.deepEqual(f.binding, { deviceId: "old-device", connectionToken: "imported-token" });
-  assert.deepEqual(f.accounts, originalAccounts);
-  assert.match(f.container.querySelector('[role="status"]').textContent, /已保留此浏览器的 2 个公众号/);
-  assert.equal(f.container.querySelector('[role="alert"]').textContent, "");
-  assert.match(f.container.textContent, /当前浏览器、当前网址/);
-});
-
-test("connection-only config on a new browser connects and explains how to add an account", async (context) => {
-  const f = await fixture(context, { empty: true });
-  await f.importConfig("WECHAT_SYNC_TOKEN=imported-token\n");
-  assert.deepEqual(f.calls, ["connection", "save-binding"]);
-  assert.deepEqual(f.accounts, []);
-  assert.match(f.container.querySelector('[role="status"]').textContent, /只包含连接信息，请在下方添加公众号/);
-  assert.ok(f.container.querySelector("#wechat-account-appid"));
-  assert.equal(f.container.querySelector('[role="alert"]').textContent, "");
-});
-
-test("a complete config imports its optional account after connecting the device", async (context) => {
-  const f = await fixture(context, { empty: true });
-  await f.importConfig("WECHAT_SYNC_TOKEN=imported-token\nWECHAT_APP_ID=wx-import-test\nWECHAT_APP_SECRET=imported-secret\nWECHAT_ACCOUNT_NAME='导入测试公众号'\n");
-  assert.deepEqual(f.calls, ["connection", "save-binding", "connection", "save-account", "connect-account"]);
-  assert.equal(f.accounts.length, 1);
-  assert.deepEqual(f.accounts[0], { id: "c".repeat(20), appId: "wx-import-test", name: "导入测试公众号" });
-  assert.match(f.container.querySelector('[role="status"]').textContent, /导入测试公众号 已保存在本机，并已连接/);
-});
-
-test("a partial account config fails before changing the connection or saved accounts", async (context) => {
-  const f = await fixture(context), originalAccounts = [...f.accounts];
-  await f.importConfig("WECHAT_SYNC_TOKEN=imported-token\nWECHAT_APP_ID=wx-import-test\n");
-  assert.deepEqual(f.calls, []);
-  assert.deepEqual(f.accounts, originalAccounts);
-  assert.equal(f.binding.connectionToken, "old-token");
-  assert.notEqual(f.container.querySelector('[role="alert"]').textContent, "");
-  assert.equal(f.container.querySelector('[role="status"]'), null);
+test("busy account controls are disabled", async (context) => {
+  const f = await fixture(context, { busy: true });
+  for (const button of f.container.querySelectorAll("button")) assert.equal(button.disabled, true);
 });
 
 
-test("first connection prioritizes config import and keeps manual credentials collapsed", async (context) => {
-  const f = await fixture(context, { empty: true });
-  const importButton = [...f.container.querySelectorAll("button")].find((button) => button.textContent === "导入本机配置");
-  assert.ok(importButton.classList.contains("primary"));
-  assert.match(f.container.querySelector(".draft-sync-wechat-import").textContent, /选择 config.env，自动连接，无需手动填写/);
-  const manual = f.container.querySelector(".draft-sync-wechat-manual");
-  assert.equal(manual.open, false);
-  assert.equal(manual.querySelector("summary").textContent, "手动输入连接口令");
-  assert.ok(manual.querySelector("#wechat-connection-password"));
+test("an unbound manager does not offer account actions", async (context) => {
+  const f = await fixture(context, { unbound: true });
+  assert.equal(f.container.querySelector("details"), null);
+  assert.equal(f.container.querySelector("button"), null);
   assert.deepEqual(f.calls, []);
 });

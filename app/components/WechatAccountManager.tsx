@@ -1,8 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { createWechatClient, WechatRequestError } from "../../lib/wechat/client";
-import { clearDeviceVault, listAccounts, parseLocalWechatConfig, removeAccount, saveAccount, saveBinding, type Binding, type LocalWechatAccount } from "../../lib/wechat/deviceVault";
+import { useState } from "react";
+import { createWechatClient } from "../../lib/wechat/client";
+import { listAccounts, removeAccount, saveAccount, type Binding, type LocalWechatAccount } from "../../lib/wechat/deviceVault";
 
 type Props = {
   binding: Binding | null; accounts: LocalWechatAccount[]; busy: boolean;
@@ -11,25 +11,13 @@ type Props = {
 };
 
 export default function WechatAccountManager({ binding, accounts, busy, runOperation, onChange }: Props) {
-  const [token, setToken] = useState("");
   const [name, setName] = useState("");
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
   const [feedback, setFeedback] = useState("");
-  const [recovery, setRecovery] = useState<"confirm" | "unreachable" | null>(null);
-  const [oldServiceStopped, setOldServiceStopped] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
   function run(label: string, operation: (signal: AbortSignal) => Promise<void>) {
     if (busy) return;
     void runOperation(label, async (signal) => { setFeedback(""); await operation(signal); });
-  }
-  async function bind(connectionToken: string, signal: AbortSignal) {
-    const connection = await createWechatClient(connectionToken).getConnection(signal);
-    signal.throwIfAborted();
-    const next = { deviceId: connection.deviceId, connectionToken: connectionToken.trim() };
-    await saveBinding(next); signal.throwIfAborted();
-    onChange(next, await listAccounts()); setToken("");
-    return next;
   }
   async function add(input: { appId: string; appSecret: string; name: string }, target: Binding, signal: AbortSignal) {
     const client = createWechatClient(target.connectionToken);
@@ -42,74 +30,10 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
     await client.connectAccount({ ...input, deviceId: target.deviceId }, signal);
     signal.throwIfAborted(); setFeedback(`${account.name} 已保存在本机，并已连接。`);
   }
-  function importConfig(file: File) {
-    run("正在导入本机公众号配置…", async (signal) => {
-      if (file.size > 32768) throw new Error("配置文件过大，请选择原来的 config.env。");
-      const input = parseLocalWechatConfig(await file.text());
-      signal.throwIfAborted();
-      const target = await bind(input.token, signal);
-      if (input.account) {
-        await add(input.account, target, signal);
-      } else {
-        const savedAccounts = await listAccounts();
-        signal.throwIfAborted();
-        setFeedback(savedAccounts.length
-          ? `本机已连接，已保留此浏览器的 ${savedAccounts.length} 个公众号，可直接勾选同步。`
-          : "本机已连接。此配置只包含连接信息，请在下方添加公众号。");
-      }
-    });
-  }
-  function resetBinding() {
-    if (!recovery || (recovery === "unreachable" && !oldServiceStopped)) return;
-    run("正在检查并清除本机公众号绑定…", async (signal) => {
-      let reachable = false;
-      let connection: Awaited<ReturnType<ReturnType<typeof createWechatClient>["getConnection"]>> | undefined;
-      const client = binding ? createWechatClient(binding.connectionToken) : null;
-      if (client && binding) {
-        try { connection = await client.getConnection(signal); reachable = connection.deviceId === binding.deviceId; }
-        catch { signal.throwIfAborted(); }
-      }
-      signal.throwIfAborted();
-      if (reachable && client) {
-        if (connection?.busy) throw new Error("原服务仍在处理任务，请等待任务完成后再清除绑定。");
-        for (const account of accounts) {
-          try { await client.disconnectAccount(account.id, signal); }
-          catch (error) {
-            signal.throwIfAborted();
-            // A busy response is a definite refusal, never an offline bypass.
-            if (error instanceof WechatRequestError && error.status === 409) throw new Error("原服务仍在处理任务，请等待任务完成后再清除绑定。");
-            setRecovery("unreachable"); setOldServiceStopped(false);
-            throw new Error("未能确认原服务已断开。请先关闭原服务，再确认清除这台浏览器的绑定。");
-          }
-          signal.throwIfAborted();
-        }
-      } else if (!oldServiceStopped) {
-        setRecovery("unreachable"); setOldServiceStopped(false);
-        return;
-      }
-      signal.throwIfAborted();
-      await clearDeviceVault(); signal.throwIfAborted();
-      setToken(""); setName(""); setAppId(""); setSecret("");
-      setRecovery(null); setOldServiceStopped(false); onChange(null, []);
-      setFeedback("此浏览器的公众号账号和绑定已清除。海报存档及同步记录已保留，可以连接新设备。" );
-    });
-  }
-  return <details className="draft-sync-wechat-settings" open={!binding || !accounts.length || undefined}>
-    <summary>{binding ? "添加或管理公众号" : "首次使用：连接这台电脑"}</summary>
-    <div className="draft-sync-wechat-import">
-      <p className="draft-sync-small">选择 config.env，自动连接，无需手动填写。</p>
-      <button type="button" className={binding ? undefined : "primary"} disabled={busy} onClick={() => fileRef.current?.click()}>导入本机配置</button>
-      <input ref={fileRef} type="file" accept=".env,text/plain" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) importConfig(file); }} />
-    </div>
-    <details className="draft-sync-wechat-manual">
-      <summary>手动输入连接口令</summary>
-      <p className="draft-sync-small">打开 config.env，复制 WECHAT_SYNC_TOKEN 等号后的内容；如有引号，不要复制引号。</p>
-      <div className="draft-sync-wechat-fields">
-        <div className="field-stack"><label htmlFor="wechat-connection-password">本机连接口令</label><input id="wechat-connection-password" type="password" autoComplete="off" value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} placeholder={binding ? "更换口令时填写" : "粘贴配置文件中的连接口令"} /></div>
-        <button type="button" disabled={busy || !token.trim()} onClick={() => run("正在连接本机服务…", async (signal) => { await bind(token, signal); signal.throwIfAborted(); setFeedback("本机服务已连接，可以添加公众号。"); })}>连接本机服务</button>
-      </div>
-    </details>
-    <p className="draft-sync-small">账号密钥只保存在当前浏览器、当前网址。请使用同一个网址；换浏览器或清除数据后，需要重新添加。</p>
+  if (!binding) return null;
+  return <details className="draft-sync-wechat-settings" open={!accounts.length || undefined}>
+    <summary>{accounts.length ? "管理公众号" : "添加公众号"}</summary>
+    <p className="draft-sync-small">公众号密钥只保存在当前浏览器、当前网址。换浏览器或清除数据后，需要重新添加。</p>
     {binding && <form onSubmit={(event) => { event.preventDefault(); run("正在保存并连接公众号…", (signal) => add({ appId, appSecret: secret, name }, binding, signal)); }}>
       <h4>添加公众号</h4>
       <p className="draft-sync-small">在微信开发者平台找到 AppID 和 AppSecret，复制到下方。</p>
@@ -124,18 +48,12 @@ export default function WechatAccountManager({ binding, accounts, busy, runOpera
       if (!binding) return;
       const client = createWechatClient(binding.connectionToken);
       const connection = await client.getConnection(signal);
+      signal.throwIfAborted();
       if (connection.deviceId !== binding.deviceId) throw new Error("连接的本机设备已改变，请恢复原设备连接后移除账号。");
       await client.disconnectAccount(account.id, signal); signal.throwIfAborted();
       await removeAccount(account.id); signal.throwIfAborted(); onChange(binding, await listAccounts());
       setFeedback(`${account.name} 已从本机移除，已保存的草稿不受影响。`);
     })} aria-label={`移除 ${account.name}`}>移除</button></li>)}</ul>}
-    <button type="button" className="draft-sync-reset-connection" disabled={busy} onClick={() => { setRecovery("confirm"); setOldServiceStopped(false); }}>重置本机连接</button>
-    {recovery && <section className="draft-sync-wechat-confirmation" aria-label="清除本机公众号绑定">
-      <h3>清除本机公众号绑定</h3>
-      <p>将删除此浏览器保存的全部公众号密钥、连接口令和加密密钥，之后需要重新添加账号。海报、图片和同步记录会保留。</p>
-      {recovery === "unreachable" && <><p>无法确认原设备已断开。原服务内存中的公众号连接会在退出服务时清除；请先关闭原服务。</p><label className="draft-sync-check"><input type="checkbox" checked={oldServiceStopped} disabled={busy} onChange={(event) => setOldServiceStopped(event.target.checked)} /><span>我已关闭原服务，确认只清除此浏览器的公众号资料</span></label></>}
-      <div className="draft-sync-confirm-actions"><button type="button" disabled={busy} onClick={() => { setRecovery(null); setOldServiceStopped(false); }}>取消清除</button><button type="button" disabled={busy || (recovery === "unreachable" && !oldServiceStopped)} onClick={resetBinding}>确认清除本机公众号绑定</button></div>
-    </section>}
     {feedback && <p className="draft-sync-message success" role="status">{feedback}</p>}
   </details>;
 }

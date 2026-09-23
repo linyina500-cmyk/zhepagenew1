@@ -14,7 +14,7 @@ export async function startWechatTestServer(
       if (!outgoing.headersSent) outgoing.writeHead(500, { "Content-Type": "application/json" });
       outgoing.end(JSON.stringify({ error: "Test server failed to process the request" }));
     };
-    if (incoming.url?.startsWith("/api/wechat/")) {
+    if (/^\/api\/(wechat|xiaohongshu)\//.test(incoming.url || "")) {
       void handleApi(incoming, outgoing).catch(fail);
       return;
     }

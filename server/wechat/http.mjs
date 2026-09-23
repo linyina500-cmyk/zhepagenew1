@@ -28,9 +28,11 @@ async function readJson(request) {
   catch { throw new RequestError("连接或确认信息格式不正确"); }
 }
 
-export function createWechatServer({ accounts, syncToken, handleXhs }) {
+export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = () => false }) {
   if (typeof syncToken !== "string" || syncToken.length < 32 || syncToken.length > 256 || /\s/u.test(syncToken)) throw new Error("WECHAT_SYNC_TOKEN 需要为 32–256 位无空格的随机口令");
   let readingUpload = false;
+  let xhsRequests = 0;
+  const busy = () => readingUpload || xhsRequests > 0 || xhsBusy() || accounts.busy?.() || false;
   return createServer({ requestTimeout: 120_000, headersTimeout: 15_000 }, async (request, response) => {
     const send = (status, value) => {
       response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
@@ -40,9 +42,13 @@ export function createWechatServer({ accounts, syncToken, handleXhs }) {
       if (!authorized(request.headers.authorization, syncToken)) { send(401, { error: "公众号连接口令不正确，请检查后重试" }); request.resume(); return; }
       const url = new URL(request.url, "http://localhost");
       if (url.search) throw new RequestError("接口不接收网址查询参数");
-      if (url.pathname.startsWith("/api/xiaohongshu/") && handleXhs && await handleXhs(request, send)) return;
+      if (url.pathname.startsWith("/api/xiaohongshu/") && handleXhs) {
+        xhsRequests++;
+        try { if (await handleXhs(request, send)) return; }
+        finally { xhsRequests--; }
+      }
       if (request.method === "GET" && url.pathname === "/api/wechat/connection") {
-        send(200, { deviceId: accounts.deviceId, busy: accounts.busy?.() || false }); return;
+        send(200, { deviceId: accounts.deviceId, busy: busy() }); return;
       }
       if (request.method === "GET" && url.pathname === "/api/wechat/accounts") {
         send(200, { accounts: accounts.list() }); return;
@@ -54,6 +60,7 @@ export function createWechatServer({ accounts, syncToken, handleXhs }) {
       if (!scoped || !ACCOUNT_ID.test(scoped[1])) throw new RequestError("没有此公众号操作", 404);
       const path = scoped[2];
       if (request.method === "POST" && path === "/disconnect") {
+        if (busy()) throw new RequestError("本机仍在处理同步任务，请完成后再断开连接", 409);
         accounts.disconnect(scoped[1]); send(200, { disconnected: true }); return;
       }
       const { jobs, publications } = accounts.get(scoped[1]);

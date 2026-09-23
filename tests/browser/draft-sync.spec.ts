@@ -29,6 +29,38 @@ async function choosePlatform(dialog: Locator, platform: "xiaohongshu" | "wechat
   await dialog.locator(".draft-sync-platforms").getByRole("button", { name: platform === "wechat" ? /^公众号贴图/ : /^小红书/ }).click();
 }
 
+async function connectLocalDevice(page: Page, dialog: Locator, connectionToken: string, deviceId: string) {
+  const parentOrigin = new URL(page.url()).origin;
+  // A fresh, isolated popup follows the production pairing protocol. No real
+  // local helper or platform window is opened by this test.
+  await page.context().route("http://127.0.0.1:8789/connect", (route) => route.fulfill({
+    status: 200, contentType: "text/html", body: `<!doctype html><title>测试本机连接</title><p>正在连接</p><script>
+      const parentOrigin = ${JSON.stringify(parentOrigin)};
+      addEventListener("message", (event) => {
+        if (event.source !== opener || event.origin !== parentOrigin || event.data?.type !== "zhepage-local-connect" || !/^[a-f0-9]{64}$/.test(event.data.nonce)) return;
+        opener.postMessage({ type: "zhepage-local-connected", nonce: event.data.nonce, deviceId: ${JSON.stringify(deviceId)}, connectionToken: ${JSON.stringify(connectionToken)} }, parentOrigin);
+      });
+      opener.postMessage({ type: "zhepage-local-ready" }, "*");
+    </script>`,
+  }));
+  await dialog.getByRole("button", { name: "连接这台电脑", exact: true }).click();
+  await expect(dialog.locator(".draft-sync-connection")).toContainText("本机连接已保存");
+  await expect(dialog.getByLabel("本机连接口令", { exact: true })).toHaveCount(0);
+  await expect(dialog.locator('.draft-sync-connection input[type="file"]')).toHaveCount(0);
+}
+
+async function captureConnectionSteps(page: Page, dialog: Locator, name: string) {
+  for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    const focus = name.includes("account-ready") ? dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true }) : dialog.locator(".draft-sync-connection");
+    await focus.scrollIntoViewIfNeeded();
+    await expect(focus).toBeInViewport();
+    await page.screenshot({ path: `test-results/${name}-${viewport.width}.png` });
+    expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  }
+  await page.setViewportSize({ width: 1110, height: 770 });
+}
+
 async function uploadDraftFile(page: Page, button: Locator, name: string, png: Buffer) {
   const chooserPromise = page.waitForEvent("filechooser");
   await button.click();
@@ -52,6 +84,7 @@ async function savedDraftSummary(page: Page) {
       });
       if (!value) return null;
       return {
+        serialized: JSON.stringify(value),
         content: value.content,
         selectedAccountIds: value.selectedAccountIds,
         receipts: value.receipts,
@@ -195,15 +228,15 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     const path = new URL(request.url!, "http://test.local").pathname;
     const reply = (status: number, json: unknown) => { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(json)); };
     requests.push(`${request.method} ${path}`);
-    expect(request.headers.authorization).toBe("Bearer browser-test-password");
-    if (path === "/api/wechat/connection") { reply(200, { deviceId: "browser-test-device" }); return; }
+    expect(request.headers.authorization).toBe("Bearer browser-test-password-0123456789abcdef");
+    if (path === "/api/wechat/connection") { reply(200, { deviceId: "11111111111111111111111111111111" }); return; }
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const bytes = Buffer.concat(chunks);
     if (path === "/api/wechat/accounts/connect") {
       const body = JSON.parse(bytes.toString("utf8"));
       const account = accounts.find((item) => item.appId === body.appId)!;
-      expect(body).toEqual({ deviceId: "browser-test-device", appId: account.appId, appSecret: account.appSecret, name: account.name });
+      expect(body).toEqual({ deviceId: "11111111111111111111111111111111", appId: account.appId, appSecret: account.appSecret, name: account.name });
       reply(200, { account: { id: account.id, name: account.name } }); return;
     }
     const scoped = /^\/api\/wechat\/accounts\/([a-f0-9]{20})\/jobs(?:\/([a-f0-9-]+))?(.*)$/.exec(path)!;
@@ -244,29 +277,17 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     // action area must explain every content blocker and let users resolve it.
     await dialog.locator(".draft-sync-steps button").nth(1).click();
     expect(requests).toEqual([]);
-    const connectionConfig = { name: "config.env", mimeType: "text/plain", buffer: Buffer.from("WECHAT_SYNC_TOKEN=browser-test-password\nWECHAT_HOST=127.0.0.1\nWECHAT_PORT=8788\nWECHAT_DATA_DIR=./data\n") };
-    const connectionInput = dialog.getByLabel("本机连接口令", { exact: true });
-    await expect(connectionInput).toBeHidden();
-    await expect(dialog.getByRole("button", { name: "导入本机配置", exact: true })).toHaveClass("primary");
-    await expect(dialog.getByText("选择 config.env，自动连接，无需手动填写。", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toHaveCount(0);
+    await expect(dialog.getByLabel("本机连接口令", { exact: true })).toHaveCount(0);
     for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
-      await dialog.locator(".draft-sync-wechat-settings").scrollIntoViewIfNeeded();
+      await dialog.locator(".draft-sync-connection").scrollIntoViewIfNeeded();
       await page.screenshot({ path: `test-results/wechat-first-connection-${viewport.width}.png` });
     }
     await page.setViewportSize({ width: 1110, height: 770 });
-    await dialog.getByText("手动输入连接口令", { exact: true }).click();
-    await expect(connectionInput).toBeVisible();
-    await connectionInput.fill("browser-test-password");
-    await expect(dialog.getByRole("button", { name: "连接本机服务", exact: true })).toBeEnabled();
-    await connectionInput.clear();
-    await dialog.getByText("手动输入连接口令", { exact: true }).click();
-    await expect(connectionInput).toBeHidden();
     expect(requests).toEqual([]);
-    const configChooser = page.waitForEvent("filechooser");
-    await dialog.getByRole("button", { name: "导入本机配置", exact: true }).click();
-    await (await configChooser).setFiles(connectionConfig);
-    await expect(dialog.getByRole("status").filter({ hasText: "此配置只包含连接信息，请在下方添加公众号" })).toBeVisible();
+    await connectLocalDevice(page, dialog, "browser-test-password-0123456789abcdef", "11111111111111111111111111111111");
     expect(requests).toEqual(["GET /api/wechat/connection"]);
     for (const account of accounts) {
       const settings = dialog.locator(".draft-sync-wechat-settings");
@@ -279,10 +300,13 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
       await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeDisabled();
     }
     expect(uploads).toHaveLength(0);
-    const callsBeforeImport = requests.length;
-    await dialog.locator('.draft-sync-wechat-settings input[type="file"]').setInputFiles(connectionConfig);
-    await expect(dialog.getByRole("status").filter({ hasText: "已保留此浏览器的 2 个公众号" })).toBeVisible();
-    expect(requests.slice(callsBeforeImport)).toEqual(["GET /api/wechat/connection"]);
+    const callsBeforeSwitch = requests.length;
+    await choosePlatform(dialog, "xiaohongshu");
+    await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
+    await expect(dialog.locator(".draft-sync-connection")).toContainText("本机连接已保存");
+    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeHidden();
+    await choosePlatform(dialog, "wechat");
+    expect(requests).toHaveLength(callsBeforeSwitch);
     await expect(dialog.locator(".draft-sync-wechat-account-row")).toHaveCount(2);
     const actions = dialog.getByRole("region", { name: "公众号操作", exact: true });
     await expect(actions.getByRole("region", { name: "同步前检查", exact: true })).toContainText("标题最多 20 个字符");
@@ -354,7 +378,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     });
     expect(protectedVault).toMatchObject({ extractable: false, blocked: true });
     expect(protectedVault.serialized).not.toContain("browser-private-secret");
-    expect(protectedVault.serialized).not.toContain("browser-test-password");
+    expect(protectedVault.serialized).not.toContain("browser-test-password-0123456789abcdef");
     await dialog.getByRole("button", { name: "立即发布", exact: true }).click();
     const confirmation = dialog.getByRole("region", { name: "确认立即发布", exact: true });
     await expect(confirmation).toBeFocused();
@@ -386,7 +410,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await dialog.locator(".draft-sync-steps button").first().click();
     await choosePlatform(dialog, "xiaohongshu");
     await dialog.locator(".draft-sync-steps button").nth(1).click();
-    await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
     for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
       await dialog.locator(".draft-sync-xhs").scrollIntoViewIfNeeded();
@@ -394,5 +418,123 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
       expect(await dialog.locator(".draft-sync-xhs").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
     }
 
+  } finally { await server.close(); }
+});
+
+test("a fresh browser connects once and saves original XHS images without configuring a public account", async ({ page }) => {
+  test.setTimeout(240_000);
+  const connectionToken = "xhs-browser-private-connection-token", deviceId = "22222222222222222222222222222222";
+  const account = { id: "0123456789abcdefabcd", name: "小红书测试账号" };
+  const requests: { method: string; path: string; body: string }[] = [];
+  const originals: { name: string; size: number; hash: string }[] = [];
+  const jobs = new Map<string, Record<string, unknown>>();
+  let loginOpened = false, createCount = 0;
+  const server = await startWechatTestServer(new URL(page.url()).origin, async (request, response) => {
+    const path = new URL(request.url!, "http://test.local").pathname;
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks);
+    requests.push({ method: request.method!, path, body: bytes.toString("utf8") });
+    expect(request.headers.authorization).toBe(`Bearer ${connectionToken}`);
+    expect(request.url).not.toContain(connectionToken);
+    expect(bytes.toString("utf8")).not.toContain(connectionToken);
+    const reply = (status: number, json: unknown) => { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(json)); };
+    if (path === "/api/wechat/connection") { reply(200, { deviceId }); return; }
+    if (path === "/api/xiaohongshu/login") { expect(request.method).toBe("POST"); loginOpened = true; reply(200, {}); return; }
+    if (path === "/api/xiaohongshu/account") { expect(loginOpened).toBe(true); reply(200, { account }); return; }
+    if (path === "/api/xiaohongshu/jobs") {
+      expect(request.method).toBe("POST"); createCount++;
+      const form = await new Response(new Uint8Array(bytes), { headers: { "content-type": request.headers["content-type"]! } }).formData();
+      expect(form.get("expectedAccountId")).toBe(account.id);
+      expect(form.get("title")).toBe("小红书独立贴图");
+      expect(form.get("body")).toBe("保留全部海报。\r\n第二行也保留。");
+      const images = await Promise.all(form.getAll("images").map(async (value) => {
+        const file = value as File;
+        return { name: file.name, size: file.size, hash: createHash("sha256").update(new Uint8Array(await file.arrayBuffer())).digest("hex") };
+      }));
+      expect(images).toEqual(originals);
+      const id = String(form.get("id"));
+      expect((await savedDraftSummary(page))?.receipts).toContainEqual(expect.objectContaining({ accountId: account.id, jobId: id, status: "needs_confirmation" }));
+      const job = { id, accountId: account.id, accountName: account.name, title: "小红书独立贴图", imageCount: images.length, uploadedCount: images.length,
+        status: "saved", draftId: "mock-xhs-draft", message: "模拟小红书草稿回读通过" };
+      jobs.set(id, job); reply(202, { job }); return;
+    }
+    const read = /^\/api\/xiaohongshu\/jobs\/([a-f0-9-]+)$/.exec(path);
+    if (read && request.method === "GET") { expect(jobs.has(read[1])).toBe(true); reply(200, { job: jobs.get(read[1]) }); return; }
+    throw new Error(`Unexpected platform request: ${request.method} ${path}`);
+  });
+  try {
+    await page.goto(server.origin);
+    let dialog = await prepareRealImages(page);
+    await dialog.getByLabel("小红书标题", { exact: true }).fill("小红书独立贴图");
+    await dialog.getByLabel("小红书文案", { exact: true }).fill("保留全部海报。\n第二行也保留。");
+    const secondPoster = Buffer.from(await page.evaluate(async () => {
+      const canvas = document.createElement("canvas"); canvas.width = 1080; canvas.height = 1440;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#e7f2f1"; context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#243f3b"; context.font = "bold 80px sans-serif";
+      context.fillText("原图顺序验证 02", 90, 240);
+      const blob = await new Promise<Blob>((resolve) => canvas.toBlob((value) => resolve(value!), "image/png"));
+      return Array.from(new Uint8Array(await blob.arrayBuffer()));
+    }));
+    await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "xhs-extra.png", secondPoster);
+    await dialog.getByRole("button", { name: "前移第 2 张图片", exact: true }).click();
+    originals.push(...await dialog.locator(".draft-sync-image-card").evaluateAll(async (cards) => Promise.all(cards.map(async (card) => {
+      const image = card.querySelector("img")!, blob = await (await fetch(image.src)).blob();
+      const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()))].map((value) => value.toString(16).padStart(2, "0")).join("");
+      return { name: card.getAttribute("data-image-name")!, size: blob.size, hash };
+    }))));
+    expect(originals.length).toBeGreaterThan(1);
+    await expect(dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "下一步：连接小红书", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
+    expect(requests).toEqual([]);
+    await captureConnectionSteps(page, dialog, "xiaohongshu-first-connection");
+    await connectLocalDevice(page, dialog, connectionToken, deviceId);
+    expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual(["GET /api/wechat/connection"]);
+    await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: "我已登录", exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "打开登录窗口", exact: true }).click();
+    await expect.poll(() => server.failure() || loginOpened).toBe(true);
+    await captureConnectionSteps(page, dialog, "xiaohongshu-login");
+    await dialog.getByRole("button", { name: "我已登录", exact: true }).click();
+    await expect(dialog.getByText(account.name, { exact: true })).toBeVisible();
+    await captureConnectionSteps(page, dialog, "xiaohongshu-account-ready");
+    await dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true }).click();
+    await expect(dialog.getByRole("region", { name: "小红书同步结果", exact: true })).toContainText("模拟小红书草稿回读通过");
+    expect(createCount).toBe(1);
+    expect((await savedDraftSummary(page))?.receipts).toContainEqual(expect.objectContaining({ accountId: account.id, status: "saved", draftId: "mock-xhs-draft" }));
+    await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toBeDisabled();
+    const callsBeforeSwitch = requests.length;
+    await choosePlatform(dialog, "wechat");
+    await expect(dialog.getByText("本机连接已保存", { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel("公众号名称", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeHidden();
+    expect(requests).toHaveLength(callsBeforeSwitch);
+    await choosePlatform(dialog, "xiaohongshu");
+    await expect(dialog.getByRole("button", { name: "我已登录", exact: true })).toBeEnabled();
+    expect(requests).toHaveLength(callsBeforeSwitch);
+    for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      await dialog.locator(".draft-sync-connection").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `test-results/xiaohongshu-shared-connection-${viewport.width}.png` });
+      expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    }
+    const serialized = JSON.stringify(await savedDraftSummary(page));
+    expect(serialized).not.toContain(connectionToken);
+    expect(serialized).not.toContain("appSecret");
+    expect(requests.some(({ path }) => path.includes("/accounts/") || path.includes("publication"))).toBe(false);
+    await page.reload(); dialog = await openDraftDialog(page);
+    await dialog.getByRole("button", { name: "继续本机存档", exact: true }).click();
+    await expect(dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "下一步：连接小红书", exact: true }).click();
+    await expect(dialog.getByText("本机连接已保存", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
+    await dialog.getByRole("button", { name: "我已登录", exact: true }).click();
+    await dialog.getByRole("button", { name: "读取小红书同步状态", exact: true }).click();
+    await expect(dialog.getByRole("region", { name: "小红书同步结果", exact: true })).toContainText("模拟小红书草稿回读通过");
+    expect(createCount).toBe(1);
+    expect(server.failure()).toBeUndefined();
   } finally { await server.close(); }
 });

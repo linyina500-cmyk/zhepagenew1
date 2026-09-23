@@ -4,17 +4,19 @@
 
 ## 当前部署方式
 
-连接路径为：折页预览网页 → Cloudflare 同域 API → Cloudflare Tunnel → 本机服务 → 微信官方接口或小红书专用浏览器。
+平台操作路径为：折页预览网页 → Cloudflare 同域 API → Cloudflare Tunnel → 本机服务 → 微信官方接口或小红书专用浏览器。
+
+首次连接另有一条仅在本机运行的配对路径：固定预览网页打开 `http://127.0.0.1:8789/connect`，确认来源后向该网页返回设备连接信息。配对服务只监听回环地址，**8789 端口不得接入 Tunnel 或对公网开放**。配对只接受 `https://feature-local-draft-sync.zhepagenew.pages.dev`，不接受任意预览域名或自定义回跳地址。配对完成后，网页还会通过同域 API 核对设备一致，再保存本机连接。
 
 Mac 需要开机、联网且不休眠。Tunnel 提供进入本机的 HTTPS 地址，不提供固定的微信调用出口；公众号 IP 白名单应填写本机实际访问微信的公网出口 IP。收到 `40164` 时，程序会在可以严格识别时显示微信看到的 IPv4；切换网络或宽带 IP 变化后需重新核对。
 
-当前 Quick Tunnel 只用于预览测试。重启后临时地址会改变，需更新 Preview 的 `WECHAT_SYNC_URL` 并重新部署，不能当作稳定日常服务。尚未自动部署正式环境。[Quick Tunnel 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)
+当前 Quick Tunnel 只用于开发验证。重启后临时地址会改变，由开发维护者更新 Preview 的 `WECHAT_SYNC_URL` 并重新部署；用户仍打开固定预览网址。连接尚需维护，不能当作稳定日常服务，也未自动部署正式环境。[Quick Tunnel 官方说明](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)
 
 ## 本机准备
 
 需要 Node.js 22.18+（22.x）或 24+、Cloudflare Tunnel 程序，以及小红书自动化使用的 Playwright Chromium 浏览器。首次请在完整项目环境准备依赖；不要把仅包含旧公众号服务文件的包当作完整的小红书运行环境。
 
-双击 `配置公众号.command` 生成本机配置，再双击 `启动公众号.command`。新配置只包含以下连接和目录设置，不再要求填写 AppID 或 AppSecret：
+日常双击 **折页同步助手.command**，在固定预览网页点击 **连接这台电脑**；公众号和小红书共用这次连接。首次安装及本机配置由维护者准备，配置只包含以下连接和目录设置，不填写 AppID 或 AppSecret：
 
 | 配置 | 用途 |
 | --- | --- |
@@ -26,17 +28,15 @@ Mac 需要开机、联网且不休眠。Tunnel 提供进入本机的 HTTPS 地�
 
 ## 账号与凭据
 
-在网页中绑定本机连接后，添加公众号名称、AppID 和 AppSecret。账号资料保存在当前浏览器、当前网站地址的独立加密资料库；AppSecret 和设备连接口令加密保存。它们不进入海报存档，也不通过应用账号同步到别的设备。
+网页连接成功后，在公众号面板首次添加公众号名称、AppID 和 AppSecret。以后勾选目标账号即可；多个账号在 **管理公众号** 中添加或移除。小红书点击 **打开登录窗口** 扫码，再点击 **我已登录** 核对账号。账号资料保存在当前浏览器、当前网站地址的独立加密资料库；AppSecret 和设备连接口令加密保存。它们不进入海报存档，也不通过应用账号同步到别的设备。
 
-连接账号时，浏览器把凭据通过 HTTPS 发送到本机服务，传输经过 Cloudflare 同域代理和 Tunnel。本应用不把密钥写入云端持久配置、日志或数据库；本机服务只在内存中保存 API 会话，停止后需要浏览器重新连接。此设计不是绕过 Cloudflare 的端到端直连，也不承诺抵御同源恶意脚本或整份浏览器资料被复制。
-
-旧 `config.env` 可在网页选择“导入本机配置”。浏览器本地解析文件，只把连接需要的字段发送给服务，不上传整份文件。迁移并验证连接后清理旧文件中的公众号凭据；不要删除任务目录或无意更换设备连接口令。
+连接账号时，浏览器把凭据通过 HTTPS 发送到本机服务，传输经过 Cloudflare 同域代理和 Tunnel。AppSecret 仅在当前浏览器持久保存，本应用不把它写入本机配置文件或云端持久配置、日志、数据库；本机服务只在内存中保存 API 会话。服务重启后，页面会在操作时重新连接已保存账号。此设计不是绕过 Cloudflare 的端到端直连，也不承诺抵御同源恶意脚本或整份浏览器资料被复制。
 
 账号名称由用户填写；连接检查验证调用凭据和草稿读取可用性，不能代替用户核对名称与 AppID，立即发表还需该账号具备发表接口权限。不同账号的任务、素材编号、草稿和发表回执按 AppID 派生标识分目录保存。正在执行任务时禁止断开或替换该账号会话。
 
 ## Cloudflare 预览配置
 
-只在目标测试分支的 Preview 环境设置 `WECHAT_SYNC_URL=https://临时服务地址`。它必须是 HTTPS 根地址，不含账号、密码、查询参数或子路径，也不要加 `VITE_` 或 `NEXT_PUBLIC_` 前缀。变更后重新部署预览。
+由开发维护者在目标测试分支的 Preview 环境设置 `WECHAT_SYNC_URL=https://临时服务地址`。它必须是 HTTPS 根地址，不含账号、密码、查询参数或子路径，也不要加 `VITE_` 或 `NEXT_PUBLIC_` 前缀。Tunnel 仅连接平台操作服务，默认端口为 `8788`；不要把配对端口 `8789` 配入 Tunnel。变更后重新部署预览，并使用固定地址 `https://feature-local-draft-sync.zhepagenew.pages.dev` 验证。
 
 部署需保留公众号、小红书的 Pages Functions 和共享代理模块。所有本机 API 都验证独立连接口令；公众号任务路由还包含目标账号标识。口令不放在 URL 中。代理只转发必要请求头，拒绝重定向，不自动重试写请求。
 

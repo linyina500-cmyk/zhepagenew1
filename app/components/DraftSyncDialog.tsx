@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type RefObject 
 import { clearLocalDraft, loadLocalDraft, saveLocalDraft } from "../../lib/draftSync/localDraftStore";
 import type { DraftImage, DraftPlatform, LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
 import { countCharacters, countHashtags, DRAFT_LIMITS, imageMetadata, readDraftImage, validateDraft } from "../../lib/draftSync/validation";
+import { loadBinding, listAccounts, type Binding, type LocalWechatAccount } from "../../lib/wechat/deviceVault";
+import LocalSyncConnection from "./LocalSyncConnection";
 import WechatDraftPanel from "./WechatDraftPanel";
 import XiaohongshuDraftPanel from "./XiaohongshuDraftPanel";
 
@@ -67,6 +69,30 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   const [platform, setPlatform] = useState<DraftPlatform>("xiaohongshu");
   const [acceptedWarnings, setAcceptedWarnings] = useState("");
   const [contentChanged, setContentChanged] = useState<Record<DraftPlatform, boolean>>({ xiaohongshu: false, wechat: false });
+  const [binding, setBinding] = useState<Binding | null>(null);
+  const [accounts, setAccounts] = useState<LocalWechatAccount[]>([]);
+  const [connectionLoading, setConnectionLoading] = useState(true);
+  const [connectionError, setConnectionError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void Promise.resolve().then(async () => {
+      if (cancelled) return;
+      setConnectionLoading(true); setConnectionError("");
+      try {
+        const [savedBinding, savedAccounts] = await Promise.all([loadBinding(), listAccounts()]);
+        if (!cancelled) { setBinding(savedBinding); setAccounts(savedAccounts); }
+      } catch (error) {
+        if (!cancelled) { setBinding(null); setAccounts([]); setConnectionError(errorMessage(error)); }
+      } finally { if (!cancelled) setConnectionLoading(false); }
+    });
+    return () => { cancelled = true; };
+  }, [open]);
+
+  function changeConnection(nextBinding: Binding | null, nextAccounts: LocalWechatAccount[]) {
+    setBinding(nextBinding); setAccounts(nextAccounts); setConnectionError("");
+  }
 
   useEffect(() => {
     mountedRef.current = true;
@@ -256,7 +282,8 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   const steps = STEPS.map((item) => platform === "wechat" && item.id === "browser" ? { ...item, label: "选择公众号", hint: "勾选目标公众号，选择同步到草稿箱或立即发布。" } : platform === "wechat" && item.id === "results" ? { ...item, hint: "查看每个公众号的处理结果。存草稿后，可去后台检查图片或设置定时发布。" } : item);
   const stepInfo = steps.find((item) => item.id === step)!;
   const nextHint = step === "content" ? !draft ? "先用当前海报开始，或继续已有的本机存档。" : contentReady ? `图片和文案已准备好，可以继续选择账号。` : "请先处理下方检查提示，再继续。"
-    : platform === "wechat" ? "草稿保留在所选公众号；立即发布会另行确认目标和内容。" : step === "browser" ? "请先在本机打开专用小红书窗口扫码，确认账号后同步。" : "以草稿箱中重新打开的内容为准；结果待核对时请勿重复创建。";
+    : !binding ? "首次连接后，小红书和公众号都可以在这里同步。"
+    : platform === "wechat" ? "草稿保留在所选公众号；立即发布会另行确认目标和内容。" : step === "browser" ? "保存后可在小红书专用窗口查看草稿。" : "以草稿箱中重新打开的内容为准；结果待核对时请勿重复创建。";
   const platformTabs = <div className="draft-sync-platforms" role="group" aria-label="选择同步平台">{PLATFORMS.map((target) => <button type="button" key={target} aria-pressed={platform === target} disabled={Boolean(busy)} onClick={() => { setPlatform(target); setFeedback(null); }}>{DRAFT_LIMITS[target].label}<span>{step === "content" ? "独立填写标题与文案" : target === "wechat" ? "存草稿或立即发布" : "保存到草稿箱"}</span></button>)}</div>;
 
 
@@ -320,8 +347,14 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
           </section>
         </>}
         {step === "results" && platformTabs}
-        {open && platform === "wechat" && draft && step !== "content" && <WechatDraftPanel key={draft.id} draft={draft} view={step} contentReady={contentReady} contentCheck={contentCheck} contentChanged={contentChanged.wechat} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, wechat: false })); }} />}
-        {open && platform === "xiaohongshu" && draft && step !== "content" && <XiaohongshuDraftPanel key={draft.id} draft={draft} contentReady={contentReady} contentCheck={contentCheck} contentChanged={contentChanged.xiaohongshu} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, xiaohongshu: false })); }} />}
+        {open && draft && step !== "content" && <>
+          {connectionLoading ? <p className="draft-sync-small" role="status">正在恢复这台电脑的连接…</p> : <>
+            {connectionError && <p className="draft-sync-message error" role="alert">{connectionError}</p>}
+            <LocalSyncConnection binding={binding} accounts={accounts} busy={Boolean(busy)} runOperation={runOperation} onChange={changeConnection} />
+            {binding && platform === "wechat" && <WechatDraftPanel key={draft.id} draft={draft} binding={binding} accounts={accounts} onAccountsChange={changeConnection} view={step} contentReady={contentReady} contentCheck={contentCheck} contentChanged={contentChanged.wechat} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, wechat: false })); }} />}
+            {binding && platform === "xiaohongshu" && <XiaohongshuDraftPanel key={draft.id} draft={draft} binding={binding} contentReady={contentReady} contentCheck={contentCheck} contentChanged={contentChanged.xiaohongshu} busy={Boolean(busy)} runOperation={runOperation} persistReceipt={persistWechatReceipt} onSubmitted={() => { setStep("results"); setContentChanged((current) => ({ ...current, xiaohongshu: false })); }} />}
+          </>}
+        </>}
         {step === "content" && contentCheck}
 
       </div>
