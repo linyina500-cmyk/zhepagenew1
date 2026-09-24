@@ -18,7 +18,7 @@ async function fixture(context, options = {}) {
   const nativeRequire = createRequire(filename), React = nativeRequire("react"), { createRoot } = nativeRequire("react-dom/client"), { act } = React;
   const binding = { deviceId: "local-test-device", connectionToken: "test-token" };
   let saved = { schemaVersion: 1, id: "local-draft", updatedAt: new Date().toISOString(), sourceFormat: "wechat", images: [1, 2].map((id) => ({ id: String(id), name: `${id}.png`, blob: new Blob([`original-${id}`], { type: "image/png" }), width: 1080, height: 1440 })), content: { wechat: { title: "测试标题", body: "测试配文" }, xiaohongshu: { title: "", body: "" } }, selectedAccountIds: [], receipts: [] };
-  let busy = false, active, renderDraft, mounted = true, persistFailure = false, createOverride, publicationOverride, failAccount;
+  let busy = false, active, renderDraft, renderReady, mounted = true, persistFailure = false, createOverride, publicationOverride, failAccount;
   const creates = [], publications = [], connects = [], jobs = new Map(), published = new Map();
   const client = {
     getConnection: async () => ({ deviceId: binding.deviceId }),
@@ -59,8 +59,8 @@ async function fixture(context, options = {}) {
   }
   const Panel = loadComponent(filename), container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   function Host() {
-    const [draft, setDraft] = React.useState(saved), [working, setWorking] = React.useState(false), [error, setError] = React.useState(""); renderDraft = setDraft;
-    return React.createElement(React.Fragment, null, React.createElement(Panel, { draft, binding, accounts: options.accounts ?? accounts, onAccountsChange() {}, view: "browser", contentReady: options.contentReady ?? true, contentCheck: options.contentCheck ? React.createElement("section", { "aria-label": "同步前检查" }, options.contentCheck) : undefined, contentChanged: false, busy: working || options.busy, onSubmitted() {},
+    const [draft, setDraft] = React.useState(saved), [ready, setReady] = React.useState(options.contentReady ?? true), [working, setWorking] = React.useState(false), [error, setError] = React.useState(""); renderDraft = setDraft; renderReady = setReady;
+    return React.createElement(React.Fragment, null, React.createElement(Panel, { draft, binding, accounts: options.accounts ?? accounts, onAccountsChange() {}, view: "browser", contentReady: ready, contentCheck: options.contentCheck ? React.createElement("section", { "aria-label": "同步前检查" }, options.contentCheck) : undefined, contentChanged: false, busy: working || options.busy, onSubmitted() {},
       runOperation: async (_label, operation) => { if (busy) return; busy = true; active = new AbortController(); setWorking(true); try { await operation(active.signal); } catch (error) { if (!active.signal.aborted && mounted) setError(error.message); } finally { busy = false; if (mounted) setWorking(false); } },
       persistReceipt: async (snapshot, receipt, signal) => { signal.throwIfAborted(); if (persistFailure) throw new Error("存档空间不足"); saved = { ...snapshot, receipts: [...snapshot.receipts.filter((item) => !(item.platform === receipt.platform && item.accountId === receipt.accountId)), receipt] }; if (mounted) setDraft(saved); return saved; },
     }), React.createElement("p", { role: "alert" }, error));
@@ -81,6 +81,9 @@ async function fixture(context, options = {}) {
     set persistFailure(value) { persistFailure = value; }, set createOverride(value) { createOverride = value; }, set publicationOverride(value) { publicationOverride = value; }, set failAccount(value) { failAccount = value; },
     close: async () => { active?.abort(); mounted = false; await act(async () => root.render(null)); },
     changeContent: async () => { saved = { ...saved, content: { ...saved.content, wechat: { title: "新标题", body: "新内容" } } }; await act(async () => renderDraft(saved)); },
+    changeImages: async () => { saved = { ...saved, images: [...saved.images, { ...saved.images[0], id: "risk-wechat", name: "新风险提示.png" }] }; await act(async () => renderDraft(saved)); },
+    changeOtherPlatform: async () => { saved = { ...saved, content: { ...saved.content, xiaohongshu: { title: "小红书新标题", body: "小红书新内容" } } }; await act(async () => renderDraft(saved)); },
+    setReady: async (value) => { await act(async () => renderReady(value)); },
   };
 }
 
@@ -129,6 +132,41 @@ test("changed copy cannot publish an older saved draft", async (context) => {
   const oldId = f.creates[0].id; await f.changeContent(); await f.click("立即发布"); await f.click("确认立即发布");
   assert.equal(f.creates.length, 2); assert.notEqual(f.publications[0].id, oldId);
   assert.equal(f.creates[1].content.title, "新标题");
+});
+
+test("editing WeChat copy dismisses an open publication approval and requires a fresh one", async (context) => {
+  const f = await fixture(context); await f.select(0); await f.click("立即发布");
+  await f.changeContent();
+  assert.equal(f.container.querySelector('[aria-label="确认立即发布"]'), null);
+  assert.equal(f.publications.length, 0); assert.equal(f.creates.length, 0);
+  await f.click("立即发布");
+  assert.match(f.container.querySelector('[aria-label="确认立即发布"]').textContent, /新标题/);
+  await f.click("确认立即发布");
+  assert.equal(f.creates[0].content.title, "新标题"); assert.equal(f.publications.length, 1);
+});
+
+test("replacing prepared images or invalidating content checks cancels publication approval", async (context) => {
+  const f = await fixture(context); await f.select(0); await f.click("立即发布");
+  await f.changeImages();
+  assert.equal(f.container.querySelector('[aria-label="确认立即发布"]'), null);
+  await f.click("立即发布"); await f.setReady(false);
+  assert.equal(f.container.querySelector('[aria-label="确认立即发布"]'), null);
+  await f.setReady(true);
+  assert.equal(f.container.querySelector('[aria-label="确认立即发布"]'), null, "restoring content readiness cannot revive an old approval");
+  await f.click("立即发布"); await f.click("确认立即发布");
+  assert.equal(f.creates[0].images.length, 3); assert.equal(f.publications.length, 1);
+});
+
+test("changing target accounts cancels approval, while edits to the other platform preserve it", async (context) => {
+  const f = await fixture(context); await f.select(0); await f.click("立即发布");
+  await f.select(1);
+  assert.equal(f.container.querySelector('[aria-label="确认立即发布"]'), null);
+  await f.select(1);
+  assert.equal(f.container.querySelector('[aria-label="确认立即发布"]'), null, "restoring the old selection cannot revive approval");
+  await f.click("立即发布"); await f.changeOtherPlatform();
+  assert.ok(f.container.querySelector('[aria-label="确认立即发布"]'));
+  await f.click("确认立即发布");
+  assert.equal(f.publications.length, 1); assert.equal(f.publications[0].accountId, ids[0]);
 });
 
 test("an uncertain publication with no readback is never resubmitted or replaced by changed content", async (context) => {

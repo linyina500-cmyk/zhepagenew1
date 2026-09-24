@@ -39,7 +39,9 @@ const handleXhs = async (request, send) => {
   xhsHandler ||= createXhsHandler({ service });
   return xhsHandler(request, send);
 };
-const server = createWechatServer({ accounts, syncToken, handleXhs, xhsBusy: () => xhsService?.busy() || false });
+const server = createWechatServer({ accounts, syncToken, handleXhs, xhsBusy: () => xhsService?.busy() || false,
+  onDiagnostic: ({ platform, action, code }) => console.info(`ZHEPAGE_DIAGNOSTIC ${platform} ${action} ${code}`),
+});
 const pairingServer = createPairingServer({ deviceId: accounts.deviceId, syncToken });
 let stopping;
 function shutdown() {

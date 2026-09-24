@@ -15,7 +15,7 @@ export const SELECTORS = Object.freeze({
 });
 
 export class XhsDriverError extends Error {
-  constructor(message) { super(message); this.name = "XhsDriverError"; }
+  constructor(message, { status = 409, code = "page_needs_attention" } = {}) { super(message); this.name = "XhsDriverError"; this.status = status; this.code = code; }
 }
 
 export function validDraftRef(ref, imageCount) {
@@ -131,9 +131,13 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
   let preparedJobId = null, saveAttempted = false;
   async function ensurePage() {
     if (!context) {
-      await mkdir(profileDir, { recursive: true, mode: 0o700 });
-      const browserType = chromium ?? (await import("playwright")).chromium;
-      context = await browserType.launchPersistentContext(profileDir, { channel: "chrome", headless: false, viewport: { width: 1440, height: 1000 } });
+      try {
+        await mkdir(profileDir, { recursive: true, mode: 0o700 });
+        const browserType = chromium ?? (await import("playwright")).chromium;
+        context = await browserType.launchPersistentContext(profileDir, { channel: "chrome", headless: false, viewport: { width: 1440, height: 1000 } });
+      } catch {
+        throw new XhsDriverError("小红书专用窗口未能启动，请确认已安装 Google Chrome，再重新打开折页同步助手。", { status: 503, code: "browser_open_failed" });
+      }
       context.setDefaultTimeout(10_000);
     }
     if (!page) {
@@ -141,7 +145,13 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
       // A second creator editor may contain user work. Never select arbitrarily.
       if (pages.filter((candidate) => candidate.url().startsWith(ORIGIN)).length > 1) throw new XhsDriverError("专用浏览器中有多个小红书页面，请保留一个后再连接");
       page = pages.find((candidate) => candidate.url().startsWith(ORIGIN)) ?? pages[0] ?? await context.newPage();
-      if (!page.url().startsWith(ORIGIN)) await page.goto(EDITOR_URL);
+      if (!page.url().startsWith(ORIGIN)) {
+        try { await page.goto(EDITOR_URL, { waitUntil: "domcontentloaded", timeout: Math.min(timeoutMs, 15_000) }); }
+        catch {
+          page = undefined;
+          throw new XhsDriverError("小红书页面暂时打不开，请确认网络正常后重试。", { status: 503, code: "page_open_failed" });
+        }
+      }
     }
     if (!page || page.isClosed()) throw new XhsDriverError("小红书专用浏览器已关闭，请重启本机同步服务");
     return page;
@@ -174,7 +184,7 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
     } catch {
       // Browser errors can contain URLs or page data; expose a fixed message.
     } finally {
-      if (accountPage) await accountPage.close();
+      if (accountPage) await accountPage.close().catch(() => {});
     }
     return { status: "needs_attention", message: "尚未从首页账号卡确认小红书账号标识，请核对专用窗口；当前不会上传图片" };
   }
@@ -216,7 +226,12 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
   }
   return {
     checkConnection: accountState,
-    async openLogin() { await ensurePage(); await page.bringToFront(); return accountState(); },
+    async openLogin() {
+      await ensurePage();
+      try { await page.bringToFront(); }
+      catch { throw new XhsDriverError("小红书专用窗口无法显示，请重新打开折页同步助手后重试。", { status: 503, code: "window_focus_failed" }); }
+      return accountState();
+    },
     async prepare({ jobId, account, title, body, images, onProgress }) {
       await requireAccount(account);
       if (!jobId || preparedJobId === jobId) throw new XhsDriverError("同一组编辑内容不能重复导入");

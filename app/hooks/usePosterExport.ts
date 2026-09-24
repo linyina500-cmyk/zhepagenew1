@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { withTimeout } from "../../lib/async/withTimeout";
 import type { DraftImage } from "../../lib/draftSync/types";
+import { separateRiskNote } from "../../lib/export/separateRiskNote";
 import { preparePosterSnapshot } from "../../lib/export/preparePosterSnapshot";
 
 export type ExportVersion = { inputKey: string; paginationVersion: number };
@@ -128,7 +129,7 @@ export function usePosterExport({
     return current;
   }
 
-  async function renderPage(index: number, version: ExportVersion) {
+  async function renderPage(index: number, version: ExportVersion, syncPage?: number) {
     requireCurrentExport(version);
     await withTimeout(waitForFonts(), 20000, "字体加载超时，请刷新页面后重试");
     requireCurrentExport(version);
@@ -145,6 +146,15 @@ export function usePosterExport({
     const fontEmbedCSS = await getPosterFontEmbedCss(node, imageModule);
     requireCurrentExport(version);
     const snapshot = await preparePosterSnapshot(node, format, () => { requireCurrentExport(version); });
+    if (syncPage !== undefined) {
+      snapshot.node.querySelectorAll(".risk-note").forEach((note) => note.remove());
+      const headerNumber = snapshot.node.querySelector(":scope > header > b");
+      if (headerNumber) headerNumber.textContent = String(syncPage).padStart(2, "0");
+      const pageNumber = snapshot.node.querySelector(":scope > footer > span:last-child");
+      if (pageNumber) pageNumber.textContent = String(syncPage).padStart(2, "0");
+      const coverCount = snapshot.node.querySelector(":scope > .cover-bottom > .cover-meta > span:last-child");
+      if (coverCount) coverCount.textContent = "图文内容";
+    }
     const controller = new AbortController();
     const renderTimer = window.setTimeout(() => controller.abort(), 90000);
     try {
@@ -218,19 +228,21 @@ export function usePosterExport({
     }
   }
 
-  async function collectAssets(): Promise<DraftImage[]> {
+  async function collectAssets(options?: { separateRisk?: boolean }): Promise<DraftImage[]> {
     if (!beginExport()) throw new Error("图片正在处理中，请等待当前任务完成");
     try {
       const version = requireCurrentExport();
       if (!totalPages) throw new Error("请先完成排版，再准备草稿图片");
       const images: DraftImage[] = [];
       for (let index = 0; index < totalPages; index += 1) {
+        const contentIndex = index - pageOffset;
+        if (options?.separateRisk && contentIndex >= 0 && separateRiskNote(contentPages[contentIndex]).riskOnly) continue;
         setNotice({ tone: "neutral", text: `正在准备草稿图片 ${index + 1} / ${totalPages}…` });
-        const blob = await renderPage(index, version);
+        const blob = await renderPage(index, version, options?.separateRisk ? images.length + 1 : undefined);
         requireCurrentExport(version);
         images.push({
           id: crypto.randomUUID(),
-          name: `折页-${formatExportLabel(formatKey)}-${String(index + 1).padStart(2, "0")}.png`,
+          name: `折页-${formatExportLabel(formatKey)}-${String(options?.separateRisk ? images.length + 1 : index + 1).padStart(2, "0")}.png`,
           blob, width: format.width, height: format.height,
         });
       }

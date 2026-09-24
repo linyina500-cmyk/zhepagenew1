@@ -912,7 +912,7 @@ export default function Home() {
               const normalized = normalizePosterTitle(event.target.value);
               setTitle(normalized);
               if (normalized !== event.target.value) setNotice({ tone: "error", text: `标题最多 ${MAX_TITLE_LENGTH} 字、${MAX_TITLE_LINES} 行` });
-            }} /><small>{Array.from(title.replace(/\n/g, "")).length} / {MAX_TITLE_LENGTH} 字 · 最多 {MAX_TITLE_LINES} 行</small></div>
+            }} /><small>{Array.from(title.replace(/\n/g, "")).length} / {MAX_TITLE_LENGTH} 字 · 最多 {MAX_TITLE_LINES} 行</small>{Array.from(title.replace(/\s*\n\s*/g, " ").trim()).length > 20 && <small className="draft-sync-field-error">同步标题最多 20 字；当前超过 {Array.from(title.replace(/\s*\n\s*/g, " ").trim()).length - 20} 字，请在同步弹窗中填写短标题。海报标题会保留。</small>}</div>
             <div className="field-stack"><label htmlFor="poster-subtitle">导语 / 副标题（可留空）</label><input id="poster-subtitle" value={subtitle} onChange={(event) => setSubtitle(event.target.value)} placeholder="留空时，标题后直接展示正文" /></div>
             <div className="microcopy-grid">
               <div className="field-stack"><label htmlFor="lab-name">底部栏目名</label><input id="lab-name" value={labName} onChange={(event) => setLabName(event.target.value)} /></div>
@@ -1220,6 +1220,8 @@ export default function Home() {
         sourceFormat={formatKey}
         canCollect={paginationReady && !exporting}
         collectAssets={collectAssets}
+        riskNote={{ enabled: showRiskNote, title: riskTitle, text: riskText }}
+        riskAppearance={{ paperColor, textColor, accentColor, fontFamily: bodyFont === "serif" ? '"Zhepage Source Han Serif", serif' : '"Zhepage Source Han Sans", sans-serif', footerText: footerText.trim() || labName.trim() }}
         onClose={() => setDraftSyncOpen(false)}
         onReturnToEditor={() => {
           setDraftSyncOpen(false);

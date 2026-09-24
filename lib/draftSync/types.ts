@@ -1,3 +1,4 @@
+import type { RiskNote, RiskAppearance } from "./riskPage";
 export type DraftPlatform = "xiaohongshu" | "wechat";
 export type DraftContent = { title: string; body: string };
 export type DraftImage = { id: string; name: string; blob: Blob; width: number; height: number };
@@ -19,6 +20,7 @@ export type LocalDraft = {
   updatedAt: string;
   sourceFormat: string;
   images: DraftImage[];
+  risk?: { notes: Record<DraftPlatform, RiskNote>; appearance: RiskAppearance };
   content: Record<DraftPlatform, DraftContent>;
   selectedAccountIds: string[];
   receipts: SyncReceipt[];

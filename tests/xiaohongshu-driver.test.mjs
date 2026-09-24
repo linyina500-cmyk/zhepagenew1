@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { compareDraftEvidence, createXhsBrowserDriver, readAccountEvidence, readPageEvidence, SELECTORS, validDraftRef } from "../server/xiaohongshu/driver.mjs";
+import { compareDraftEvidence, createXhsBrowserDriver, readAccountEvidence, readPageEvidence, SELECTORS, validDraftRef, XhsDriverError } from "../server/xiaohongshu/driver.mjs";
 
 function domEvidence(html, reader = readPageEvidence) {
   const dom = new JSDOM(html, { url: "https://creator.xiaohongshu.com/publish/publish?target=image", runScripts: "outside-only" });
@@ -66,7 +66,7 @@ test("draft verification rejects reordered, missing, broken or processing images
   assert.equal(validDraftRef({ ...draftRef, url: "https://evil.test/publish/publish?target=image&draft_id=one" }, 2), false);
 });
 
-async function browserFixture(t, { saveError = false, reverseReadback = false, reverseUpload = false, firstBlob = false, accountError, accountRedirect, onAccountNavigate, timeoutMs = 300 } = {}) {
+async function browserFixture(t, { saveError = false, reverseReadback = false, reverseUpload = false, firstBlob = false, accountError, accountCloseError = false, focusError = false, accountRedirect, onAccountNavigate, timeoutMs = 300 } = {}) {
   const profileDir = await mkdtemp(join(tmpdir(), "zhepage-xhs-driver-"));
   const calls = [];
   let currentAccount = { identifier: "test_account_123", name: "测试账号" };
@@ -91,7 +91,7 @@ async function browserFixture(t, { saveError = false, reverseReadback = false, r
     },
   });
   const page = {
-    url: () => url, isClosed: () => false, async bringToFront() {},
+    url: () => url, isClosed: () => false, async bringToFront() { if (focusError) throw new Error("private browser focus error"); },
     async goto(target) {
       calls.push(["goto", target]); url = target;
       if (target.includes("draft_id=one")) state = { ...state, title: stored.title, body: stored.body, images: reverseReadback ? stored.images.toReversed() : stored.images };
@@ -120,7 +120,7 @@ async function browserFixture(t, { saveError = false, reverseReadback = false, r
           if (accountError === "read") throw new Error("private browser error");
           return structuredClone(currentAccount);
         },
-        async close() { calls.push(["account-close"]); },
+        async close() { calls.push(["account-close"]); if (accountCloseError) throw new Error("private browser close error"); },
       };
     },
     async close() { calls.push(["close"]); },
@@ -130,6 +130,54 @@ async function browserFixture(t, { saveError = false, reverseReadback = false, r
   t.after(async () => { await driver.close(); await rm(profileDir, { recursive: true, force: true }); });
   return { driver, calls, profileDir, setAccount: (account) => { currentAccount = account; }, editor: () => structuredClone(state) };
 }
+
+test("launch failures are classified without exposing browser errors or a profile path", async (t) => {
+  const profileDir = await mkdtemp(join(tmpdir(), "zhepage-xhs-launch-"));
+  const driver = createXhsBrowserDriver({ profileDir, chromium: { async launchPersistentContext() { throw new Error(`private browser error ${profileDir}`); } } });
+  t.after(async () => { await driver.close(); await rm(profileDir, { recursive: true, force: true }); });
+  await assert.rejects(driver.openLogin(), (error) => {
+    assert.ok(error instanceof XhsDriverError); assert.equal(error.status, 503); assert.equal(error.code, "browser_open_failed");
+    assert.match(error.message, /小红书专用窗口未能启动/); assert.doesNotMatch(error.message, /private|zhepage-xhs-launch/);
+    return true;
+  });
+});
+
+test("initial navigation has a bounded DOM deadline and an explicit retry reuses the same window", async (t) => {
+  const profileDir = await mkdtemp(join(tmpdir(), "zhepage-xhs-navigation-"));
+  let launches = 0, navigations = 0, url = "about:blank";
+  const page = { url: () => url, isClosed: () => false, async bringToFront() {}, async goto(target, options) {
+    navigations++;
+    assert.deepEqual(options, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    if (navigations === 1) throw new Error("private browser navigation error");
+    url = target;
+  } };
+  const context = { pages: () => [page], setDefaultTimeout() {}, async close() {}, async newPage() {
+    return { async goto() {}, url: () => "https://creator.xiaohongshu.com/login", async close() {} };
+  } };
+  const driver = createXhsBrowserDriver({ profileDir, chromium: { async launchPersistentContext() { launches++; return context; } } });
+  t.after(async () => { await driver.close(); await rm(profileDir, { recursive: true, force: true }); });
+  await assert.rejects(driver.openLogin(), (error) => {
+    assert.ok(error instanceof XhsDriverError); assert.equal(error.status, 503); assert.equal(error.code, "page_open_failed");
+    assert.match(error.message, /小红书页面暂时打不开/); assert.doesNotMatch(error.message, /private/); return true;
+  });
+  assert.equal(navigations, 1, "failed navigation must not retry in the background");
+  assert.equal((await driver.openLogin()).status, "login_required");
+  assert.equal(launches, 1); assert.equal(navigations, 2);
+});
+
+test("focus failures identify the XHS window and account-tab cleanup does not replace the account result", async (t) => {
+  const failed = await browserFixture(t, { focusError: true });
+  await assert.rejects(failed.driver.openLogin(), (error) => {
+    assert.ok(error instanceof XhsDriverError); assert.equal(error.code, "window_focus_failed"); assert.equal(error.status, 503);
+    assert.match(error.message, /小红书专用窗口无法显示/); assert.doesNotMatch(error.message, /private/); return true;
+  });
+  for (const [accountError, expected] of [[undefined, "connected"], ["read", "needs_attention"]]) {
+    const f = await browserFixture(t, { accountError, accountCloseError: true });
+    const result = await f.driver.checkConnection();
+    assert.equal(result.status, expected); assert.doesNotMatch(JSON.stringify(result), /private/);
+    assert.equal(f.calls.filter(([kind]) => kind === "account-close").length, 1);
+  }
+});
 
 test("driver is lazy, uses a dedicated persistent profile and preserves native file order", async (t) => {
   const f = await browserFixture(t);

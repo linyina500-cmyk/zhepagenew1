@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { WechatApiError } from "../../lib/wechat/api.mjs";
 import { ACCOUNT_ID } from "./accounts.mjs";
 import { RequestError as XhsRequestError } from "../xiaohongshu/jobs.mjs";
+import { XhsDriverError } from "../xiaohongshu/driver.mjs";
 import { MAX_REQUEST_BYTES, JOB_ID, RequestError, readSubmission } from "./jobs.mjs";
 import { localAccess } from "./local-access.mjs";
 
@@ -29,7 +30,7 @@ async function readJson(request) {
   catch { throw new RequestError("连接或确认信息格式不正确"); }
 }
 
-export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = () => false }) {
+export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = () => false, onDiagnostic = () => {} }) {
   if (typeof syncToken !== "string" || syncToken.length < 32 || syncToken.length > 256 || /\s/u.test(syncToken)) throw new Error("WECHAT_SYNC_TOKEN 需要为 32–256 位无空格的随机口令");
   let readingUpload = false;
   let xhsRequests = 0;
@@ -40,14 +41,19 @@ export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = (
       response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
       response.end(JSON.stringify(value));
     };
+    let platform = "local", action = "request";
     try {
-      if (!authorized(request.headers.authorization, syncToken)) { send(401, { error: "公众号连接口令不正确，请检查后重试" }); request.resume(); return; }
+      if (!authorized(request.headers.authorization, syncToken)) { send(401, { error: "本机连接已失效，请重新连接这台电脑" }); request.resume(); return; }
       const url = new URL(request.url, "http://localhost");
+      platform = url.pathname.startsWith("/api/xiaohongshu/") ? "xiaohongshu" : url.pathname.startsWith("/api/wechat/") ? "wechat" : "local";
+      action = url.pathname.endsWith("/login") ? "login" : url.pathname.endsWith("/account") ? "account" : url.pathname.includes("/jobs") ? "draft" : url.pathname.endsWith("/connection") ? "connection" : "request";
       if (url.search) throw new RequestError("接口不接收网址查询参数");
-      if (url.pathname.startsWith("/api/xiaohongshu/") && handleXhs) {
+      if (platform === "xiaohongshu") {
+        if (!handleXhs) throw new XhsRequestError("小红书服务尚未准备好，请重新打开折页同步助手", 503);
         xhsRequests++;
         try { if (await handleXhs(request, send)) return; }
         finally { xhsRequests--; }
+        throw new XhsRequestError("没有此小红书草稿操作", 404);
       }
       if (request.method === "GET" && url.pathname === "/api/wechat/connection") {
         send(200, { deviceId: accounts.deviceId, busy: busy() }); return;
@@ -59,7 +65,7 @@ export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = (
         send(200, { account: await accounts.connect(await readJson(request)) }); return;
       }
       const scoped = /^\/api\/wechat\/accounts\/([^/]+)(\/.*)$/.exec(url.pathname);
-      if (!scoped || !ACCOUNT_ID.test(scoped[1])) throw new RequestError("没有此公众号操作", 404);
+      if (!scoped || !ACCOUNT_ID.test(scoped[1])) throw new RequestError(platform === "wechat" ? "没有此公众号操作" : "没有此同步操作", 404);
       const path = scoped[2];
       if (request.method === "POST" && path === "/disconnect") {
         if (busy()) throw new RequestError("本机仍在处理同步任务，请完成后再断开连接", 409);
@@ -104,8 +110,17 @@ export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = (
       // Never serialize upstream fetch errors, credentials, headers, or URLs.
       // A controlled platform failure is distinct from an unreachable service.
       const controlled = error instanceof RequestError || error instanceof XhsRequestError;
-      const status = controlled ? error.status : error instanceof WechatApiError ? 424 : 502;
-      const message = controlled || error instanceof WechatApiError ? error.message : "公众号同步暂未完成，请读取状态并核对草稿箱";
+      const xhsDriver = platform === "xiaohongshu" && error instanceof XhsDriverError;
+      const wechatApi = platform === "wechat" && error instanceof WechatApiError;
+      const status = controlled || xhsDriver ? error.status : wechatApi ? 424 : 502;
+      const unknown = platform === "xiaohongshu"
+        ? action === "login" ? "小红书登录窗口暂未打开，请重试；若专用窗口已打开，请先检查其中提示。"
+          : action === "account" ? "暂时无法检查小红书账号，请查看专用窗口后重试。"
+            : "小红书同步结果尚未确认，请读取原任务状态并核对小红书草稿箱。"
+        : action === "connection" || platform === "local" ? "本机助手暂未回应，请重新连接这台电脑。"
+          : "公众号同步暂未完成，请读取状态并核对草稿箱";
+      const message = controlled || xhsDriver || wechatApi ? error.message : unknown;
+      if (xhsDriver || (!controlled && !wechatApi)) onDiagnostic({ platform, action, code: xhsDriver ? error.code : "unexpected_error" });
       if (!response.headersSent) send(status, { error: message });
     }
   });

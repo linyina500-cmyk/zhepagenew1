@@ -76,7 +76,22 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
     return { accountId: text(receipt.accountId, 200, true), platform: platform(receipt.platform), status: receipt.status as SyncReceipt["status"], message: text(receipt.message, 4000), ...(draftId ? { draftId } : {}), ...(jobId ? { jobId } : {}), ...(contentHash ? { contentHash } : {}), ...(publicationAttempted ? { publicationAttempted } : {}), ...(url ? { url } : {}) };
   });
   if (new Set(receipts.map((receipt) => `${receipt.platform}:${receipt.accountId}`)).size !== receipts.length) throw invalidArchive();
+  let risk: LocalDraft["risk"];
+  if (draft.risk !== undefined) {
+    const source = record(draft.risk), notes = record(source.notes), appearance = record(source.appearance);
+    const readNote = (value: unknown) => {
+      const note = record(value);
+      if (typeof note.enabled !== "boolean") throw invalidArchive();
+      return { enabled: note.enabled, title: text(note.title, 1000), text: text(note.text, 10000) };
+    };
+    const color = (value: unknown) => { const result = text(value, 7, true); if (!/^#[a-f0-9]{6}$/i.test(result)) throw invalidArchive(); return result; };
+    risk = { notes: { xiaohongshu: readNote(notes.xiaohongshu), wechat: readNote(notes.wechat) }, appearance: {
+      paperColor: color(appearance.paperColor), textColor: color(appearance.textColor), accentColor: color(appearance.accentColor),
+      fontFamily: text(appearance.fontFamily, 200, true), footerText: text(appearance.footerText, 200),
+    } };
+  }
   return {
+    ...(risk ? { risk } : {}),
     schemaVersion: 1, id: text(draft.id, 200, true), updatedAt, sourceFormat: text(draft.sourceFormat, 40, true), images,
     content: { xiaohongshu: content(fields.xiaohongshu), wechat: content(fields.wechat) },
     selectedAccountIds: identifiers(draft.selectedAccountIds), receipts,

@@ -23,11 +23,19 @@ async function fixture(t) {
     import { existsSync, writeFileSync } from "node:fs";
     writeFileSync("service-observed.json", JSON.stringify({ token: process.env.WECHAT_SYNC_TOKEN, secret: process.env.WECHAT_APP_SECRET }));
     console.log(process.env.WECHAT_SYNC_TOKEN); console.error(process.env.WECHAT_APP_SECRET);
-    let ready = false, stopping = false;
+    let ready = false, stopping = false, diagnostic = false;
     setInterval(() => {
       if (!ready && existsSync("release-ready")) { ready = true; console.log("公众号草稿服务已启动"); }
       if (existsSync("release-crash")) process.exit(3);
       if (existsSync("release-port-conflict")) { console.error("已被占用 synthetic-sensitive-diagnostic"); process.exit(1); }
+      if (!diagnostic && existsSync("release-diagnostics")) {
+        diagnostic = true;
+        console.log("ZHEPAGE_DIAGNOSTIC xiaohongshu login browser_open_failed");
+        console.log("ZHEPAGE_DIAGNOSTIC xiaohongshu account unexpected_error synthetic-sensitive-diagnostic");
+        console.log("ZHEPAGE_DIAGNOSTIC xiaohongshu account synthetic-private-code");
+        process.stdout.write("ZHEPAGE_DIAGNOSTIC xiaohongshu acc");
+        setTimeout(() => console.log("ount page_needs_attention"), 5);
+      }
     }, 15);
     process.on("SIGTERM", () => { if (stopping) return; stopping = true; writeFileSync("service-stopping", "true"); setTimeout(() => { writeFileSync("service-drained", "true"); process.exit(0); }, 200); });
     setTimeout(() => process.exit(2), 10000);
@@ -81,4 +89,14 @@ test("a port conflict never reports readiness or emits raw child diagnostics", a
   assert.deepEqual(await f.closed, { code: 1, signal: null });
   assert.deepEqual(await f.status(), { pid: f.child.pid, ready: false });
   assert.doesNotMatch(f.output, /助手已就绪|synthetic-|WECHAT_APP_SECRET|WECHAT_SYNC_TOKEN/);
+});
+
+test("supervisor forwards only fixed platform diagnostics, including split lines, without raw details", async (t) => {
+  const f = await fixture(t);
+  await f.release("release-ready");
+  await waitFor(async () => (await f.status())?.ready, "supervisor did not become ready");
+  await f.release("release-diagnostics");
+  await waitFor(() => f.output.includes("ZHEPAGE_DIAGNOSTIC xiaohongshu account page_needs_attention"), "controlled split diagnostic was not recorded");
+  assert.match(f.output, /ZHEPAGE_DIAGNOSTIC xiaohongshu login browser_open_failed/);
+  assert.doesNotMatch(f.output, /synthetic-|WECHAT_APP_SECRET|WECHAT_SYNC_TOKEN|unexpected_error/);
 });

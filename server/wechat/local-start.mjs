@@ -41,13 +41,19 @@ async function main() {
   service.on("close", (code, signal) => {
     if (!stopping) stop(`本机服务意外退出（${signal || code}），将由系统重新启动。`, true);
   });
-  let output = "", errors = "", ready = false;
+  let output = "", errors = "", diagnostics = "", ready = false;
   startupTimer = setTimeout(() => stop("本机服务启动超时，将由系统稍后重新启动。", true), 20_000);
   service.stderr.on("data", (chunk) => {
     errors = (errors + chunk.toString()).slice(-2000);
     if (errors.includes("已被占用")) stop("端口 8788 或 8789 被占用，稍后重试。", true);
   });
   service.stdout.on("data", (chunk) => {
+    diagnostics = (diagnostics + chunk.toString()).slice(-4000);
+    const lines = diagnostics.split(/\r?\n/u); diagnostics = lines.pop();
+    for (const line of lines) {
+      // Forward only this fixed vocabulary, never raw errors, URLs or headers.
+      if (/^ZHEPAGE_DIAGNOSTIC (local|wechat|xiaohongshu) (connection|login|account|draft|request) (browser_open_failed|page_open_failed|window_focus_failed|page_needs_attention|unexpected_error)$/u.test(line)) log(line);
+    }
     output = (output + chunk.toString()).slice(-2000);
     if (ready || stopping || !output.includes("公众号草稿服务已启动")) return;
     ready = true; clearTimeout(startupTimer);
