@@ -7,7 +7,7 @@ import ts from "typescript";
 import { installDom } from "./helpers/load-dom-module.mjs";
 
 const account = { id: "0123456789abcdefabcd", name: "测试小红书账号" };
-async function fixture(t, { resultStatus = "needs_confirmation", existingReceipt, switchedAccount = false, wrongDevice = false } = {}) {
+async function fixture(t, { resultStatus = "needs_confirmation", existingReceipt, switchedAccount = false, wrongDevice = false, createError } = {}) {
   const dom = installDom(), previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const filename = fileURLToPath(new URL("../app/components/XiaohongshuDraftPanel.tsx", import.meta.url)), native = createRequire(filename);
@@ -20,7 +20,7 @@ async function fixture(t, { resultStatus = "needs_confirmation", existingReceipt
   const api = {
     async getAccount() { checks++; return switchedAccount && checks > 1 ? { ...account, id: "abcdef0123456789abcd" } : account; },
     async openLogin() { calls.push(["login"]); },
-    async createJob(input) { jobId = input.id; calls.push(["create", input]); return currentJob(); },
+    async createJob(input) { jobId = input.id; calls.push(["create", input]); if (createError) throw new Error(createError); return currentJob(); },
     async waitForJob(value) { return value; },
     async getJob() { calls.push(["read"]); return currentJob(); },
     async verifyJob() { calls.push(["verify"]); return currentJob(); },
@@ -58,7 +58,13 @@ async function fixture(t, { resultStatus = "needs_confirmation", existingReceipt
     await act(async () => { element.click(); await Promise.all(operations); });
   }
   t.after(async () => { await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct; });
-  return { container, button, click, calls, saves, errors, get draft() { return draft; }, get submitted() { return submitted; } };
+  return { container, button, click, calls, saves, errors, get draft() { return draft; }, get submitted() { return submitted; }, get checks() { return checks; },
+    async replaceDraft(changes = {}) {
+      draft = { ...draft, id: "replacement-draft", receipts: [], ...changes }; props.draft = draft;
+      jobId = draft.receipts.find((receipt) => receipt.platform === "xiaohongshu")?.jobId;
+      await act(async () => root.render(React.createElement(loaded.exports.default, props)));
+    },
+  };
 }
 
 test("XHS panel has local-service actions and preserves complete independent poster inputs", async (t) => {
@@ -91,6 +97,43 @@ test("XHS human acknowledgement requires the checkbox and never becomes saved", 
   assert.ok(f.saves.every((receipt) => receipt.status !== "saved"));
   assert.match(f.container.textContent, /保存结果以小红书草稿箱为准/);
   assert.equal(f.button("同步到小红书草稿箱").disabled, true, "a separate new-draft confirmation remains necessary");
+});
+
+test("a restored draft keeps the connected XHS account without inheriting an old task acknowledgement or retry permission", async (t) => {
+  const f = await fixture(t);
+  await f.click("我已登录"); await f.click("同步到小红书草稿箱");
+  await f.click(f.container.querySelector('input[type="checkbox"]')); await f.click("结束本次任务");
+  await f.click(f.container.querySelector('input[type="checkbox"]'));
+  assert.equal(f.button("同步到小红书草稿箱").disabled, false);
+  const checksBeforeRestore = f.checks;
+  const restored = { platform: "xiaohongshu", accountId: account.id, jobId: "restored-unconfirmed-job", status: "needs_confirmation", message: "恢复存档的任务待核对" };
+  await f.replaceDraft({ receipts: [restored] });
+  assert.match(f.container.textContent, /已连接：测试小红书账号/);
+  assert.match(f.container.textContent, /恢复存档的任务待核对/);
+  assert.doesNotMatch(f.container.textContent, /已结束本次任务|另存一份新草稿|图片 2 \/ 2 张/);
+  assert.equal(f.container.querySelector('input[type="checkbox"]').checked, false);
+  assert.equal(f.button("结束本次任务").disabled, true);
+  assert.equal(f.button("同步到小红书草稿箱").disabled, true);
+  assert.equal(f.checks, checksBeforeRestore, "restoring content does not require checking the same account again");
+  assert.equal(f.calls.filter(([action]) => action === "create").length, 1);
+
+  await f.replaceDraft({ id: "restored-saved-draft", receipts: [{ ...restored, status: "saved", draftId: "another-saved-draft" }] });
+  assert.match(f.container.textContent, /另存一份新草稿/);
+  assert.equal(f.container.querySelector('input[type="checkbox"]').checked, false, "old retry permission does not carry into the next draft");
+  assert.equal(f.button("同步到小红书草稿箱").disabled, true);
+});
+
+test("new XHS content clears stale errors while preserving the already connected account", async (t) => {
+  const f = await fixture(t, { createError: "上一份内容响应中断" });
+  await f.click("我已登录"); await f.click("同步到小红书草稿箱");
+  assert.match(f.container.querySelector(".draft-sync-message").textContent, /上一份内容响应中断/);
+  await f.click(f.container.querySelector('input[type="checkbox"]'));
+  await f.replaceDraft();
+  assert.match(f.container.textContent, /已连接：测试小红书账号/);
+  assert.doesNotMatch(f.container.textContent, /上一份内容响应中断|我已检查草稿/);
+  assert.equal(f.container.querySelector(".draft-sync-message"), null);
+  assert.equal(f.button("同步到小红书草稿箱").disabled, false);
+  assert.equal(f.calls.filter(([action]) => action === "create").length, 1);
 });
 
 test("only a verified saved service result is persisted as saved", async (t) => {

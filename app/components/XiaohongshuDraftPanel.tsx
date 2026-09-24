@@ -16,6 +16,11 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChec
   const [account, setAccount] = useState<XhsAccount | null>(null), [job, setJob] = useState<XhsJob | null>(null);
   const [feedback, setFeedback] = useState("");
   const [checked, setChecked] = useState(false), [allowNew, setAllowNew] = useState(false);
+  const [resultDraftId, setResultDraftId] = useState(draft.id);
+  if (resultDraftId !== draft.id) {
+    setResultDraftId(draft.id);
+    setJob(null); setFeedback(""); setChecked(false); setAllowNew(false);
+  }
   const receipt = draft.receipts.find((item) => item.platform === "xiaohongshu" && item.accountId === account?.id);
   const pending = receipt?.status === "needs_confirmation" && !job?.acknowledged;
   async function client(signal: AbortSignal) {

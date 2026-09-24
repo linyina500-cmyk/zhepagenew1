@@ -15,7 +15,7 @@ async function fixture(t, options = {}) {
   t.mock.method(URL, "createObjectURL", () => "blob:fixture"); t.mock.method(URL, "revokeObjectURL", () => {});
   const filename = fileURLToPath(new URL("../app/components/DraftSyncDialog.tsx", import.meta.url)), native = createRequire(filename);
   const React = native("react"), { act } = React, { createRoot } = native("react-dom/client");
-  let saved = null, saveOverride, closed = 0;
+  let saved = null, saveOverride, closed = 0, collectError = null, collectCalls = 0;
   const panels = {};
   const saves = [], batches = [], panelRenders = [], bindingReads = [], accountReads = [];
   const binding = { deviceId: "fixture-device", connectionToken: "fixture-private-token" };
@@ -50,7 +50,7 @@ async function fixture(t, options = {}) {
   const root = createRoot(container);
   const props = {
     open: true, openerRef: { current: opener }, title: "用户完整文章", sourceFormat: "xiaohongshu", canCollect: true,
-    collectAssets: async () => { const images = Array.from({ length: 3 }, (_, i) => ({ id: crypto.randomUUID(), name: `第${i + 1}页.png`, width: 1080, height: 1440, blob: new Blob([`full page ${batches.length}:${i}`], { type: "image/png" }) })); if (options.risk) images.at(-1).riskTemplate = { svg: "<svg/>" }; batches.push(images); return images; },
+    collectAssets: async () => { collectCalls++; if (collectError) throw collectError; const images = Array.from({ length: 3 }, (_, i) => ({ id: crypto.randomUUID(), name: `第${i + 1}页.png`, width: 1080, height: 1440, blob: new Blob([`full page ${batches.length}:${i}`], { type: "image/png" }) })); if (options.risk) images.at(-1).riskTemplate = { svg: "<svg/>" }; batches.push(images); return images; },
     ...(options.risk ? { riskNote: { enabled: true, title: "提示", text: "投资有风险" } } : {}),
     onClose: () => { closed++; root.render(null); }, onReturnToEditor: () => root.render(null),
   };
@@ -66,18 +66,22 @@ async function fixture(t, options = {}) {
   }
   t.after(async () => { await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = oldAct; });
   await act(async () => root.render(React.createElement(loaded.exports.default, props)));
-  return { container, opener, act, click, change, batches, saves, binding, accounts, panelRenders, bindingReads, accountReads, get saved() { return saved; }, panels, get panel() { return panels[container.querySelector(".draft-sync-platforms button[aria-pressed=true]")?.textContent.startsWith("小红书") ? "xiaohongshu" : "wechat"]; }, get closed() { return closed; }, set saveOverride(value) { saveOverride = value; }, reopen: () => act(async () => root.render(React.createElement(loaded.exports.default, props))) };
+  return { container, opener, act, click, change, batches, saves, binding, accounts, panelRenders, bindingReads, accountReads, get saved() { return saved; }, panels, get panel() { return panels[container.querySelector(".draft-sync-platforms button[aria-pressed=true]")?.textContent.startsWith("小红书") ? "xiaohongshu" : "wechat"]; }, get closed() { return closed; }, set saveOverride(value) { saveOverride = value; }, set collectError(value) { collectError = value; }, get collectCalls() { return collectCalls; }, reopen: (change = {}) => act(async () => root.render(React.createElement(loaded.exports.default, Object.assign(props, change)))) };
 }
 const pending = (platform, id) => ({ platform, accountId: id, jobId: crypto.randomUUID(), status: "needs_confirmation", message: "结果待核对" });
 
 test("dialog passes all ordered original posters and independent platform copy to service panels", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始");
+  const f = await fixture(t);
+  assert.equal(f.batches.length, 1, "opening generates the current posters once");
+  assert.equal(f.container.querySelector(".draft-sync-steps"), null);
+  assert.equal([...f.container.querySelectorAll("button")].some((button) => /用当前海报开始|确认图片，/.test(button.textContent)), false);
   await f.change("#draft-platform-body", "小红书独立配文\n第二行。");
   await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[1]);
   await f.change("#draft-platform-body", "公众号专用配文。");
   await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[0]);
+  await f.click("调整图片");
   await f.click(f.container.querySelector('[aria-label="前移第 2 张图片"]'));
-  await f.click("确认图片，连接小红书");
+
   assert.deepEqual(f.panel.draft.images, [f.batches[0][1], f.batches[0][0], f.batches[0][2]]);
   assert.deepEqual(f.panel.draft.content.wechat.body, "公众号专用配文。");
   assert.deepEqual(f.panel.draft.content.xiaohongshu.body, "小红书独立配文\n第二行。");
@@ -85,7 +89,7 @@ test("dialog passes all ordered original posters and independent platform copy t
 });
 
 test("stale batch snapshots cannot erase other accounts or platforms with the same account identifier", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+  const f = await fixture(t);
   const first = f.panel, snapshot = first.draft;
   const a = pending("wechat", "same-account"), b = pending("xiaohongshu", "same-account"), c = pending("wechat", "second-account");
   await f.act(async () => first.runOperation("批量处理中", async (signal) => {
@@ -101,7 +105,7 @@ test("stale batch snapshots cannot erase other accounts or platforms with the sa
 });
 
 test("closing preserves the pending ID, new posters retain it, and late results cannot overwrite the new draft", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+  const f = await fixture(t);
   const old = f.panel, receipt = pending("xiaohongshu", "account"), gate = Promise.withResolvers();
   let operation, signal;
   await f.act(async () => { operation = old.runOperation("等待结果", async (currentSignal) => {
@@ -111,7 +115,7 @@ test("closing preserves the pending ID, new posters retain it, and late results 
   assert.equal(f.saved.receipts[0].jobId, receipt.jobId);
   await f.click(f.container.querySelector('[aria-label="关闭草稿同步"]')); assert.equal(signal.aborted, true);
   assert.equal(document.activeElement, f.opener); assert.equal(document.body.style.overflow, "");
-  await f.reopen(); await f.click("用当前海报开始"); await f.change("#draft-platform-body", "下一份内容"); await f.click("存到本机");
+  await f.reopen(); assert.equal(f.batches.length, 2, "reopening prepares the latest editor images once"); await f.change("#draft-platform-body", "下一份内容"); await f.click("存到本机");
   const newId = f.saved.id;
   await f.act(async () => { gate.resolve(); await operation; });
   assert.equal(f.saved.id, newId); assert.equal(f.saved.content.xiaohongshu.body, "下一份内容");
@@ -119,7 +123,7 @@ test("closing preserves the pending ID, new posters retain it, and late results 
 });
 
 test("failed durable save stops a platform operation before upload", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+  const f = await fixture(t);
   f.saveOverride = async () => { throw new Error("本机空间不足"); };
   let uploaded = false;
   await f.act(async () => f.panel.runOperation("准备同步", async (signal) => {
@@ -131,7 +135,7 @@ test("failed durable save stops a platform operation before upload", async (t) =
 
 test("an unbound browser gets one shared connection step before either platform can act", async (t) => {
   const f = await fixture(t, { unbound: true });
-  await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+
   assert.equal(f.container.querySelectorAll('[data-testid="shared-connection"]').length, 1);
   assert.equal(f.container.querySelectorAll('[data-testid="platform-panel"]').length, 0);
   assert.equal(f.panelRenders.length, 0);
@@ -152,37 +156,35 @@ test("an unbound browser gets one shared connection step before either platform 
 
 test("platform panels remain unavailable until the saved local connection has been read", async (t) => {
   const f = await fixture(t, { loading: true });
-  await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+
   assert.equal(f.panelRenders.length, 0);
   assert.equal(f.container.querySelectorAll('[data-testid="platform-panel"]').length, 0);
 });
 
-test("each platform keeps its own step and failure while the other remains usable", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+test("each platform keeps its own failure while the other remains usable", async (t) => {
+  const f = await fixture(t);
   const xhs = f.panel, gate = Promise.withResolvers();
   let operation;
   await f.act(async () => { operation = xhs.runOperation("正在连接小红书", async () => { await gate.promise; throw new Error("小红书窗口未打开"); }); });
   await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[1]);
-  assert.match(f.container.querySelector('[aria-current="step"]').textContent, /确认内容/);
+  assert.equal(f.container.querySelector(".draft-sync-steps"), null);
   assert.doesNotMatch(f.container.querySelector('.draft-sync-footer').textContent, /正在连接小红书/);
-  await f.click("确认图片，选择公众号");
+
   assert.equal(f.panel.busy, false);
   await f.act(async () => { gate.resolve(); await operation; });
   assert.doesNotMatch(f.container.querySelector('.draft-sync-footer').textContent, /小红书窗口未打开/);
   await f.act(async () => f.panel.runOperation("测试公众号", async () => { throw new Error("公众号接口连接失败"); }));
   assert.match(f.container.querySelector('.draft-sync-footer').textContent, /公众号接口连接失败/);
   await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[0]);
-  assert.match(f.container.querySelector('[aria-current="step"]').textContent, /连接小红书/);
+  assert.equal(f.container.querySelector(".draft-sync-steps"), null);
   assert.match(f.container.querySelector('.draft-sync-footer').textContent, /小红书窗口未打开/);
   assert.doesNotMatch(f.container.querySelector('.draft-sync-footer').textContent, /公众号接口连接失败/);
 });
 
-test("adapted image confirmation is platform-specific and never replaces archived source pixels", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+test("prepared platform images are immediately usable without replacing archived source pixels", async (t) => {
+  const f = await fixture(t);
   assert.equal(f.panel.contentReady, true);
   await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[1]);
-  assert.equal(f.panel.contentReady, false);
-  await f.click("确认图片，选择公众号");
   const panel = f.panel;
   assert.equal(panel.contentReady, true);
   assert.equal(panel.draft.images[0].height, 1350);
@@ -196,33 +198,34 @@ test("adapted image confirmation is platform-specific and never replaces archive
 });
 
 test("oversize title is explained beside its input without silent truncation", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始");
+  const f = await fixture(t);
   const title = "长".repeat(23);
   await f.change("#draft-platform-title", title);
   const input = f.container.querySelector("#draft-platform-title");
   assert.equal(input.value, title); assert.equal(input.getAttribute("aria-invalid"), "true");
   assert.match(f.container.querySelector("#draft-title-help").textContent, /超出 3 字/);
-  assert.equal([...f.container.querySelectorAll("button")].find((button) => button.textContent === "确认图片，连接小红书").disabled, true);
+  assert.equal(f.panel.contentReady, false);
   await f.change("#draft-platform-title", "短标题");
   assert.equal(input.getAttribute("aria-invalid"), "false");
+  assert.equal(f.panel.contentReady, true);
 });
 
 test("risk copy and confirmation are separate per platform and edits regenerate only that final page", async (t) => {
-  const f = await fixture(t, { risk: true }); await f.click("用当前海报开始");
+  const f = await fixture(t, { risk: true });
   const confirm = () => f.container.querySelector('.draft-sync-risk-confirm input');
   assert.equal(f.panels.xiaohongshu.draft.images.at(-1).id, f.batches[0].at(-1).id);
   assert.equal(f.panels.xiaohongshu.draft.images.length, 3);
   await f.change("#draft-risk-text", "小红书独立风险\n保留第二行");
-  await f.click(confirm()); await f.click("确认图片，连接小红书");
+  await f.click(confirm());
   const xhsRisk = f.panels.xiaohongshu.draft.images.at(-1);
   await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[1]);
   assert.equal(confirm().checked, false);
   assert.equal(f.container.querySelector('#draft-risk-text').value, "投资有风险");
   await f.change("#draft-risk-text", "公众号独立风险");
-  await f.click(confirm()); await f.click("确认图片，选择公众号");
+  await f.click(confirm());
   const wechatRisk = f.panels.wechat.draft.images.at(-1);
   assert.notEqual(await wechatRisk.blob.text(), await xhsRisk.blob.text());
-  await f.click("上一步"); await f.change("#draft-risk-text", "公众号修改后的风险");
+  await f.change("#draft-risk-text", "公众号修改后的风险");
   assert.equal(confirm().checked, false); assert.equal(f.panels.wechat.contentReady, false);
   assert.equal(f.panels.xiaohongshu.draft.images.at(-1).blob, xhsRisk.blob);
   await f.click("存到本机");
@@ -232,7 +235,7 @@ test("risk copy and confirmation are separate per platform and edits regenerate 
 });
 
 test("concurrent platform receipts stay durable without one replacing the other", async (t) => {
-  const f = await fixture(t); await f.click("用当前海报开始"); await f.click("确认图片，连接小红书");
+  const f = await fixture(t);
   const xhs = f.panels.xiaohongshu, wechat = f.panels.wechat, gate = Promise.withResolvers();
   let first = true, a, b;
   f.saveOverride = async () => { if (first) { first = false; await gate.promise; } };
@@ -244,4 +247,57 @@ test("concurrent platform receipts stay durable without one replacing the other"
   assert.deepEqual(f.saved.receipts.map((receipt) => receipt.platform).sort(), ["wechat", "xiaohongshu"]);
   assert.equal(f.panels.xiaohongshu.draft.receipts.length, 2);
   assert.equal(f.saved.images[0].blob, f.batches[0][0].blob);
+});
+
+
+test("updating the current images preserves both platform captions and runs only when requested", async (t) => {
+  const f = await fixture(t);
+  await f.change("#draft-platform-body", "小红书已编辑配文");
+  await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[1]);
+  await f.change("#draft-platform-body", "公众号已编辑配文");
+  assert.equal(f.batches.length, 1);
+  await f.click("更新当前图片");
+  assert.equal(f.batches.length, 2);
+  assert.equal(f.panel.draft.content.xiaohongshu.body, "小红书已编辑配文");
+  assert.equal(f.panel.draft.content.wechat.body, "公众号已编辑配文");
+  assert.deepEqual(f.panel.draft.images.map((image) => image.id), f.batches[1].map((image) => image.id));
+  await f.change("#draft-platform-title", "修改标题");
+  await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[0]);
+  assert.equal(f.batches.length, 2, "typing or platform changes must not start a generation loop");
+});
+
+
+test("restoring an archive before the editor is ready cannot be overwritten by delayed automatic preparation", async (t) => {
+  const f = await fixture(t);
+  await f.change("#draft-platform-body", "需要保留的已存配文");
+  await f.click("存到本机");
+  const archivedId = f.saved.id, archivedImages = f.saved.images;
+  await f.click(f.container.querySelector('[aria-label="关闭草稿同步"]'));
+  await f.reopen({ canCollect: false });
+  assert.equal(f.collectCalls, 1);
+  await f.click("继续本机存档");
+  await f.reopen({ canCollect: true });
+  assert.equal(f.collectCalls, 1, "restoring an archive cancels this opening's automatic generation");
+  assert.equal(f.panel.draft.id, archivedId);
+  assert.deepEqual(f.panel.draft.images.map((image) => image.blob), archivedImages.map((image) => image.blob));
+  assert.equal(f.panel.draft.content.xiaohongshu.body, "需要保留的已存配文");
+});
+
+test("a failed image refresh keeps editable copy but blocks syncing old images until a successful retry", async (t) => {
+  const f = await fixture(t);
+  await f.change("#draft-platform-body", "导出失败也不能丢失的配文");
+  const originalImages = f.panel.draft.images;
+  f.collectError = new Error("测试图片导出失败");
+  await f.click("更新当前图片");
+  assert.equal(f.collectCalls, 2);
+  assert.equal(f.panel.contentReady, false);
+  assert.equal(f.panel.draft.content.xiaohongshu.body, "导出失败也不能丢失的配文");
+  assert.deepEqual(f.panel.draft.images, originalImages);
+  assert.match(f.container.textContent, /测试图片导出失败/);
+  f.collectError = null;
+  await f.click("更新当前图片");
+  assert.equal(f.collectCalls, 3);
+  assert.equal(f.panel.contentReady, true);
+  assert.equal(f.panel.draft.content.xiaohongshu.body, "导出失败也不能丢失的配文");
+  assert.notEqual(f.panel.draft.images[0].blob, originalImages[0].blob);
 });

@@ -7,10 +7,20 @@ import { startWechatTestServer } from "./wechat-server";
 
 async function openDraftDialog(page: Page) {
   await page.getByRole("button", { name: "同步草稿", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "同步与发布", exact: true });
+  const dialog = page.getByRole("dialog", { name: "同步到草稿箱", exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("status", { name: "" }).filter({ hasText: "正在检查本机存档" })).toHaveCount(0);
   return dialog;
+}
+
+
+async function archiveAction(dialog: Locator, name: string) {
+  const button = dialog.locator("button").filter({ hasText: new RegExp(`^${name}$`) });
+  await expect(button).toHaveCount(1);
+  const section = button.locator("xpath=ancestor::details[1]");
+  if (await section.count() && !(await section.evaluate((element) => (element as HTMLDetailsElement).open))) await section.locator(":scope > summary").click();
+  await expect(button).toBeEnabled();
+  await button.click();
 }
 
 async function prepareRealImages(page: Page) {
@@ -19,9 +29,9 @@ async function prepareRealImages(page: Page) {
   const dialog = await openDraftDialog(page);
   await expect(dialog.getByRole("link", { name: "下载 Mac 启动工具", exact: true })).toHaveCount(0);
   await expect(dialog.locator('a[href^="http://127.0.0.1:"], a[href^="http://localhost:"]')).toHaveCount(0);
-  await dialog.getByRole("button", { name: "用当前海报开始", exact: true }).click();
   await expect(dialog.locator(".draft-sync-image-card").first()).toBeVisible({ timeout: 110_000 });
-  await expect(dialog.locator(".draft-sync-footer-status")).toContainText("已准备");
+  await expect(dialog.getByRole("button", { name: "更新当前图片", exact: true })).toBeEnabled();
+  await expect(dialog.locator(".draft-sync-steps")).toHaveCount(0);
   await waitAdaptedImages(dialog);
   await expect.poll(() => dialog.locator(".draft-sync-image-card img").first().evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBe(1080);
   return dialog;
@@ -32,7 +42,7 @@ async function choosePlatform(dialog: Locator, platform: "xiaohongshu" | "wechat
 }
 
 const sourceCards = (dialog: Locator) => dialog.locator('.draft-sync-image-card');
-const riskCard = (dialog: Locator) => dialog.locator('.draft-sync-image-card:has(.draft-sync-image-actions[hidden])');
+const riskCard = (dialog: Locator) => dialog.locator('.draft-sync-image-card[data-risk-page="true"]');
 
 async function waitAdaptedImages(dialog: Locator) {
   await expect(dialog.locator(".draft-sync-size-summary")).not.toContainText("正在");
@@ -48,6 +58,16 @@ async function imageManifest(dialog: Locator) {
   })));
 }
 
+async function editRisk(dialog: Locator) {
+  const details = dialog.locator(".draft-sync-risk-edit");
+  if (!(await details.evaluate((element) => (element as HTMLDetailsElement).open))) await details.locator(":scope > summary").click();
+}
+
+async function adjustImages(dialog: Locator) {
+  const button = dialog.getByRole("button", { name: "调整图片", exact: true });
+  if (await button.count()) await button.click();
+}
+
 async function confirmRisk(dialog: Locator, platform: "xiaohongshu" | "wechat") {
   await waitAdaptedImages(dialog);
   const label = platform === "wechat" ? "公众号贴图" : "小红书";
@@ -57,7 +77,7 @@ async function confirmRisk(dialog: Locator, platform: "xiaohongshu" | "wechat") 
 
 async function confirmPlatformImages(dialog: Locator, platform: "xiaohongshu" | "wechat") {
   await confirmRisk(dialog, platform);
-  await dialog.getByRole("button", { name: platform === "wechat" ? "确认图片，选择公众号" : "确认图片，连接小红书", exact: true }).click();
+  await expect(dialog.locator(".draft-sync-steps")).toHaveCount(0);
 }
 
 async function connectLocalDevice(page: Page, dialog: Locator) {
@@ -183,6 +203,7 @@ test("real poster images and independent platform copy survive explicit local sa
   await choosePlatform(dialog, "wechat");
   await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("公众号的独立标题");
   await dialog.getByLabel("公众号贴图文案", { exact: true }).fill("只属于公众号的配文。");
+  await adjustImages(dialog);
   await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "extra-a.png", makePng(180, 20, 90));
   await expect(cards).toHaveCount(initialCount + 1);
   await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "extra-b.png", makePng(20, 180, 90));
@@ -194,7 +215,7 @@ test("real poster images and independent platform copy survive explicit local sa
   await cards.nth(initialCount - 1).getByRole("button", { name: /^删除/ }).click();
   await expect(cards).toHaveCount(initialCount + 1);
   const names = await cards.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-image-name")));
-  await dialog.getByRole("button", { name: "存到本机", exact: true }).click();
+  await archiveAction(dialog, "存到本机");
   await expect(dialog.getByText("图片、独立文案和核对记录已存到当前浏览器", { exact: true })).toBeVisible();
   const saved = await savedDraftSummary(page);
   expect(saved?.content).toEqual({
@@ -209,15 +230,15 @@ test("real poster images and independent platform copy survive explicit local sa
 
   await page.reload();
   dialog = await openDraftDialog(page);
-  await expect(dialog.getByRole("button", { name: "继续本机存档", exact: true })).toBeVisible();
-  await expect(dialog.locator(".draft-sync-image-card")).toHaveCount(0);
-  await dialog.getByRole("button", { name: "继续本机存档", exact: true }).click();
+  await expect(dialog.locator(".draft-sync-image-card").first()).toBeVisible({ timeout: 110_000 });
+  expect((await savedDraftSummary(page))?.content).toEqual(saved?.content);
+  await archiveAction(dialog, "继续本机存档");
   await expect(dialog.getByLabel("小红书标题", { exact: true })).toHaveValue("小红书的独立标题");
   await choosePlatform(dialog, "wechat");
   await expect(dialog.getByLabel("公众号贴图文案", { exact: true })).toHaveValue("只属于公众号的配文。");
   await waitAdaptedImages(dialog);
   expect(await sourceCards(dialog).evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-image-name")))).toEqual(names);
-  await dialog.getByRole("button", { name: "删除本机存档", exact: true }).click();
+  await archiveAction(dialog, "删除本机存档");
   await expect(dialog.getByText("本机存档已删除。当前窗口中的编辑仍可继续", { exact: true })).toBeVisible();
   expect(await savedDraftSummary(page)).toBeNull();
   await expect(sourceCards(dialog)).toHaveCount(initialCount + 1);
@@ -236,7 +257,6 @@ test("risk confirmation regenerates only the existing last page, preserving body
     return (riskBox.top - pageBox.top) / pageBox.height - 0.01;
   });
   const dialog = await openDraftDialog(page);
-  await dialog.getByRole("button", { name: "用当前海报开始", exact: true }).click();
   await expect(sourceCards(dialog)).toHaveCount(originalPageCount, { timeout: 110_000 });
   await waitAdaptedImages(dialog);
   await page.evaluate(() => {
@@ -254,6 +274,7 @@ test("risk confirmation regenerates only the existing last page, preserving body
     const before = await imageManifest(dialog), bodyHash = await lastPageBodyHash(dialog, bodyBottomRatio);
     const beforePixels = await riskCard(dialog).locator("img").evaluate(async (node) => Array.from(new Uint8Array(await (await fetch((node as HTMLImageElement).src)).arrayBuffer())));
     const rendersBefore = await renderCount();
+    await editRisk(dialog);
     await dialog.getByLabel("风险提示标题", { exact: true }).fill(`${label}风险提示`);
     await dialog.getByLabel("风险提示内容", { exact: true }).fill(`${label}内容仅供参考。\n\n保留独立判断，不构成投资建议。`);
     expect(await imageManifest(dialog)).toEqual(before);
@@ -296,6 +317,7 @@ test("risk confirmation regenerates only the existing last page, preserving body
   await choosePlatform(dialog, "xiaohongshu");
   await expect(dialog.getByLabel("我已确认小红书的风险提示", { exact: true })).toBeChecked();
   expect(await imageManifest(dialog)).toEqual(confirmedByPlatform.get("xiaohongshu"));
+  await editRisk(dialog);
   await dialog.getByLabel("在末页显示风险提示", { exact: true }).uncheck();
   await expect(dialog.getByLabel(/^我已确认小红书的风险提示/)).not.toBeChecked();
   await confirmRisk(dialog, "xiaohongshu");
@@ -356,7 +378,7 @@ test("mobile draft controls stay usable and a denied local save never reports su
       return originalOpen.call(this, name, version);
     };
   });
-  await dialog.getByRole("button", { name: "存到本机", exact: true }).click();
+  await archiveAction(dialog, "存到本机");
   await expect(dialog.locator(".draft-sync-footer-status").getByRole("alert")).toContainText("Test storage denied");
   await expect(dialog.getByText("图片、独立文案和核对记录已存到当前浏览器", { exact: true })).toHaveCount(0);
   await expect(dialog.locator(".draft-sync-image-card").first()).toBeVisible();
@@ -364,7 +386,7 @@ test("mobile draft controls stay usable and a denied local save never reports su
   await expect(page.getByRole("button", { name: "同步草稿", exact: true })).toBeFocused();
 });
 
-test("WeChat local accounts batch real PNG drafts and require explicit publication confirmation", async ({ page, browserName }) => {
+test("WeChat batches real PNG drafts in one view with every publication entry disabled", async ({ page, browserName }) => {
   test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; sync is supported in Chrome/Firefox and its Safari guidance is tested separately.");
   test.setTimeout(240_000);
   const requests: string[] = [];
@@ -397,12 +419,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     const account = accounts.find((item) => item.id === accountId)!;
     expect(connectedAccounts.has(accountId), "saved browser credentials must restore the helper's account before any read").toBe(true);
     if (suffix === "/publication") {
-      if (request.method === "POST") {
-        expect(JSON.parse(bytes.toString("utf8"))).toEqual({ confirm: true });
-        expect(publications.has(jobId)).toBe(false);
-        expect((await savedDraftSummary(page))?.receipts).toContainEqual(expect.objectContaining({ accountId, jobId, publicationAttempted: true }));
-        publications.set(jobId, { jobId, status: "published", publishId: `publish-${jobId}`, articleId: `article-${jobId}`, urls: ["https://mp.weixin.qq.com/s/mock-article"], message: "模拟微信发表完成", createdAt: "2026-09-22T00:00:00Z", updatedAt: "2026-09-22T00:00:00Z" });
-      }
+      expect(request.method, "this page must not send any publication POST").toBe("GET");
       reply(200, { publication: publications.get(jobId) || null }); return;
     }
     if (jobId) { expect(jobs.get(jobId)?.accountId).toBe(accountId); reply(200, { job: jobs.get(jobId) }); return; }
@@ -432,9 +449,8 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await expect(dialog.getByLabel("公众号贴图标题", { exact: true })).toHaveAttribute("aria-invalid", "true");
     await expect(dialog.locator("#draft-title-help")).toContainText("标题超出");
     await expect(dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true })).toHaveCount(0);
-    // The step navigation can reach accounts before content is ready. The
-    // action area must explain every content blocker and let users resolve it.
-    await dialog.locator(".draft-sync-steps button").nth(1).click();
+    // Accounts are on the same page while content is being edited.
+    // Validation keeps syncing disabled until the visible issues are resolved.
     expect(requests).toEqual([]);
     await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toHaveCount(0);
@@ -456,6 +472,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
       await dialog.getByLabel("AppSecret", { exact: true }).fill(account.appSecret);
       await dialog.getByRole("button", { name: "保存并连接公众号", exact: true }).click();
       await expect(dialog.getByRole("article", { name: `${account.name} 的结果` })).toBeVisible();
+      await expect(dialog.getByRole("article", { name: `${account.name} 的结果` }).getByRole("checkbox")).toBeChecked();
       await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeDisabled();
     }
     expect(uploads).toHaveLength(0);
@@ -463,7 +480,6 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await choosePlatform(dialog, "xiaohongshu");
     await expect(dialog.getByLabel("小红书标题", { exact: true })).toHaveAttribute("aria-invalid", "false");
     await expect(dialog.locator("#draft-title-help")).not.toContainText("标题超出");
-    await dialog.locator(".draft-sync-steps button").nth(1).click();
     await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
     await expect(dialog.locator(".draft-sync-connection")).toContainText("本机连接已保存");
     await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeHidden();
@@ -471,18 +487,19 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     expect(requests).toHaveLength(callsBeforeSwitch);
     await expect(dialog.locator(".draft-sync-wechat-account-row")).toHaveCount(2);
     const actions = dialog.getByRole("region", { name: "公众号操作", exact: true });
-    await expect(actions.getByRole("region", { name: "同步前检查", exact: true })).toContainText("标题最多 20 个字符");
-    await actions.getByRole("button", { name: "查看并确认图片", exact: true }).click();
+    await expect(dialog.locator("#draft-title-help")).toContainText("标题超出");
+    await expect(actions.getByRole("region", { name: "同步前检查", exact: true })).toContainText("风险提示");
     await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("真实海报贴图草稿");
-    await dialog.locator(".draft-sync-steps button").nth(1).click();
     await dialog.getByLabel("全选", { exact: true }).check();
+    await dialog.getByRole("button", { name: "更新当前图片", exact: true }).click();
+    await waitAdaptedImages(dialog);
+    await expect(dialog.getByLabel("公众号贴图标题", { exact: true })).toHaveValue("真实海报贴图草稿");
+    await expect(dialog.getByLabel("公众号贴图文案", { exact: true })).toHaveValue("多张海报完整同步。\n\n这一行也保留。\n");
+    for (const account of accounts) await expect(dialog.getByRole("article", { name: `${account.name} 的结果` }).getByRole("checkbox")).toBeChecked();
     await expect(actions.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeDisabled();
-    // Results previously hid the validation entirely, leaving both actions
-    // permanently disabled with no explanation or way to confirm the images.
-    await dialog.locator(".draft-sync-steps button").nth(2).click();
+    // Validation remains beside the action while correcting content.
     await expect(actions.getByRole("region", { name: "同步前检查", exact: true })).toBeVisible();
     expect(uploads).toHaveLength(0); expect(publications.size).toBe(0);
-    await actions.getByRole("button", { name: "查看并确认图片", exact: true }).click();
     await expect(dialog.getByLabel("我已确认公众号贴图的风险提示", { exact: true })).not.toBeChecked();
     const originalImages = await imageManifest(dialog);
     await confirmRisk(dialog, "wechat");
@@ -495,9 +512,9 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     await captureContentStep(page, dialog, "wechat");
     await confirmPlatformImages(dialog, "wechat");
     await expect(actions.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeEnabled();
-    await expect(actions.getByRole("button", { name: "立即发布", exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: /立即发布/ })).toHaveCount(0);
+    await expect(actions).toContainText("封面");
     expect(uploads).toHaveLength(0); expect(publications.size).toBe(0);
-    await dialog.locator(".draft-sync-steps button").nth(1).click();
     // Account checkboxes must never inherit the global full-width text-input rule.
     // Check both the user's laptop size and narrow screens before any upload.
     for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
@@ -516,7 +533,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
       await dialog.locator(".draft-sync-wechat-targets").scrollIntoViewIfNeeded();
       await page.screenshot({ path: `test-results/wechat-accounts-${viewport.width}.png` });
       await dialog.locator(".draft-sync-wechat-actions").scrollIntoViewIfNeeded();
-      await expect(dialog.getByRole("button", { name: "立即发布", exact: true })).toBeInViewport();
+      await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toBeInViewport();
       await page.screenshot({ path: `test-results/wechat-actions-${viewport.width}.png` });
       const clipped = await dialog.evaluate((element) => {
         const bounds = element.getBoundingClientRect();
@@ -544,15 +561,15 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     // this account and visibly report completion even for an unchanged result.
     connectedAccounts.clear();
     const firstResult = dialog.getByRole("article", { name: `${accounts[0].name} 的结果` });
-    await firstResult.getByRole("button", { name: "重新核对草稿", exact: true }).click();
+    await archiveAction(firstResult, "重新核对草稿");
     await expect(firstResult).toContainText("已重新核对：模拟官方草稿读回核对通过");
     expect(requests).toContain(`POST /api/wechat/accounts/${accounts[0].id}/jobs/${uploads.find((upload) => upload.accountId === accounts[0].id)!.id}/verify`);
     expect(connectedAccounts.has(accounts[0].id)).toBe(true);
     helperUnavailable = true;
-    await firstResult.getByRole("button", { name: "重新核对草稿", exact: true }).click();
+    await archiveAction(firstResult, "重新核对草稿");
     await expect(firstResult.locator(".draft-sync-message.error")).toContainText("请先打开折页同步助手");
     helperUnavailable = false;
-    await firstResult.getByRole("button", { name: "重新核对草稿", exact: true }).click();
+    await archiveAction(firstResult, "重新核对草稿");
     await expect(firstResult).toContainText("已重新核对：模拟官方草稿读回核对通过");
     await expect(firstResult.locator(".draft-sync-message.error")).toHaveCount(0);
     expect(uploads).toHaveLength(2); expect(publications.size).toBe(0);
@@ -568,19 +585,11 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     expect(protectedVault).toMatchObject({ extractable: false, blocked: true });
     expect(protectedVault.serialized).not.toContain("browser-private-secret");
     expect(protectedVault.serialized).not.toContain("browser-test-password-0123456789abcdef");
-    await dialog.getByRole("button", { name: "立即发布", exact: true }).click();
-    const confirmation = dialog.getByRole("region", { name: "确认立即发布", exact: true });
-    await expect(confirmation).toBeFocused();
-    await expect(confirmation).toContainText("真实海报贴图草稿");
-    await expect(confirmation).toContainText(accounts[0].name); await expect(confirmation).toContainText(accounts[1].name);
+    await expect(dialog.getByRole("button", { name: /立即发布|确认立即发布/ })).toHaveCount(0);
+    await expect(dialog.getByRole("region", { name: "确认立即发布", exact: true })).toHaveCount(0);
+    // The retained publication transport must never be used from this page.
+    expect(requests.filter((request) => request.startsWith("POST ") && request.endsWith("/publication"))).toEqual([]);
     expect(publications.size).toBe(0);
-    await confirmation.getByRole("button", { name: "取消", exact: true }).click();
-    expect(publications.size).toBe(0);
-    await dialog.getByRole("button", { name: "立即发布", exact: true }).click();
-    await dialog.getByRole("button", { name: "确认立即发布", exact: true }).click();
-    await expect.poll(() => server.failure() || publications.size).toBe(2);
-    await expect(dialog.getByText("已发表", { exact: true })).toHaveCount(2);
-    expect(uploads).toHaveLength(2);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await dialog.evaluate((element) => {
       const bounds = element.getBoundingClientRect();
@@ -588,16 +597,14 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     })).toEqual([]);
     const callsBeforeReload = requests.length;
     await page.reload(); dialog = await openDraftDialog(page);
-    await dialog.getByRole("button", { name: "继续本机存档", exact: true }).click(); await choosePlatform(dialog, "wechat");
+    await archiveAction(dialog, "继续本机存档"); await choosePlatform(dialog, "wechat");
     await confirmPlatformImages(dialog, "wechat");
     await expect(dialog.getByRole("article", { name: `${accounts[0].name} 的结果` })).toBeVisible();
     expect(requests).toHaveLength(callsBeforeReload);
     await dialog.getByRole("button", { name: `刷新 ${accounts[0].name} 状态`, exact: true }).click();
-    await expect(dialog.getByRole("article", { name: `${accounts[0].name} 的结果` })).toContainText("已发表");
-    expect(publications.size).toBe(2); expect(uploads).toHaveLength(2); expect(server.failure()).toBeUndefined();
-    await dialog.locator(".draft-sync-steps button").first().click();
+    await expect(dialog.getByRole("article", { name: `${accounts[0].name} 的结果` })).toContainText("草稿已保存");
+    expect(publications.size).toBe(0); expect(uploads).toHaveLength(2); expect(server.failure()).toBeUndefined();
     await choosePlatform(dialog, "xiaohongshu");
-    await dialog.locator(".draft-sync-steps button").nth(1).click();
     await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
     for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(viewport);
@@ -605,7 +612,18 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
       await page.screenshot({ path: `test-results/xiaohongshu-panel-${viewport.width}.png` });
       expect(await dialog.locator(".draft-sync-xhs").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
     }
-
+    await choosePlatform(dialog, "wechat");
+    await dialog.getByLabel("全选", { exact: true }).check();
+    const callsBeforeReopen = requests.length;
+    await dialog.press("Escape");
+    dialog = await openDraftDialog(page);
+    await waitAdaptedImages(dialog);
+    await choosePlatform(dialog, "wechat");
+    for (const account of accounts) await expect(dialog.getByRole("article", { name: `${account.name} 的结果` }).getByRole("checkbox")).toBeChecked();
+    await confirmRisk(dialog, "wechat");
+    expect(requests).toHaveLength(callsBeforeReopen);
+    expect(uploads).toHaveLength(2);
+    expect(publications.size).toBe(0);
   } finally { await server.close(); }
 });
 
@@ -667,15 +685,17 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
       const blob = await new Promise<Blob>((resolve) => canvas.toBlob((value) => resolve(value!), "image/png"));
       return Array.from(new Uint8Array(await blob.arrayBuffer()));
     }));
+    await adjustImages(dialog);
     await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "xhs-extra.png", secondPoster);
     await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "xhs-extra-b.png", makePng(50, 160, 120));
     await dialog.getByRole("button", { name: "前移第 2 张图片", exact: true }).click();
     await waitAdaptedImages(dialog);
     const beforeRisk = await imageManifest(dialog);
     await confirmRisk(dialog, "xiaohongshu");
+    await editRisk(dialog);
     await dialog.getByLabel("风险提示内容", { exact: true }).fill("小红书独立风险提示。\n内容仅供参考，请独立判断。");
     await expect(dialog.getByLabel("我已确认小红书的风险提示", { exact: true })).not.toBeChecked();
-    await expect(dialog.getByRole("button", { name: "确认图片，连接小红书", exact: true })).toBeDisabled();
+    await expect(dialog.locator(".draft-sync-steps")).toHaveCount(0);
     expect(await imageManifest(dialog), "editing text must only invalidate approval, not render an unconfirmed last page").toEqual(beforeRisk);
     await confirmRisk(dialog, "xiaohongshu");
     originals.push(...await imageManifest(dialog));
@@ -712,11 +732,11 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     const callsBeforeSwitch = requests.length;
     await choosePlatform(dialog, "wechat");
     await expect(dialog.getByLabel("公众号贴图标题", { exact: true })).toBeVisible();
+    await editRisk(dialog);
     await expect(dialog.getByLabel("风险提示内容", { exact: true })).not.toHaveValue("小红书独立风险提示。\n内容仅供参考，请独立判断。");
     await expect(dialog.getByLabel("我已确认公众号贴图的风险提示", { exact: true })).not.toBeChecked();
     await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("这是公众号自己的超长标题不得影响小红书同步结果和账号");
     await expect(dialog.locator("#draft-title-help")).toContainText("标题超出");
-    await dialog.locator(".draft-sync-steps button").nth(1).click();
     await expect(dialog.getByText("本机连接已保存", { exact: true })).toBeVisible();
     await expect(dialog.getByLabel("公众号名称", { exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeHidden();
@@ -737,14 +757,25 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     expect(serialized).not.toContain("appSecret");
     expect(requests.some(({ path }) => path.includes("/accounts/") || path.includes("publication"))).toBe(false);
     await page.reload(); dialog = await openDraftDialog(page);
-    await dialog.getByRole("button", { name: "继续本机存档", exact: true }).click();
+    await archiveAction(dialog, "继续本机存档");
     await expect(dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true })).toHaveCount(0);
     await confirmPlatformImages(dialog, "xiaohongshu");
     await expect(dialog.getByText("本机连接已保存", { exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
     await dialog.getByRole("button", { name: "我已登录", exact: true }).click();
     await dialog.getByRole("button", { name: "读取小红书同步状态", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "读取小红书同步状态", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("region", { name: "小红书同步结果", exact: true })).toContainText("模拟小红书草稿回读通过");
+    expect(createCount).toBe(1);
+    const callsBeforeReopen = requests.length;
+    await dialog.press("Escape");
+    dialog = await openDraftDialog(page);
+    await waitAdaptedImages(dialog);
+    await expect(dialog.getByText(account.name, { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "刷新账号", exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: "我已登录", exact: true })).toHaveCount(0);
+    await confirmRisk(dialog, "xiaohongshu");
+    expect(requests).toHaveLength(callsBeforeReopen);
     expect(createCount).toBe(1);
     expect(server.failure()).toBeUndefined();
   } finally { await server.close(); }
