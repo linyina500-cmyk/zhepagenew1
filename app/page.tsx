@@ -1221,7 +1221,6 @@ export default function Home() {
         canCollect={paginationReady && !exporting}
         collectAssets={collectAssets}
         riskNote={{ enabled: showRiskNote, title: riskTitle, text: riskText }}
-        riskAppearance={{ paperColor, textColor, accentColor, fontFamily: bodyFont === "serif" ? '"Zhepage Source Han Serif", serif' : '"Zhepage Source Han Sans", sans-serif', footerText: footerText.trim() || labName.trim() }}
         onClose={() => setDraftSyncOpen(false)}
         onReturnToEditor={() => {
           setDraftSyncOpen(false);

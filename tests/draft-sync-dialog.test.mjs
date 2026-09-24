@@ -27,8 +27,8 @@ async function fixture(t, options = {}) {
   const require = (specifier) => {
     if (specifier === "./WechatDraftPanel") return { default: WechatPanel, __esModule: true };
     if (specifier === "./XiaohongshuDraftPanel") return { default: XhsPanel, __esModule: true };
-    if (specifier === "../hooks/usePlatformImages") return { usePlatformImages: (source, target, note) => {
-      const images = React.useMemo(() => source ? [...source.map((image) => target === "xiaohongshu" ? image : { ...image, height: 1350, blob: new Blob([image.blob, "wechat adapted"], { type: "image/png" }) }), ...(note?.enabled ? [{ id: `risk-${target}`, name: "风险提示.png", width: 1080, height: target === "wechat" ? 1350 : 1440, blob: new Blob([note.title + note.text], { type: "image/png" }) }] : [])] : null, [source, target, note]);
+    if (specifier === "../hooks/usePlatformImages") return { usePlatformImages: (source, target, note, confirmed) => {
+      const images = React.useMemo(() => source ? source.map((image, index) => ({ ...image, height: target === "wechat" ? 1350 : 1440, blob: index === source.length - 1 && note && confirmed ? new Blob([image.blob, note.title + note.text], { type: "image/png" }) : target === "wechat" ? new Blob([image.blob, "wechat adapted"], { type: "image/png" }) : image.blob })) : null, [source, target, note, confirmed]);
       return { images, preparing: false, error: "" };
     } };
     if (specifier === "../../lib/draftSync/adaptImages") return loadDomModule("lib/draftSync/adaptImages.ts");
@@ -50,8 +50,8 @@ async function fixture(t, options = {}) {
   const root = createRoot(container);
   const props = {
     open: true, openerRef: { current: opener }, title: "用户完整文章", sourceFormat: "xiaohongshu", canCollect: true,
-    collectAssets: async () => { const images = Array.from({ length: 3 }, (_, i) => ({ id: crypto.randomUUID(), name: `第${i + 1}页.png`, width: 1080, height: 1440, blob: new Blob([`full page ${batches.length}:${i}`], { type: "image/png" }) })); batches.push(images); return images; },
-    ...(options.risk ? { riskNote: { enabled: true, title: "提示", text: "投资有风险" }, riskAppearance: { paperColor: "#ffffff", textColor: "#333333", accentColor: "#cc0000", fontFamily: "sans-serif", footerText: "" } } : {}),
+    collectAssets: async () => { const images = Array.from({ length: 3 }, (_, i) => ({ id: crypto.randomUUID(), name: `第${i + 1}页.png`, width: 1080, height: 1440, blob: new Blob([`full page ${batches.length}:${i}`], { type: "image/png" }) })); if (options.risk) images.at(-1).riskTemplate = { svg: "<svg/>" }; batches.push(images); return images; },
+    ...(options.risk ? { riskNote: { enabled: true, title: "提示", text: "投资有风险" } } : {}),
     onClose: () => { closed++; root.render(null); }, onReturnToEditor: () => root.render(null),
   };
   async function click(value) {
@@ -210,7 +210,8 @@ test("oversize title is explained beside its input without silent truncation", a
 test("risk copy and confirmation are separate per platform and edits regenerate only that final page", async (t) => {
   const f = await fixture(t, { risk: true }); await f.click("用当前海报开始");
   const confirm = () => f.container.querySelector('.draft-sync-risk-confirm input');
-  assert.equal(f.panels.xiaohongshu.draft.images.at(-1).id, "risk-xiaohongshu");
+  assert.equal(f.panels.xiaohongshu.draft.images.at(-1).id, f.batches[0].at(-1).id);
+  assert.equal(f.panels.xiaohongshu.draft.images.length, 3);
   await f.change("#draft-risk-text", "小红书独立风险\n保留第二行");
   await f.click(confirm()); await f.click("确认图片，连接小红书");
   const xhsRisk = f.panels.xiaohongshu.draft.images.at(-1);

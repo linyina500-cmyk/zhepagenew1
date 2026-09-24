@@ -71,7 +71,7 @@ async function adaptImage(source: DraftImage, target: { width: number; height: n
     }
     // Validate the decoded dimensions even when saved metadata already matches.
     if (width === target.width && height === target.height) {
-      return { id: source.id, name: imageName(source.name, source.blob.type), blob: source.blob, width, height };
+      return { ...(source.riskTemplate ? { riskTemplate: source.riskTemplate } : {}), id: source.id, name: imageName(source.name, source.blob.type), blob: source.blob, width, height };
     }
     canvas = document.createElement("canvas");
     canvas.width = target.width;
@@ -92,7 +92,7 @@ async function adaptImage(source: DraftImage, target: { width: number; height: n
       }, "image/png");
     }), signal, "图片生成超时，请重试");
     signal?.throwIfAborted();
-    return { id: source.id, name: imageName(source.name, "image/png"), blob, ...target };
+    return { ...(source.riskTemplate ? { riskTemplate: source.riskTemplate } : {}), id: source.id, name: imageName(source.name, "image/png"), blob, ...target };
   } catch (error) {
     signal?.throwIfAborted();
     throw new Error(`${source.name}：${error instanceof ImageAdaptError ? error.message : "图片处理失败，请重新选择图片后重试"}`);

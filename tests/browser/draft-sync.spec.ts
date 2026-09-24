@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { makePng, shortArticleHtml, shortBody, shortTitle } from "./fixtures";
 import { expectPreviewReady, importRichArticle, openWorkbench } from "./helpers";
 import { startWechatTestServer } from "./wechat-server";
@@ -30,8 +31,8 @@ async function choosePlatform(dialog: Locator, platform: "xiaohongshu" | "wechat
   await dialog.locator(".draft-sync-platforms").getByRole("button", { name: platform === "wechat" ? /^公众号贴图/ : /^小红书/ }).click();
 }
 
-const sourceCards = (dialog: Locator) => dialog.locator('.draft-sync-image-card:not([data-image-name$="-风险提示.png"])');
-const riskCard = (dialog: Locator) => dialog.locator('.draft-sync-image-card[data-image-name$="-风险提示.png"]');
+const sourceCards = (dialog: Locator) => dialog.locator('.draft-sync-image-card');
+const riskCard = (dialog: Locator) => dialog.locator('.draft-sync-image-card:has(.draft-sync-image-actions[hidden])');
 
 async function waitAdaptedImages(dialog: Locator) {
   await expect(dialog.locator(".draft-sync-size-summary")).not.toContainText("正在");
@@ -47,10 +48,15 @@ async function imageManifest(dialog: Locator) {
   })));
 }
 
-async function confirmPlatformImages(dialog: Locator, platform: "xiaohongshu" | "wechat") {
+async function confirmRisk(dialog: Locator, platform: "xiaohongshu" | "wechat") {
   await waitAdaptedImages(dialog);
   const label = platform === "wechat" ? "公众号贴图" : "小红书";
-  await dialog.getByLabel(`我已确认${label}的风险提示`, { exact: true }).check();
+  await dialog.getByLabel(new RegExp(`^我已确认${label}的风险提示`)).check();
+  await waitAdaptedImages(dialog);
+}
+
+async function confirmPlatformImages(dialog: Locator, platform: "xiaohongshu" | "wechat") {
+  await confirmRisk(dialog, platform);
   await dialog.getByRole("button", { name: platform === "wechat" ? "确认图片，选择公众号" : "确认图片，连接小红书", exact: true }).click();
 }
 
@@ -86,6 +92,31 @@ async function captureContentStep(page: Page, dialog: Locator, platform: "xiaoho
     await dialog.locator(".draft-sync-risk-confirm").scrollIntoViewIfNeeded();
     await page.screenshot({ path: `test-results/${platform}-risk-confirmation-${viewport.width}.png` });
     expect(await dialog.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  }
+  await page.setViewportSize({ width: 1110, height: 770 });
+}
+
+async function lastPageBodyHash(dialog: Locator, bottomRatio: number) {
+  return riskCard(dialog).locator("img").evaluate(async (node, ratio) => {
+    const image = node as HTMLImageElement, canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth; canvas.height = Math.floor(image.naturalHeight * ratio);
+    const context = canvas.getContext("2d")!; context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    return [...new Uint8Array(await crypto.subtle.digest("SHA-256", pixels))].map((value) => value.toString(16).padStart(2, "0")).join("");
+  }, bottomRatio);
+}
+
+async function saveSamePageProof(page: Page, dialog: Locator, platform: "xiaohongshu" | "wechat") {
+  const directory = ".wechat-sync-local/ui-proof-same-page-risk-20260924";
+  mkdirSync(directory, { recursive: true });
+  const bytes = await riskCard(dialog).locator("img").evaluate(async (node) => Array.from(new Uint8Array(await (await fetch((node as HTMLImageElement).src)).arrayBuffer())));
+  writeFileSync(`${directory}/${platform}-whole-last-page.png`, Buffer.from(bytes));
+  for (const viewport of [{ width: 1110, height: 900 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await riskCard(dialog).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${directory}/${platform}-last-page-${viewport.width}.png` });
+    await dialog.locator(".draft-sync-risk-confirm").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${directory}/${platform}-confirmation-${viewport.width}.png` });
   }
   await page.setViewportSize({ width: 1110, height: 770 });
 }
@@ -142,6 +173,7 @@ test("real poster images and independent platform copy survive explicit local sa
     const bytes = new Uint8Array(await blob.arrayBuffer());
     return { width: image.naturalWidth, height: image.naturalHeight, size: bytes.length, signature: Array.from(bytes.subarray(0, 8)) };
   });
+  const originalName = await cards.first().getAttribute("data-image-name");
   expect(renderedImage).toMatchObject({ width: 1080, height: 1440, signature: [137, 80, 78, 71, 13, 10, 26, 10] });
   expect(renderedImage.size).toBeGreaterThan(10_000);
   expect(await savedDraftSummary(page), "Merely opening the dialog or generating images must not save a platform draft").toBeNull();
@@ -156,10 +188,10 @@ test("real poster images and independent platform copy survive explicit local sa
   await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "extra-b.png", makePng(20, 180, 90));
   await expect(cards).toHaveCount(initialCount + 2);
   await cards.filter({ has: page.locator('[title="extra-b.png"]') }).getByRole("button", { name: /^前移/ }).click();
-  await expect(cards.nth(initialCount)).toHaveAttribute("data-image-name", "extra-b.png");
-  await uploadDraftFile(page, cards.last().getByRole("button", { name: /^替换/ }), "replacement.png", makePng(20, 90, 180));
-  await expect(cards.last()).toHaveAttribute("data-image-name", "replacement.png");
-  await cards.nth(initialCount).getByRole("button", { name: /^删除/ }).click();
+  await expect(cards.nth(initialCount - 1)).toHaveAttribute("data-image-name", "extra-b.png");
+  await uploadDraftFile(page, cards.filter({ has: page.locator('[title="extra-a.png"]') }).getByRole("button", { name: /^替换/ }), "replacement.png", makePng(20, 90, 180));
+  await expect(cards.nth(initialCount)).toHaveAttribute("data-image-name", "replacement.png");
+  await cards.nth(initialCount - 1).getByRole("button", { name: /^删除/ }).click();
   await expect(cards).toHaveCount(initialCount + 1);
   const names = await cards.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-image-name")));
   await dialog.getByRole("button", { name: "存到本机", exact: true }).click();
@@ -170,7 +202,7 @@ test("real poster images and independent platform copy survive explicit local sa
     wechat: { title: "公众号的独立标题", body: "只属于公众号的配文。" },
   });
   expect(saved?.images.map((image) => image.name)).toEqual(names);
-  expect(saved?.images[0]).toMatchObject({ width: 1080, height: 1440, size: renderedImage.size, signature: renderedImage.signature });
+  expect(saved?.images.find((image) => image.name === originalName)).toMatchObject({ width: 1080, height: 1440, size: renderedImage.size, signature: renderedImage.signature });
   await dialog.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(page.getByRole("button", { name: "同步草稿", exact: true })).toBeFocused();
@@ -189,6 +221,66 @@ test("real poster images and independent platform copy survive explicit local sa
   await expect(dialog.getByText("本机存档已删除。当前窗口中的编辑仍可继续", { exact: true })).toBeVisible();
   expect(await savedDraftSummary(page)).toBeNull();
   await expect(sourceCards(dialog)).toHaveCount(initialCount + 1);
+});
+
+test("risk confirmation regenerates only the existing last page, preserving body decoration and independent platform approval", async ({ page }) => {
+  test.setTimeout(240_000);
+  const title = "末页正文与风险提示同页";
+  const html = `<h1>${title}</h1><p>第一张正文原样保留。</p><div class="manual-page-break">— 手动分页 —</div><h2>末页正文标题</h2><p>这段正文必须保留，<strong>重点粗体</strong>和<span style="color:#2457a7">蓝色文字</span>不能丢失。</p><p>正文结束以后，才显示这个平台的风险提示。</p>`;
+  await importRichArticle(page, html, title + "第一张正文原样保留。— 手动分页 —末页正文标题这段正文必须保留，重点粗体和蓝色文字不能丢失。正文结束以后，才显示这个平台的风险提示。");
+  await expectPreviewReady(page);
+  const originalPageCount = await page.locator(".poster-grid .content-page").count();
+  expect(originalPageCount).toBe(2);
+  const bodyBottomRatio = await page.locator(".poster-grid .content-page").last().evaluate((poster) => {
+    const pageBox = poster.getBoundingClientRect(), riskBox = poster.querySelector(".risk-note")!.getBoundingClientRect();
+    return (riskBox.top - pageBox.top) / pageBox.height - 0.01;
+  });
+  const dialog = await openDraftDialog(page);
+  await dialog.getByRole("button", { name: "用当前海报开始", exact: true }).click();
+  await expect(sourceCards(dialog)).toHaveCount(originalPageCount, { timeout: 110_000 });
+  await waitAdaptedImages(dialog);
+  await page.evaluate(() => {
+    const audit = { renders: 0 };
+    Object.assign(window, { riskRenderAudit: audit });
+    new MutationObserver((records) => { for (const record of records) for (const node of record.addedNodes) if (node instanceof HTMLIFrameElement && node.hasAttribute("sandbox")) audit.renders++; }).observe(document.body, { childList: true });
+  });
+  const renderCount = () => page.evaluate(() => (window as unknown as { riskRenderAudit: { renders: number } }).riskRenderAudit.renders);
+  const confirmedByPlatform = new Map<string, Awaited<ReturnType<typeof imageManifest>>>();
+  for (const platform of ["xiaohongshu", "wechat"] as const) {
+    await choosePlatform(dialog, platform);
+    const label = platform === "wechat" ? "公众号贴图" : "小红书";
+    const approval = dialog.getByLabel(`我已确认${label}的风险提示`, { exact: true });
+    await expect(approval).not.toBeChecked();
+    const before = await imageManifest(dialog), bodyHash = await lastPageBodyHash(dialog, bodyBottomRatio);
+    const rendersBefore = await renderCount();
+    await dialog.getByLabel("风险提示标题", { exact: true }).fill(`${label}风险提示`);
+    await dialog.getByLabel("风险提示内容", { exact: true }).fill(`${label}内容仅供参考。\n\n保留独立判断，不构成投资建议。`);
+    expect(await imageManifest(dialog)).toEqual(before);
+    expect(await renderCount(), "typing must not regenerate the last page before approval").toBe(rendersBefore);
+    await confirmRisk(dialog, platform);
+    const confirmed = await imageManifest(dialog);
+    expect(await renderCount()).toBe(rendersBefore + 1);
+    expect(confirmed).toHaveLength(originalPageCount);
+    expect(confirmed.map((image) => image.name)).toEqual(before.map((image) => image.name));
+    expect(confirmed.slice(0, -1)).toEqual(before.slice(0, -1));
+    expect(confirmed.at(-1)?.hash).not.toBe(before.at(-1)?.hash);
+    expect(await lastPageBodyHash(dialog, bodyBottomRatio), "the original header, body and decorations must retain their painted pixels").toBe(bodyHash);
+    confirmedByPlatform.set(platform, confirmed);
+    await saveSamePageProof(page, dialog, platform);
+  }
+  await choosePlatform(dialog, "xiaohongshu");
+  await expect(dialog.getByLabel("我已确认小红书的风险提示", { exact: true })).toBeChecked();
+  expect(await imageManifest(dialog)).toEqual(confirmedByPlatform.get("xiaohongshu"));
+  await dialog.getByLabel("在末页显示风险提示", { exact: true }).uncheck();
+  await expect(dialog.getByLabel(/^我已确认小红书的风险提示/)).not.toBeChecked();
+  await confirmRisk(dialog, "xiaohongshu");
+  const withoutRisk = await imageManifest(dialog);
+  expect(withoutRisk).toHaveLength(originalPageCount);
+  expect(withoutRisk.slice(0, -1)).toEqual(confirmedByPlatform.get("xiaohongshu")!.slice(0, -1));
+  expect(withoutRisk.at(-1)?.hash).not.toBe(confirmedByPlatform.get("xiaohongshu")!.at(-1)?.hash);
+  await choosePlatform(dialog, "wechat");
+  await expect(dialog.getByLabel("我已确认公众号贴图的风险提示", { exact: true })).toBeChecked();
+  expect(await imageManifest(dialog)).toEqual(confirmedByPlatform.get("wechat"));
 });
 
 test("mobile draft controls stay usable and a denied local save never reports success", async ({ page }) => {
@@ -294,7 +386,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     uploads.push(upload);
     const stored = await savedDraftSummary(page);
     expect(stored?.receipts).toContainEqual(expect.objectContaining({ accountId, jobId: upload.id, contentHash: expect.stringMatching(/^[a-f0-9]{64}$/), status: "needs_confirmation" }));
-    expect(stored?.images).toHaveLength(images.length - 1);
+    expect(stored?.images).toHaveLength(images.length);
     expect(stored?.images.every((image) => !image.name.endsWith("-风险提示.png"))).toBe(true);
     expect(stored?.images[0]).toMatchObject({ width: 1080, height: 1440 });
     expect(stored?.content.wechat.body).toBe("多张海报完整同步。\n\n这一行也保留。\n");
@@ -363,9 +455,13 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     expect(uploads).toHaveLength(0); expect(publications.size).toBe(0);
     await actions.getByRole("button", { name: "查看并确认图片", exact: true }).click();
     await expect(dialog.getByLabel("我已确认公众号贴图的风险提示", { exact: true })).not.toBeChecked();
+    const originalImages = await imageManifest(dialog);
+    await confirmRisk(dialog, "wechat");
     confirmedImages = await imageManifest(dialog);
+    expect(confirmedImages).toHaveLength(originalImages.length);
+    expect(confirmedImages.map((image) => image.name)).toEqual(originalImages.map((image) => image.name));
     expect(confirmedImages.every((image) => image.width === 1080 && image.height === 1350)).toBe(true);
-    expect(confirmedImages.at(-1)?.name).toBe("折页-公众号-风险提示.png");
+    expect(confirmedImages.slice(0, -1)).toEqual(originalImages.slice(0, -1));
     await expect(riskCard(dialog).getByRole("button")).toHaveCount(0);
     await captureContentStep(page, dialog, "wechat");
     await confirmPlatformImages(dialog, "wechat");
@@ -468,7 +564,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
   } finally { await server.close(); }
 });
 
-test("a fresh browser connects once and saves the confirmed XHS preview including its independent risk page", async ({ page, browserName }) => {
+test("a fresh browser connects once and saves the confirmed XHS preview with risk on its existing last page", async ({ page, browserName }) => {
   test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; sync is supported in Chrome/Firefox and its Safari guidance is tested separately.");
   test.setTimeout(240_000);
   const connectionToken = "xhs-browser-private-connection-token", deviceId = "22222222222222222222222222222222";
@@ -527,17 +623,21 @@ test("a fresh browser connects once and saves the confirmed XHS preview includin
       return Array.from(new Uint8Array(await blob.arrayBuffer()));
     }));
     await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "xhs-extra.png", secondPoster);
+    await uploadDraftFile(page, dialog.getByRole("button", { name: "＋ 添加图片", exact: true }), "xhs-extra-b.png", makePng(50, 160, 120));
     await dialog.getByRole("button", { name: "前移第 2 张图片", exact: true }).click();
     await waitAdaptedImages(dialog);
     const beforeRisk = await imageManifest(dialog);
-    await dialog.getByLabel("我已确认小红书的风险提示", { exact: true }).check();
+    await confirmRisk(dialog, "xiaohongshu");
     await dialog.getByLabel("风险提示内容", { exact: true }).fill("小红书独立风险提示。\n内容仅供参考，请独立判断。");
     await expect(dialog.getByLabel("我已确认小红书的风险提示", { exact: true })).not.toBeChecked();
     await expect(dialog.getByRole("button", { name: "确认图片，连接小红书", exact: true })).toBeDisabled();
+    expect(await imageManifest(dialog), "editing text must only invalidate approval, not render an unconfirmed last page").toEqual(beforeRisk);
+    await confirmRisk(dialog, "xiaohongshu");
     originals.push(...await imageManifest(dialog));
+    expect(originals).toHaveLength(beforeRisk.length);
     expect(originals.at(-1)?.hash).not.toBe(beforeRisk.at(-1)?.hash);
     expect(originals.slice(0, -1)).toEqual(beforeRisk.slice(0, -1));
-    expect(originals.at(-1)?.name).toBe("折页-小红书-风险提示.png");
+    expect(originals.at(-1)?.name).toBe(beforeRisk.at(-1)?.name);
     expect(originals.every((image) => image.width === 1080 && image.height === 1440)).toBe(true);
     await expect(riskCard(dialog).getByRole("button")).toHaveCount(0);
     await captureContentStep(page, dialog, "xiaohongshu");

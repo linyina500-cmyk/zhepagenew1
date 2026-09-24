@@ -260,20 +260,14 @@ test("receipts preserve publication attempts and content identity without collap
   }
 });
 
-test("archive round-trips independent risk text and only allowed appearance fields", async () => {
+test("archive round-trips independent risk text and the editable last page without unrelated fields", async () => {
   const draft = makeDraft();
-  draft.risk = {
-    notes: { xiaohongshu: { enabled: true, title: "小红书风险", text: "第一行\n\n下一行。" }, wechat: { enabled: false, title: "公众号风险", text: "另一份提示" } },
-    appearance: { paperColor: "#ffffff", textColor: "#333333", accentColor: "#aa0000", fontFamily: '"Zhepage Source Han Sans", sans-serif', footerText: "版权所有" },
-  };
-  draft.risk.token = "private-do-not-persist";
-  draft.risk.notes.wechat.secret = "private-do-not-persist";
-  draft.risk.appearance.secret = "private-do-not-persist";
-  const stored = await encodeLocalDraft(draft), restored = decodeLocalDraft(stored);
-  assert.equal(restored.risk.notes.xiaohongshu.text, "第一行\n\n下一行。");
-  assert.equal(restored.risk.notes.wechat.enabled, false);
-  assert.equal(JSON.stringify(stored).includes("private-do-not-persist"), false);
-  assert.equal(restored.images.length, draft.images.length);
-  const invalid = structuredClone(stored); invalid.risk.appearance.paperColor = 'url(https://evil.test)';
-  assert.throws(() => decodeLocalDraft(invalid), /本机存档不完整/);
+  draft.risk = { notes: { wechat: { enabled: true, title: "提示", text: "公众号提示" }, xiaohongshu: { enabled: true, title: "提示", text: "小红书提示" } }, secret: "do-not-persist" };
+  draft.images.at(-1).riskTemplate = { svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>', secret: "do-not-persist" };
+  const restored = decodeLocalDraft(await encodeLocalDraft(draft));
+  assert.equal(restored.risk.notes.wechat.text, "公众号提示");
+  assert.equal(restored.images.at(-1).riskTemplate.svg, draft.images.at(-1).riskTemplate.svg);
+  assert.equal(JSON.stringify(restored).includes("do-not-persist"), false);
+  draft.images.at(-1).riskTemplate.svg = 12;
+  assert.throws(() => normalizeLocalDraft(draft), /本机存档不完整/);
 });

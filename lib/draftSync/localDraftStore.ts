@@ -48,7 +48,8 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
     const image = record(value);
     if (!(image.blob instanceof Blob) || !["image/png", "image/jpeg"].includes(image.blob.type) || !image.blob.size) throw invalidArchive();
     if (![image.width, image.height].every((dimension) => Number.isSafeInteger(dimension) && Number(dimension) > 0 && Number(dimension) <= 20000)) throw invalidArchive();
-    return { id: text(image.id, 200, true), name: text(image.name, 500), blob: image.blob, width: Number(image.width), height: Number(image.height) };
+    const riskTemplate = image.riskTemplate === undefined ? undefined : { svg: text(record(image.riskTemplate).svg, 80 * 1024 * 1024, true) };
+    return { ...(riskTemplate ? { riskTemplate } : {}), id: text(image.id, 200, true), name: text(image.name, 500), blob: image.blob, width: Number(image.width), height: Number(image.height) };
   });
   if (new Set(images.map((image) => image.id)).size !== images.length) throw invalidArchive();
   const fields = record(draft.content);
@@ -78,17 +79,13 @@ export function normalizeLocalDraft(value: unknown): LocalDraft {
   if (new Set(receipts.map((receipt) => `${receipt.platform}:${receipt.accountId}`)).size !== receipts.length) throw invalidArchive();
   let risk: LocalDraft["risk"];
   if (draft.risk !== undefined) {
-    const source = record(draft.risk), notes = record(source.notes), appearance = record(source.appearance);
+    const source = record(draft.risk), notes = record(source.notes);
     const readNote = (value: unknown) => {
       const note = record(value);
       if (typeof note.enabled !== "boolean") throw invalidArchive();
       return { enabled: note.enabled, title: text(note.title, 1000), text: text(note.text, 10000) };
     };
-    const color = (value: unknown) => { const result = text(value, 7, true); if (!/^#[a-f0-9]{6}$/i.test(result)) throw invalidArchive(); return result; };
-    risk = { notes: { xiaohongshu: readNote(notes.xiaohongshu), wechat: readNote(notes.wechat) }, appearance: {
-      paperColor: color(appearance.paperColor), textColor: color(appearance.textColor), accentColor: color(appearance.accentColor),
-      fontFamily: text(appearance.fontFamily, 200, true), footerText: text(appearance.footerText, 200),
-    } };
+    risk = { notes: { xiaohongshu: readNote(notes.xiaohongshu), wechat: readNote(notes.wechat) } };
   }
   return {
     ...(risk ? { risk } : {}),
@@ -112,7 +109,7 @@ export function decodeLocalDraft(value: unknown): LocalDraft {
   const images = draft.images.map((value) => {
     const image = record(value);
     if (!(image.bytes instanceof ArrayBuffer) || !image.bytes.byteLength || typeof image.mime !== "string" || !["image/png", "image/jpeg"].includes(image.mime)) throw invalidArchive();
-    return { id: image.id, name: image.name, width: image.width, height: image.height, blob: new Blob([image.bytes], { type: image.mime }) };
+    return { ...(image.riskTemplate ? { riskTemplate: image.riskTemplate } : {}), id: image.id, name: image.name, width: image.width, height: image.height, blob: new Blob([image.bytes], { type: image.mime }) };
   });
   return normalizeLocalDraft({ ...draft, images });
 }

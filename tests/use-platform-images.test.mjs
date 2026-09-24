@@ -17,18 +17,18 @@ async function fixture(t) {
   new Function("require", "module", "exports", outputText)((specifier) => specifier === "../../lib/draftSync/adaptImages" ? {
     adaptDraftImages: (source, platform, signal) => new Promise((resolve, reject) => { calls.push({ source, platform, signal, resolve, reject }); }),
   } : specifier === "../../lib/draftSync/riskPage" ? {
-    renderRiskPage: (note, appearance, platform, signal) => new Promise((resolve, reject) => { riskCalls.push({ note, appearance, platform, signal, resolve, reject }); }),
+    renderRiskPage: (note, source, signal) => new Promise((resolve, reject) => { riskCalls.push({ note, source, signal, resolve, reject }); }),
   } : nativeRequire(specifier), loaded, loaded.exports);
   const { usePlatformImages } = loaded.exports;
   const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   let latest, mounted = true;
   // eslint-disable-next-line react/prop-types -- Only this test fixture supplies these controlled hook inputs.
-  function Host({ source, platform, visible = "wechat", note, appearance }) {
-    const result = usePlatformImages(source, platform, note, appearance);
+  function Host({ source, platform, visible = "wechat", note, confirmed }) {
+    const result = usePlatformImages(source, platform, note, confirmed);
     latest = result; renders.push({ source, platform, result });
     return React.createElement("output", null, visible);
   }
-  async function render(source, platform = "wechat", visible, note, appearance) { await act(async () => root.render(React.createElement(Host, { source, platform, visible, note, appearance }))); }
+  async function render(source, platform = "wechat", visible, note, confirmed) { await act(async () => root.render(React.createElement(Host, { source, platform, visible, note, confirmed }))); }
   async function unmount() { if (mounted) { mounted = false; await act(async () => root.unmount()); } }
   t.after(async () => { await unmount(); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = false; });
   return { calls, riskCalls, renders, render, unmount, act, get latest() { return latest; } };
@@ -94,56 +94,61 @@ test("removing the source and unmounting abort pending work and discard late res
 });
 
 const note = { enabled: true, title: "风险提示", text: "仅供学习。" };
-const appearance = { paperColor: "#fff", textColor: "#111", accentColor: "#333", fontFamily: "sans-serif", footerText: "页脚" };
+const withTemplate = (id) => ({ ...image(id), riskTemplate: { svg: "<svg/>" } });
 
-test("risk images are appended last and display-only changes retain the confirmation array", async (t) => {
-  const f = await fixture(t), source = [image("original")], adapted = [image("adapted")], risk = image("risk");
-  await f.render(source, "wechat", "wechat", note, appearance);
+test("risk waits for confirmation and replaces only the existing last page", async (t) => {
+  const f = await fixture(t), source = [image("body"), withTemplate("last")], adapted = [image("body-adapted"), image("last-adapted")];
+  await f.render(source, "wechat", "wechat", note, false);
   await f.act(async () => f.calls[0].resolve(adapted));
-  assert.equal(f.latest.images, null); assert.equal(f.latest.preparing, true);
-  assert.equal(f.riskCalls[0].note, note); assert.equal(f.riskCalls[0].appearance, appearance); assert.equal(f.riskCalls[0].platform, "wechat");
-  await f.act(async () => f.riskCalls[0].resolve(risk));
-  assert.deepEqual(f.latest.images, [adapted[0], risk]); assert.equal(adapted.length, 1);
+  assert.equal(f.riskCalls.length, 0); assert.equal(f.latest.images, adapted);
+  await f.render(source, "wechat", "wechat", note, true);
+  assert.equal(f.latest.preparing, true); assert.equal(f.riskCalls[0].source, source[1]);
+  const rendered = withTemplate("last");
+  await f.act(async () => f.riskCalls[0].resolve(rendered));
+  assert.deepEqual(f.calls[1].source, [rendered]);
+  await f.act(async () => f.calls[1].resolve([image("last-final")]));
+  assert.deepEqual(f.latest.images.map(x => x.id), ["body-adapted", "last-final"]);
+  assert.equal(f.latest.images[0], adapted[0]); assert.equal(f.latest.images.length, source.length);
   const confirmed = f.latest.images;
-  await f.render(source, "wechat", "xiaohongshu", note, appearance);
-  assert.equal(f.latest.images, confirmed); assert.equal(f.calls.length, 1);
+  await f.render(source, "wechat", "xiaohongshu", note, true);
+  assert.equal(f.latest.images, confirmed);
 });
 
-test("editing platform risk invalidates images immediately and discards late old risk pages", async (t) => {
-  const f = await fixture(t), source = [image("original")], updated = { ...note, text: "新版风险提示。" };
-  await f.render(source, "wechat", "wechat", note, appearance);
-  await f.act(async () => f.calls[0].resolve([image("adapted")]));
-  const before = f.renders.length;
-  await f.render(source, "wechat", "wechat", updated, appearance);
-  assert.deepEqual(f.renders[before].result, { images: null, preparing: true, error: "" });
-  assert.equal(f.riskCalls[0].signal.aborted, true);
-  assert.equal(f.calls.length, 1, "editing risk reuses already adapted base images");
-  await f.act(async () => f.riskCalls[1].resolve(image("new-risk")));
-  const latest = f.latest.images;
-  await f.act(async () => f.riskCalls[0].resolve(image("old-risk")));
-  assert.equal(f.latest.images, latest); assert.equal(latest.at(-1).id, "new-risk");
-  await f.render(source, "wechat", "wechat", updated, { ...appearance, textColor: "#000" });
-  assert.equal(f.latest.images, null); assert.equal(f.latest.preparing, true);
-});
-
-test("risk rendering errors block the complete set and disabled risk does not render an extra page", async (t) => {
-  const f = await fixture(t), source = [image("original")];
-  await f.render(source, "wechat", "wechat", note, appearance);
-  await f.act(async () => f.calls[0].resolve([image("adapted")]));
-  await f.act(async () => f.riskCalls[0].reject(new Error("风险提示过长，无法完整显示。")));
-  assert.equal(f.latest.images, null); assert.equal(f.latest.preparing, false); assert.match(f.latest.error, /风险提示过长/);
-  await f.render(source, "wechat", "wechat", { ...note, enabled: false }, appearance);
-  assert.equal(f.latest.images[0].id, "adapted"); assert.equal(f.latest.images.length, 1);
+test("editing risk cancels rendering and waits for a fresh confirmation", async (t) => {
+  const f = await fixture(t), source = [withTemplate("last")], adapted = [image("base")], revised = { ...note, text: "新版" };
+  await f.render(source, "wechat", "wechat", note, true);
+  await f.act(async () => f.calls[0].resolve(adapted));
+  await f.render(source, "wechat", "wechat", revised, false);
+  assert.equal(f.riskCalls[0].signal.aborted, true); assert.equal(f.latest.images, adapted);
+  await f.act(async () => f.riskCalls[0].resolve(withTemplate("stale")));
   assert.equal(f.calls.length, 1); assert.equal(f.riskCalls.length, 1);
+  await f.render(source, "wechat", "wechat", revised, true);
+  assert.equal(f.riskCalls[1].note, revised);
+  await f.act(async () => f.riskCalls[1].resolve(withTemplate("fresh")));
+  await f.act(async () => f.calls[1].resolve([image("fresh-final")]));
+  assert.equal(f.latest.images.at(-1).id, "fresh-final");
 });
 
-test("risk edits during base adaptation do not restart encoding and use only the latest note", async (t) => {
-  const f = await fixture(t), source = [image("original")], revised = { ...note, text: "最终提示" };
-  await f.render(source, "wechat", "wechat", note, appearance);
-  await f.render(source, "wechat", "wechat", revised, appearance);
-  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].signal.aborted, false);
-  await f.act(async () => f.calls[0].resolve([image("adapted")]));
-  assert.equal(f.riskCalls.length, 1); assert.equal(f.riskCalls[0].note, revised);
-  await f.act(async () => f.riskCalls[0].resolve(image("latest-risk")));
-  assert.equal(f.latest.images.at(-1).id, "latest-risk");
+test("overflow blocks upload, and disabling risk redraws the same last page", async (t) => {
+  const f = await fixture(t), source = [withTemplate("last")];
+  await f.render(source, "wechat", "wechat", note, true);
+  await f.act(async () => f.calls[0].resolve([image("base")]));
+  await f.act(async () => f.riskCalls[0].reject(new Error("风险提示超出末页")));
+  assert.equal(f.latest.images, null); assert.match(f.latest.error, /超出末页/);
+  const disabled = { ...note, enabled: false };
+  await f.render(source, "wechat", "wechat", disabled, false);
+  assert.equal(f.riskCalls.length, 1);
+  await f.render(source, "wechat", "wechat", disabled, true);
+  assert.equal(f.riskCalls[1].note.enabled, false);
+  await f.act(async () => f.riskCalls[1].resolve(withTemplate("without-risk")));
+  await f.act(async () => f.calls[1].resolve([image("last-no-risk")]));
+  assert.equal(f.latest.images.length, 1);
+});
+
+test("missing editable source fails clearly without adding a synthetic risk page", async (t) => {
+  const f = await fixture(t);
+  await f.render([image("raster")], "wechat", "wechat", note, true);
+  await f.act(async () => f.calls[0].resolve([image("base")]));
+  assert.match(f.latest.error, /没有可编辑的末页/); assert.equal(f.latest.images, null);
+  assert.equal(f.riskCalls.length, 0);
 });

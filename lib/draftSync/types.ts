@@ -1,7 +1,7 @@
-import type { RiskNote, RiskAppearance } from "./riskPage";
+import type { RiskNote } from "./riskPage";
 export type DraftPlatform = "xiaohongshu" | "wechat";
 export type DraftContent = { title: string; body: string };
-export type DraftImage = { id: string; name: string; blob: Blob; width: number; height: number };
+export type DraftImage = { id: string; name: string; blob: Blob; width: number; height: number; riskTemplate?: { svg: string } };
 export type SyncReceipt = {
   accountId: string;
   platform: DraftPlatform;
@@ -20,7 +20,7 @@ export type LocalDraft = {
   updatedAt: string;
   sourceFormat: string;
   images: DraftImage[];
-  risk?: { notes: Record<DraftPlatform, RiskNote>; appearance: RiskAppearance };
+  risk?: { notes: Record<DraftPlatform, RiskNote> };
   content: Record<DraftPlatform, DraftContent>;
   selectedAccountIds: string[];
   receipts: SyncReceipt[];

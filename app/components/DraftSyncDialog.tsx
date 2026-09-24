@@ -6,7 +6,7 @@ import type { DraftImage, DraftPlatform, LocalDraft, SyncReceipt } from "../../l
 import { countCharacters, countHashtags, DRAFT_LIMITS, imageMetadata, readDraftImage, validateDraft } from "../../lib/draftSync/validation";
 import { loadBinding, listAccounts, type Binding, type LocalWechatAccount } from "../../lib/wechat/deviceVault";
 import { usePlatformImages } from "../hooks/usePlatformImages";
-import type { RiskNote, RiskAppearance } from "../../lib/draftSync/riskPage";
+import type { RiskNote } from "../../lib/draftSync/riskPage";
 import { PLATFORM_IMAGE_SIZES } from "../../lib/draftSync/adaptImages";
 import LocalSyncConnection from "./LocalSyncConnection";
 import WechatDraftPanel from "./WechatDraftPanel";
@@ -18,9 +18,8 @@ type DraftSyncDialogProps = {
   title: string;
   sourceFormat: string;
   canCollect: boolean;
-  collectAssets: (options?: { separateRisk?: boolean }) => Promise<DraftImage[]>;
+  collectAssets: (options?: { editableRisk?: boolean }) => Promise<DraftImage[]>;
   riskNote?: RiskNote;
-  riskAppearance?: RiskAppearance;
   onClose: () => void;
   onReturnToEditor: () => void;
 };
@@ -53,7 +52,7 @@ function DraftThumbnail({ image, index }: { image: DraftImage; index: number }) 
   return <img ref={imageRef} alt={`草稿图片 ${index + 1}：${image.name}`} width={image.width} height={image.height} />;
 }
 
-export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, canCollect, collectAssets, riskNote, riskAppearance, onClose, onReturnToEditor }: DraftSyncDialogProps) {
+export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, canCollect, collectAssets, riskNote, onClose, onReturnToEditor }: DraftSyncDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replacementIdRef = useRef<string | null>(null);
@@ -86,8 +85,8 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   const feedback = feedbackByPlatform[platform];
   const busy = operations.local || operations[platform] || "";
   const anyBusy = Object.values(operations).some(Boolean);
-  const xhsImages = usePlatformImages(draft?.images, "xiaohongshu", draft?.risk?.notes.xiaohongshu, draft?.risk?.appearance);
-  const wechatImages = usePlatformImages(draft?.images, "wechat", draft?.risk?.notes.wechat, draft?.risk?.appearance);
+  const xhsImages = usePlatformImages(draft?.images, "xiaohongshu", draft?.risk?.notes.xiaohongshu, confirmedRisk.xiaohongshu === draft?.risk?.notes.xiaohongshu);
+  const wechatImages = usePlatformImages(draft?.images, "wechat", draft?.risk?.notes.wechat, confirmedRisk.wechat === draft?.risk?.notes.wechat);
   const preparedByPlatform = { xiaohongshu: xhsImages, wechat: wechatImages };
   const prepared = preparedByPlatform[platform];
   const images = prepared.images || [];
@@ -213,12 +212,12 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   }
   function createDraft() {
     void runOperation("正在生成当前图片…", async (signal) => {
-      const images = await collectAssets({ separateRisk: Boolean(riskNote && riskAppearance) });
+      const images = await collectAssets({ editableRisk: Boolean(riskNote) });
       signal.throwIfAborted();
       const initialTitle = title.replace(/\s*\n\s*/g, " ").trim();
       setDraft({
         schemaVersion: 1, id: crypto.randomUUID(), updatedAt: new Date().toISOString(), sourceFormat, images,
-        ...(riskNote && riskAppearance ? { risk: { notes: { xiaohongshu: { ...riskNote }, wechat: { ...riskNote } }, appearance: { ...riskAppearance } } } : {}),
+        ...(riskNote ? { risk: { notes: { xiaohongshu: { ...riskNote }, wechat: { ...riskNote } } } } : {}),
         content: { xiaohongshu: { title: initialTitle, body: "" }, wechat: { title: initialTitle, body: "" } },
         selectedAccountIds: [], receipts: (draft || storedDraft)?.receipts.filter((item) => item.jobId) || [],
       });
@@ -257,7 +256,7 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
       const images: DraftImage[] = [];
       for (const file of files) { images.push(await readDraftImage(file)); signal.throwIfAborted(); }
       setDraft((current) => current ? { ...current, updatedAt: new Date().toISOString(), images: replacementId
-        ? current.images.map((image) => image.id === replacementId ? images[0] : image) : [...current.images, ...images] } : null);
+        ? current.images.map((image) => image.id === replacementId ? images[0] : image) : current.images.at(-1)?.riskTemplate ? [...current.images.slice(0, -1), ...images, current.images.at(-1)!] : [...current.images, ...images] } : null);
       setContentChanged({ xiaohongshu: true, wechat: true }); setArchiveFeedback(null);
       setFeedback({ tone: "success", text: replacementId ? "图片已替换，未裁剪原图" : `已添加 ${images.length} 张图片，未裁剪原图` });
     });
@@ -265,7 +264,7 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   function moveImage(index: number, direction: -1 | 1) {
     updateDraft((current) => {
       const images = [...current.images]; const next = index + direction;
-      if (next < 0 || next >= images.length) return current;
+      if (next < 0 || next >= images.length || images[index].riskTemplate || images[next].riskTemplate) return current;
       [images[index], images[next]] = [images[next], images[index]];
       return { ...current, images };
     });
@@ -361,11 +360,11 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
             <div className="draft-sync-size-summary" role="status"><strong>{limit.label} · {size.width} × {size.height}</strong><span>{prepared.preparing ? "正在自动适配图片…" : adjustedCount ? `已自动调整 ${adjustedCount} 张 · 完整保留内容，空余处留白` : "尺寸已符合默认设置"}</span></div>
             <ol className="draft-sync-image-list">
               {images.map((image, index) => <li key={image.id} className="draft-sync-image-card" data-image-name={image.name}>
-                <div className="draft-sync-image-preview" style={{ aspectRatio: `${size.width} / ${size.height}` }}><DraftThumbnail image={image} index={index} /><span>{index === 0 ? "01 · 封面" : image.id === `risk-${platform}` ? "末页 · 风险提示" : String(index + 1).padStart(2, "0")}</span></div>
+                <div className="draft-sync-image-preview" style={{ aspectRatio: `${size.width} / ${size.height}` }}><DraftThumbnail image={image} index={index} /><span>{index === 0 ? "01 · 封面" : image.riskTemplate ? (riskReady ? (risk?.enabled ? "末页 · 含风险提示" : "末页") : "末页 · 待确认") : String(index + 1).padStart(2, "0")}</span></div>
                 <div className="draft-sync-image-info"><b title={image.name}>{image.name}</b><small>{image.width} × {image.height} · {(image.blob.size / 1024 / 1024).toFixed(2)} MB</small></div>
-                <div className="draft-sync-image-actions" hidden={image.id === `risk-${platform}`}>
+                <div className="draft-sync-image-actions" hidden={Boolean(image.riskTemplate)}>
                   <button type="button" disabled={anyBusy || index === 0} onClick={() => moveImage(index, -1)} aria-label={`前移第 ${index + 1} 张图片`}>←</button>
-                  <button type="button" disabled={anyBusy || index === draft.images.length - 1} onClick={() => moveImage(index, 1)} aria-label={`后移第 ${index + 1} 张图片`}>→</button>
+                  <button type="button" disabled={anyBusy || index === draft.images.length - 1 || Boolean(draft.images[index + 1]?.riskTemplate)} onClick={() => moveImage(index, 1)} aria-label={`后移第 ${index + 1} 张图片`}>→</button>
                   <button type="button" disabled={anyBusy} onClick={() => selectFiles(image.id)} aria-label={`替换第 ${index + 1} 张图片`}>替换</button>
                   <button type="button" disabled={anyBusy} onClick={() => updateDraft((current) => ({ ...current, images: current.images.filter((item) => item.id !== image.id) }))} aria-label={`删除第 ${index + 1} 张图片`}>删除</button>
                 </div>
@@ -380,13 +379,13 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
             <div className="field-stack"><label htmlFor="draft-platform-title">{limit.label}标题</label><input id="draft-platform-title" value={draft.content[platform].title} aria-invalid={Boolean(titleError)} aria-describedby="draft-title-help" disabled={Boolean(busy)} onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], title: event.target.value } } }), platform)} /><small id="draft-title-help" className={titleError ? "draft-sync-field-error" : ""} role={titleError ? "alert" : undefined}>{titleError || `${titleLength} / ${limit.title} 字`}</small></div>
             <div className="field-stack"><label htmlFor="draft-platform-body">{limit.label}文案</label><textarea id="draft-platform-body" rows={6} value={draft.content[platform].body} disabled={Boolean(busy)} placeholder="为这个平台写一段配文" onChange={(event) => updateDraft((current) => ({ ...current, content: { ...current.content, [platform]: { ...current.content[platform], body: event.target.value } } }), platform)} /><small>{countCharacters(draft.content[platform].body)} / {limit.body} 字；平台文案分别保存</small>{platform === "xiaohongshu" && <small>话题 {countHashtags(draft.content[platform].body)} / {limit.topics} 个；以 # 开头，用空格分隔</small>}</div>
             {risk && <section className="draft-sync-risk" aria-label={`${limit.label}风险提示`}>
-              <div className="draft-sync-section-title"><div><h3>单独确认风险提示</h3><p>仅用于{limit.label}，确认后作为最后一张图片。</p></div></div>
-              <label className="draft-sync-check"><input type="checkbox" checked={risk.enabled} disabled={Boolean(busy)} onChange={(event) => updateRisk({ enabled: event.target.checked })} /><span>添加风险提示页</span></label>
+              <div className="draft-sync-section-title"><div><h3>单独确认风险提示</h3><p>仅用于{limit.label}。确认后更新原来的最后一页，不增加页数。</p></div></div>
+              <label className="draft-sync-check"><input type="checkbox" checked={risk.enabled} disabled={Boolean(busy)} onChange={(event) => updateRisk({ enabled: event.target.checked })} /><span>在末页显示风险提示</span></label>
               {risk.enabled && <>
                 <div className="field-stack"><label htmlFor="draft-risk-title">风险提示标题</label><input id="draft-risk-title" value={risk.title} disabled={Boolean(busy)} onChange={(event) => updateRisk({ title: event.target.value })} /></div>
                 <div className="field-stack"><label htmlFor="draft-risk-text">风险提示内容</label><textarea id="draft-risk-text" rows={5} value={risk.text} disabled={Boolean(busy)} onChange={(event) => updateRisk({ text: event.target.value })} /></div>
               </>}
-              <label className="draft-sync-check draft-sync-risk-confirm"><input type="checkbox" checked={confirmedRisk[platform] === risk} disabled={Boolean(busy) || prepared.preparing || Boolean(prepared.error)} onChange={(event) => setConfirmedRisk((current) => ({ ...current, [platform]: event.target.checked ? risk : undefined }))} /><span>我已确认{limit.label}的风险提示{!risk.enabled && "（不添加风险提示页）"}</span></label>
+              <label className="draft-sync-check draft-sync-risk-confirm"><input type="checkbox" checked={confirmedRisk[platform] === risk} disabled={Boolean(busy) || prepared.preparing} onChange={(event) => setConfirmedRisk((current) => ({ ...current, [platform]: event.target.checked ? risk : undefined }))} /><span>我已确认{limit.label}的风险提示{!risk.enabled && "（末页不显示风险提示）"}</span></label>
             </section>}
             {!risk && <p className="draft-sync-small">此存档为已生成的图片。需要分平台编辑风险提示时，请用当前图片新建。</p>}
           </section>

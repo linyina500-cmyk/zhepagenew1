@@ -145,6 +145,8 @@ async function importRichDraft({ click, waitFor, act }, html) {
 test("real editor changes immediately block old exports and the next export contains the new text", { timeout: 15_000 }, async (context) => {
   const workspace = await mountWorkspace(context, "<p>旧正文。</p>");
   const { editor, insertText, click, waitFor, bulkExport, singleExport, downloads, captures } = workspace;
+  // Keep this phase pending even if React's async act yields beyond the debounce.
+  const releasePagination = holdPaginationTimers(context, workspace.act);
   insertText("刚输入的新增文字。");
   assert.match(editor.getText(), /刚输入的新增文字/);
   assert.equal(bulkExport().disabled, true, "bulk export must become unavailable in the same edit turn");
@@ -154,6 +156,7 @@ test("real editor changes immediately block old exports and the next export cont
   assert.equal(downloads.length, 0, "clicking the retained old preview must not download stale content");
   assert.equal(captures.length, 0);
 
+  await releasePagination();
   await waitFor(() => !bulkExport().disabled, "the changed document finishes paginating");
   await click(singleExport());
   await waitFor(() => downloads.length === 1, "the latest preview can still export a PNG");
@@ -439,6 +442,27 @@ test("temporary HTML image replacement holds the same import gate until its comp
   assert.equal(editor.view.dom.querySelector("strong").textContent, "强调");
   assert.equal(editor.view.dom.querySelector("img").getAttribute("src"), `data:image/png;base64,${png.toString("base64")}`);
   assert.equal(editor.view.dom.querySelector("img").alt, "保留图注");
+});
+
+test("imported inline color has one owner so changing or clearing it preserves other source styles", { timeout: 15_000 }, async (context) => {
+  const { editor, act, waitFor, bulkExport } = await mountWorkspace(context,
+    '<p>前文<span style="color:rgb(204, 34, 68);background-color:#f7e8b3;letter-spacing:1px">重点文字</span>后文。</p>');
+  editor.view.setProps({ handleScrollToSelection: () => true });
+  await act(async () => { editor.commands.setTextSelection({ from: 3, to: 7 }); });
+  for (const type of ["sourceStyle", "textStyle"]) {
+    assert.doesNotMatch(editor.getAttributes(type).style || "", /(?:^|;)\s*color\s*:/i, `${type} must not duplicate the editable color`);
+  }
+  assert.equal(editor.getAttributes("textStyle").color, "rgb(204, 34, 68)");
+  await act(async () => { editor.commands.setColor("#2457a7"); });
+  assert.equal(editor.getAttributes("textStyle").color, "#2457a7");
+  assert.doesNotMatch(editor.getHTML(), /204, 34, 68/);
+  await act(async () => { editor.commands.unsetColor(); });
+  assert.equal(editor.getAttributes("textStyle").color ?? null, null);
+  assert.doesNotMatch(editor.getHTML(), /204, 34, 68|36, 87, 167|2457a7/);
+  assert.match(editor.getHTML(), /background-color:/);
+  assert.match(editor.getHTML(), /letter-spacing: 1px/);
+  assert.equal(editor.getText(), "前文重点文字后文。");
+  await waitFor(() => !bulkExport().disabled, "the updated color reaches the preview");
 });
 
 test("automatic typesetting has its own undo step between rapid manual edits", { timeout: 15_000 }, async (context) => {

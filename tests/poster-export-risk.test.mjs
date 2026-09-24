@@ -20,7 +20,7 @@ async function fixture(t, { contentPages, cover = false, waitForFonts = async ()
   dom.window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {} });
   dom.window.HTMLCanvasElement.prototype.toDataURL = () => "data:image/png;base64,ZmFrZQ==";
   const grid = document.createElement("div"); grid.className = "poster-grid"; document.body.append(grid);
-  const pages = [...(cover ? ['<div class="cover-bottom"><div class="cover-meta"><span>封面品牌</span><span>05 PAGES</span></div></div>'] : []), ...contentPages.map((html) => `<div class="article-flow">${html}</div>`)];
+  const pages = [...(cover ? ['<div class="cover-bottom"><div class="cover-meta"><span>封面品牌</span><span>05 PAGES</span></div></div>'] : []), ...contentPages.map((html) => `<div class="article-viewport" style="height:1100px"><div class="article-flow">${html}</div></div>`)];
   const pageRefs = { current: pages.map((html, index) => {
     const wrap = document.createElement("div"); wrap.className = "poster-wrap";
     const node = document.createElement("article"); node.className = "poster-page";
@@ -30,9 +30,13 @@ async function fixture(t, { contentPages, cover = false, waitForFonts = async ()
     wrap.append(node); grid.append(wrap); return node;
   }) };
   const originals = pageRefs.current.map((node) => node.outerHTML);
-  const captured = [], zipFiles = [], downloads = [], notices = [];
+  const captured = [], templates = [], zipFiles = [], downloads = [], notices = [];
   const imageModule = { async getFontEmbedCSS() { return ""; }, async toBlob(node) {
     captured.push(node.cloneNode(true)); return new Blob([node.outerHTML], { type: "image/png" });
+  }, async toSvg(node, options) {
+    templates.push(node.cloneNode(true));
+    const xml = new dom.window.XMLSerializer().serializeToString(node);
+    return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${options.width}" height="${options.height}" viewBox="0 0 ${options.width} ${options.height}"><foreignObject width="100%" height="100%" x="0" y="0" externalResourcesRequired="true">${xml}</foreignObject></svg>`);
   } };
   class FakeZip { file(name, blob) { zipFiles.push({ name, blob }); } async generateAsync() { return new Blob(["synthetic zip"]); } }
   dom.window.HTMLAnchorElement.prototype.click = function () { downloads.push(this.download); };
@@ -64,29 +68,25 @@ async function fixture(t, { contentPages, cover = false, waitForFonts = async ()
     assert.deepEqual(pageRefs.current.map((node) => node.outerHTML), originals);
     assert.equal(document.querySelectorAll(".poster-grid").length, 1, "snapshot frames must be disposed");
   };
-  return { captured, zipFiles, downloads, notices, exportVersionRef, unchanged, act, get latest() { return latest; } };
+  return { captured, templates, zipFiles, downloads, notices, exportVersionRef, unchanged, act, get latest() { return latest; } };
 }
 
-test("separated sync skips only risk-only pages, keeps mixed body/images/table intact, and never edits preview", async (t) => {
-  const f = await fixture(t, { cover: true, contentPages: [body + risk, `<section>${risk}</section>`, "<p>最后的正文</p>", `<p><br></p>${risk}`] });
+test("editable risk keeps every original page and captures only the existing last-page template", async (t) => {
+  const f = await fixture(t, { cover: true, contentPages: [body, `<p>末页正文</p>${risk}`] });
   let images;
-  await f.act(async () => { images = await f.latest.collectAssets({ separateRisk: true }); });
-  assert.equal(images.length, 4);
-  assert.deepEqual(f.captured.map((node) => node.dataset.sourceIndex), ["0", "1", "3", "4"]);
-  assert.deepEqual(images.map(({ name }) => name), ["折页-小红书-01.png", "折页-小红书-02.png", "折页-小红书-03.png", "折页-小红书-04.png"]);
-  assert.deepEqual(f.captured.map((node) => node.querySelector(":scope > footer > span:last-child")?.textContent ?? null), [null, "02", "03", "04"]);
-  assert.deepEqual(f.captured.map((node) => node.querySelector(":scope > header > b")?.textContent ?? null), [null, "02", "03", "04"]);
-  assert.equal(f.captured[0].querySelector(".cover-meta > span:last-child").textContent, "图文内容");
-  for (const node of f.captured) assert.equal(node.querySelector(".risk-note"), null);
-  const actualBody = f.captured[1].querySelector(".article-flow");
-  const expected = document.createElement("template"); expected.innerHTML = body;
-  const actual = actualBody.cloneNode(true);
+  await f.act(async () => { images = await f.latest.collectAssets({ editableRisk: true }); });
+  assert.equal(images.length, 3);
+  assert.deepEqual(f.captured.map((node) => node.dataset.sourceIndex), ["0", "1", "2"]);
+  assert.deepEqual(images.map(({ name }) => name), ["折页-小红书-01.png", "折页-小红书-02.png", "折页-小红书-03.png"]);
+  assert.deepEqual(f.captured.map((node) => node.querySelector(":scope > footer > span:last-child")?.textContent ?? null), [null, "1 / 2", "2 / 2"]);
+  assert.equal(f.captured[0].querySelector(".cover-meta > span:last-child").textContent, "05 PAGES");
+  assert.equal(f.templates.length, 1); assert.equal(f.templates[0].dataset.sourceIndex, "2");
+  assert.equal(images[0].riskTemplate, undefined); assert.equal(images[1].riskTemplate, undefined);
+  assert.match(images[2].riskTemplate.svg, /末页正文/); assert.match(images[2].riskTemplate.svg, /风险文字/);
+  const actualBody = f.captured[1].querySelector(".article-flow"), actual = actualBody.cloneNode(true);
   actual.querySelector("img").setAttribute("src", "/body.png");
   actual.querySelector("img").removeAttribute("loading"); actual.querySelector("img").removeAttribute("decoding");
-  assert.equal(actual.innerHTML, expected.innerHTML, "all body nodes and formatting remain exact apart from locally captured image pixels");
-  assert.match(actualBody.querySelector("img").src, /^data:image\/png;base64,/);
-  assert.equal(f.captured[2].querySelector(".article-flow").innerHTML, "<p>最后的正文</p>");
-  assert.equal(f.captured[3].querySelector(".article-flow").innerHTML, "<p><br></p>", "authored spacing is not a risk-only page");
+  assert.equal(actual.innerHTML, body);
   f.unchanged();
 });
 
@@ -109,16 +109,36 @@ test("ordinary asset collection and single/ZIP downloads retain risk notes, page
   f.unchanged();
 });
 
-test("a risk-only page is skipped before snapshot capture", async (t) => {
+test("an existing risk-only last page remains one page without appending another", async (t) => {
   const only = await fixture(t, { contentPages: [risk] });
   let images;
-  await only.act(async () => { images = await only.latest.collectAssets({ separateRisk: true }); });
-  assert.deepEqual(images, []); assert.deepEqual(only.captured, []); only.unchanged();
+  await only.act(async () => { images = await only.latest.collectAssets({ editableRisk: true }); });
+  assert.equal(images.length, 1); assert.equal(only.captured.length, 1); assert.equal(only.templates.length, 1); assert.match(images[0].riskTemplate.svg, /风险文字/); only.unchanged();
 });
 
-test("an export version change still stops separated export before snapshot capture", async (t) => {
+test("an export version change still stops editable-risk export before snapshot capture", async (t) => {
   let f;
   f = await fixture(t, { contentPages: [body + risk], waitForFonts: async () => { f.exportVersionRef.current = { inputKey: "changed", paginationVersion: 2 }; } });
-  await f.act(async () => { await assert.rejects(f.latest.collectAssets({ separateRisk: true }), /内容或样式已更新/); });
+  await f.act(async () => { await assert.rejects(f.latest.collectAssets({ editableRisk: true }), /内容或样式已更新/); });
   assert.deepEqual(f.captured, []); assert.equal(f.latest.exporting, false); f.unchanged();
+});
+
+
+test("a missing risk block is added only to the editable template, leaving the original PNG and preview intact", async (t) => {
+  const f = await fixture(t, { contentPages: [body] });
+  let images;
+  await f.act(async () => { images = await f.latest.collectAssets({ editableRisk: true }); });
+  assert.equal(images.length, 1); assert.equal(f.captured[0].querySelector(".risk-note"), null);
+  assert.equal(f.templates[0].querySelectorAll(".risk-note").length, 1); assert.match(images[0].riskTemplate.svg, /风险提示/);
+  f.unchanged();
+});
+
+test("an imported link keeps its text and decoration while template navigation attributes are removed", async (t) => {
+  const f = await fixture(t, { contentPages: ['<p><a href="https://example.test/article" target="_blank" rel="noopener" style="color:rgb(10, 20, 30);text-decoration:underline">正文链接</a></p>' + risk] });
+  await f.act(async () => { await f.latest.collectAssets({ editableRisk: true }); });
+  assert.equal(f.captured[0].querySelector("a").getAttribute("href"), "https://example.test/article");
+  const link = f.templates[0].querySelector("a");
+  assert.equal(link.textContent, "正文链接"); assert.equal(link.style.color, "rgb(10, 20, 30)"); assert.equal(link.style.textDecoration, "underline");
+  assert.equal(link.hasAttribute("href"), false); assert.equal(link.hasAttribute("target"), false); assert.equal(link.hasAttribute("rel"), false);
+  f.unchanged();
 });
