@@ -252,6 +252,7 @@ test("risk confirmation regenerates only the existing last page, preserving body
     const approval = dialog.getByLabel(`我已确认${label}的风险提示`, { exact: true });
     await expect(approval).not.toBeChecked();
     const before = await imageManifest(dialog), bodyHash = await lastPageBodyHash(dialog, bodyBottomRatio);
+    const beforePixels = await riskCard(dialog).locator("img").evaluate(async (node) => Array.from(new Uint8Array(await (await fetch((node as HTMLImageElement).src)).arrayBuffer())));
     const rendersBefore = await renderCount();
     await dialog.getByLabel("风险提示标题", { exact: true }).fill(`${label}风险提示`);
     await dialog.getByLabel("风险提示内容", { exact: true }).fill(`${label}内容仅供参考。\n\n保留独立判断，不构成投资建议。`);
@@ -264,7 +265,26 @@ test("risk confirmation regenerates only the existing last page, preserving body
     expect(confirmed.map((image) => image.name)).toEqual(before.map((image) => image.name));
     expect(confirmed.slice(0, -1)).toEqual(before.slice(0, -1));
     expect(confirmed.at(-1)?.hash).not.toBe(before.at(-1)?.hash);
-    expect(await lastPageBodyHash(dialog, bodyBottomRatio), "the original header, body and decorations must retain their painted pixels").toBe(bodyHash);
+    const afterBodyHash = await lastPageBodyHash(dialog, bodyBottomRatio);
+    if (afterBodyHash !== bodyHash) {
+      const afterPixels = await riskCard(dialog).locator("img").evaluate(async (node) => Array.from(new Uint8Array(await (await fetch((node as HTMLImageElement).src)).arrayBuffer())));
+      await test.info().attach(`${platform}-before-risk`, { body: Buffer.from(beforePixels), contentType: "image/png" });
+      await test.info().attach(`${platform}-after-risk`, { body: Buffer.from(afterPixels), contentType: "image/png" });
+      const difference = await riskCard(dialog).locator("img").evaluate(async (node, { bytes, ratio }) => {
+        const image = node as HTMLImageElement, canvas = document.createElement("canvas"); canvas.width = image.naturalWidth; canvas.height = Math.floor(image.naturalHeight * ratio);
+        const context = canvas.getContext("2d")!, old = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
+        context.drawImage(old, 0, 0); const before = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(image, 0, 0); const after = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let changed = 0, maximum = 0, total = 0; const rows = new Map<number, number>();
+        for (let pixel = 0; pixel < before.length; pixel += 4) {
+          const delta = Math.max(...[0, 1, 2, 3].map((channel) => Math.abs(before[pixel + channel] - after[pixel + channel])));
+          if (delta) { changed++; maximum = Math.max(maximum, delta); total += delta; const y = Math.floor(pixel / 4 / canvas.width); rows.set(y, (rows.get(y) || 0) + 1); }
+        }
+        old.close(); return { width: canvas.width, height: canvas.height, changed, maximum, meanDelta: changed ? total / changed : 0, rows: [...rows] };
+      }, { bytes: beforePixels, ratio: bodyBottomRatio });
+      console.info("Risk body pixel difference", JSON.stringify(difference));
+    }
+    expect(afterBodyHash, "the original header, body and decorations must retain their painted pixels").toBe(bodyHash);
     confirmedByPlatform.set(platform, confirmed);
     await saveSamePageProof(page, dialog, platform);
   }
