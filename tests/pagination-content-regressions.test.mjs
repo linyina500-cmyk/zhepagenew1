@@ -54,7 +54,7 @@ test("the reported seven-section article paginates with its five NBSP-only separ
   assert.doesNotThrow(() => assertPaginationSemantics(html, pages));
 });
 
-test("ordinary empty paragraphs and whitespace-only styled wrappers do not look like missing body text", () => {
+test("ordinary blank paragraphs retain their spacing even inside styled wrappers", () => {
   const blanks = [
     "<p></p>", "<p> </p>", "<p>\n\t</p>", "<p>&nbsp;</p>",
     "<p>&nbsp; &nbsp;</p>", "<p><br></p>",
@@ -63,9 +63,11 @@ test("ordinary empty paragraphs and whitespace-only styled wrappers do not look 
   ];
   for (const blank of blanks) {
     const source = `<p>前文</p>${blank}<p>后文</p>`;
-    assert.doesNotThrow(() => assertPaginationSemantics(source, ["<p>前文</p><p>后文</p>"]), blank);
+    assert.throws(() => assertPaginationSemantics(source, ["<p>前文</p><p>后文</p>"]), /空行|换行/, blank);
     const { pages } = paginateArticle(source, measureContent(), 100);
-    assert.equal(body(pages.join("")).textContent, "前文后文", blank);
+    const output = body(pages.join(""));
+    assert.equal(output.textContent, "前文后文", blank);
+    assert.equal(output.querySelectorAll(".manual-empty-line,br").length, 1, blank);
   }
 });
 
@@ -103,7 +105,7 @@ test("a generated whitespace-only continuation retains the original space betwee
 test("empty styled separators do not hide genuine color or emphasis changes", () => {
   const source = '<p><strong>前文</strong></p><p><strong><span style="color:red">&nbsp;</span></strong></p>'
     + '<p><span style="color:blue">后文</span></p>';
-  const valid = '<p><strong>前文</strong></p><p><span style="color:blue">后文</span></p>';
+  const valid = '<p><strong>前文</strong></p><p class="manual-empty-line"></p><p><span style="color:blue">后文</span></p>';
   assert.doesNotThrow(() => assertPaginationSemantics(source, [valid]));
   assert.throws(() => assertPaginationSemantics(source, [valid.replace("color:blue", "color:green")]));
   assert.throws(() => assertPaginationSemantics(source, [valid.replace("<strong>前文</strong>", "前文")]));
@@ -169,7 +171,7 @@ test("images between long paragraphs keep their order and source when the wrappe
 });
 
 test("explicit manual empty lines survive block extraction and pagination", () => {
-  for (const content of ["&nbsp;", "<br>"]) {
+  for (const content of ["", "&nbsp;", "<br>"]) {
     const blank = `<p class="manual-empty-line">${content}</p>`;
     const source = `<p>前文</p>${blank}<p>后文</p>`;
     assert.equal(articleBlocks(source).length, 3);

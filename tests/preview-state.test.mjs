@@ -7,6 +7,29 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
+function pausePagination(context, act) {
+  const timers = new Map();
+  const schedule = window.setTimeout.bind(window), cancel = window.clearTimeout.bind(window);
+  const setTimer = context.mock.method(window, "setTimeout", (callback, delay, ...args) => {
+    if (delay !== 160 && delay !== 320) return schedule(callback, delay, ...args);
+    const timer = schedule(() => {}, 60_000);
+    timers.set(timer, () => callback(...args));
+    return timer;
+  });
+  const clearTimer = context.mock.method(window, "clearTimeout", (timer) => {
+    timers.delete(timer);
+    cancel(timer);
+  });
+  return async () => {
+    assert.ok(timers.size, "a real pagination update must be pending before release");
+    setTimer.mock.restore(); clearTimer.mock.restore();
+    await act(async () => {
+      for (const [timer, callback] of timers) { cancel(timer); callback(); }
+      timers.clear();
+    });
+  };
+}
+
 test("preview updates retain the current page, clear failed results, and prevent outdated downloads", { timeout: 20_000 }, async (context) => {
   const dom = installDom();
   const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
@@ -131,6 +154,9 @@ test("preview updates retain the current page, clear failed results, and prevent
     assert.equal(document.querySelector(".preview-pager b").textContent, "6 / 7");
     assert.equal(scrollTargets[0], previousPages[5].closest(".poster-wrap"));
 
+    // Assertions about retained pages must run before the replacement is allowed
+    // to complete, regardless of scheduler pressure from other unit test files.
+    const finishOrdinaryPagination = pausePagination(context, act);
     await changeArticle("<p>普通编辑正文。</p>");
     assert.equal(bulkExport().disabled, true);
     assert.equal(document.querySelector(".poster-grid"), previousGrid);
@@ -142,6 +168,7 @@ test("preview updates retain the current page, clear failed results, and prevent
     assert.equal(document.querySelector(".preview-pager b").textContent, "6 / 7");
     assert.match(document.querySelector(".workspace-heading").textContent, /预览更新中/);
     assert.equal(document.querySelector(".preview-workspace .poster-font-loading"), null, "updates must not insert a tall loading panel above retained pages");
+    await finishOrdinaryPagination();
     await waitFor(() => !bulkExport().disabled, "ordinary editing refreshes the retained preview");
     assert.equal(document.querySelectorAll(".content-page").length, 7);
     assert.equal(document.querySelector(".preview-pager b").textContent, "6 / 7");
@@ -150,11 +177,13 @@ test("preview updates retain the current page, clear failed results, and prevent
     assert.equal(scrollTargets.length, 1, "ordinary editing must not request a scroll");
 
     failPagination = true;
+    const finishFailedPagination = pausePagination(context, act);
     await changeArticle("<p>最新编辑正文。</p>");
     assert.equal(bulkExport().disabled, true);
     assert.match(bulkExport().textContent, /正在排版/);
     assert.equal(document.querySelectorAll(".content-page").length, 7);
     assert.equal(document.querySelectorAll(".content-page")[5], previousPages[5]);
+    await finishFailedPagination();
     await waitFor(() => document.querySelector(".preview-workspace").textContent.includes("当前内容排版失败"), "the pagination failure is shown");
     assert.equal(document.querySelectorAll(".content-page").length, 0);
     assert.match(document.querySelector("[data-test-editor]").textContent, /最新编辑正文/);

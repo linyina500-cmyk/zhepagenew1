@@ -14,6 +14,7 @@ import { paginateArticle } from "../lib/pagination/paginateArticle";
 import { extractArticle, extractRichTextFragment } from "../lib/richText/importArticle";
 
 const ZhepageEditor = lazy(() => import("./components/ZhepageEditor"));
+const DraftSyncDialog = lazy(() => import("./components/DraftSyncDialog"));
 
 type InputMode = "url" | "html" | "editor" | "markdown";
 type FormatKey = "xiaohongshu" | "portrait" | "story";
@@ -311,6 +312,9 @@ export default function Home() {
   const [editorModuleReady, setEditorModuleReady] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [draftSyncMounted, setDraftSyncMounted] = useState(false);
+  const [draftSyncOpen, setDraftSyncOpen] = useState(false);
+  const draftSyncTriggerRef = useRef<HTMLButtonElement>(null);
   const [posterFontsReady, setPosterFontsReady] = useState(false);
   const measureRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Array<HTMLElement | null>>([]);
@@ -353,7 +357,7 @@ export default function Home() {
   const exportInputKey = useMemo(() => JSON.stringify([
     paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor,
   ]), [paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor]);
-  const { exporting, exportOne, exportAll } = usePosterExport({
+  const { exporting, exportOne, exportAll, collectAssets } = usePosterExport({
     exportVersionRef, pageRefs, contentPages, pageOffset, totalPages,
     format, formatKey, title, paperColor, fontKey: `${titleFont}:${bodyFont}`,
     waitForFonts: () => waitForPosterFonts([titleFont, bodyFont]),
@@ -884,6 +888,12 @@ export default function Home() {
             closeImportDialog();
             setHelpOpen(true);
           }}><i aria-hidden="true">?</i><span>使用说明</span></button>
+          <button ref={draftSyncTriggerRef} className="draft-sync-trigger" type="button" onClick={() => {
+            closeImportDialog();
+            setHelpOpen(false);
+            setDraftSyncMounted(true);
+            setDraftSyncOpen(true);
+          }}>同步草稿</button>
           <button className="primary compact" onClick={exportAll} disabled={exporting || !paginationReady}>{exporting ? "处理中…" : !posterFontsReady ? "字体加载中…" : paginationError ? "排版失败" : paginationReady ? `批量导出 ${totalPages} 张` : "正在排版…"}</button>
         </div>
       </header>
@@ -902,7 +912,7 @@ export default function Home() {
               const normalized = normalizePosterTitle(event.target.value);
               setTitle(normalized);
               if (normalized !== event.target.value) setNotice({ tone: "error", text: `标题最多 ${MAX_TITLE_LENGTH} 字、${MAX_TITLE_LINES} 行` });
-            }} /><small>{Array.from(title.replace(/\n/g, "")).length} / {MAX_TITLE_LENGTH} 字 · 最多 {MAX_TITLE_LINES} 行</small></div>
+            }} /><small>{Array.from(title.replace(/\n/g, "")).length} / {MAX_TITLE_LENGTH} 字 · 最多 {MAX_TITLE_LINES} 行</small>{Array.from(title.replace(/\s*\n\s*/g, " ").trim()).length > 20 && <small className="draft-sync-field-error">同步标题最多 20 字；当前超过 {Array.from(title.replace(/\s*\n\s*/g, " ").trim()).length - 20} 字，请在同步弹窗中填写短标题。海报标题会保留。</small>}</div>
             <div className="field-stack"><label htmlFor="poster-subtitle">导语 / 副标题（可留空）</label><input id="poster-subtitle" value={subtitle} onChange={(event) => setSubtitle(event.target.value)} placeholder="留空时，标题后直接展示正文" /></div>
             <div className="microcopy-grid">
               <div className="field-stack"><label htmlFor="lab-name">底部栏目名</label><input id="lab-name" value={labName} onChange={(event) => setLabName(event.target.value)} /></div>
@@ -1202,6 +1212,25 @@ export default function Home() {
           </div>
         </section>
       </div>
+
+      {draftSyncMounted && <Suspense fallback={draftSyncOpen ? <div className="draft-sync-loading" role="status">正在打开草稿同步…</div> : null}><DraftSyncDialog
+        open={draftSyncOpen}
+        openerRef={draftSyncTriggerRef}
+        title={title}
+        sourceFormat={formatKey}
+        canCollect={paginationReady && !exporting}
+        collectAssets={collectAssets}
+        riskNote={{ enabled: showRiskNote, title: riskTitle, text: riskText }}
+        onClose={() => setDraftSyncOpen(false)}
+        onReturnToEditor={() => {
+          setDraftSyncOpen(false);
+          window.requestAnimationFrame(() => {
+            const target = document.querySelector<HTMLButtonElement>(".format-grid button.selected");
+            target?.scrollIntoView({ behavior: "smooth", block: "center" });
+            target?.focus({ preventScroll: true });
+          });
+        }}
+      /></Suspense>}
 
       {importOpen && <div className="import-modal-backdrop" role="presentation" onMouseDown={(event) => {
         if (event.target === event.currentTarget) closeImportDialog();

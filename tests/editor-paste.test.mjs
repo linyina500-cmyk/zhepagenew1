@@ -64,6 +64,31 @@ test("plain-text paste over the limit leaves existing content unchanged", (t) =>
   assert.match(notices[0], /3 万字/);
 });
 
+test("plain-text paste preserves every blank line for LF CRLF and CR and is one undo step", (t) => {
+  const { editor, notices } = setup(t);
+  const lines = ["", "粘贴首段", "", "", "粘贴末段", ""];
+  for (const newline of ["\n", "\r\n", "\r"]) {
+    editor.commands.selectAll();
+    paste(editor, "", lines.join(newline));
+    assert.deepEqual(editor.getJSON().content.map((node) => node.content?.map((child) => child.text || "").join("") || ""), lines);
+    assert.equal(editor.commands.undo(), true);
+    assert.equal(editor.getHTML(), "<p>原有正文</p>");
+    assert.equal(editor.commands.redo(), true);
+    assert.equal(editor.getJSON().content.length, lines.length);
+    editor.commands.undo();
+  }
+  assert.deepEqual(notices, []);
+});
+
+test("plain-text multiline paste keeps active marks and inserts angle brackets as literal text", (t) => {
+  const { editor } = setup(t, "<p><strong>前后</strong></p>");
+  editor.commands.setTextSelection(2);
+  paste(editor, "", "甲\n\n<正文>");
+  assert.equal(editor.getHTML(), "<p><strong>前甲</strong></p><p></p><p><strong>&lt;正文&gt;后</strong></p>");
+  editor.commands.undo();
+  assert.equal(editor.getHTML(), "<p><strong>前后</strong></p>");
+});
+
 test("deep wrappers are rejected before ProseMirror transforms the clipboard", (t) => {
   const { editor, notices } = setup(t);
   paste(editor, "<section>".repeat(RICH_TEXT_LIMITS.depth + 1) + "正文" + "</section>".repeat(RICH_TEXT_LIMITS.depth + 1));

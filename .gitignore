@@ -1,7 +1,9 @@
 node_modules/
 dist/
 dist-pages/
+public/downloads/
 .next/
+.vinext/
 .wrangler/
 playwright-report/
 test-results/
@@ -10,3 +12,6 @@ test-results/
 .env
 .env.local
 .env.*.local
+.wechat-sync-data/
+.wechat-sync-local/
+dist-wechat/

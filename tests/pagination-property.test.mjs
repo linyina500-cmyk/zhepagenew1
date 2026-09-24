@@ -27,7 +27,10 @@ function escape(value) {
 function fixture(items) {
   let expected = "";
   const html = items.map((entry, index) => {
-    if (entry.kind === "blank") return '<section><p><strong>&nbsp;</strong></p></section>';
+    if (entry.kind === "blank") {
+      expected += "[manual-space]";
+      return '<section><p><strong>&nbsp;</strong></p></section>';
+    }
     if (entry.kind === "image") {
       const src = `https://example.com/fixture-${index}.png`;
       expected += `[image:${src}]`;
@@ -116,12 +119,13 @@ test("generated styled Unicode text only breaks at complete visible characters",
   }), { seed: 20260910, numRuns: 100 });
 });
 
-test("the integrity contract detects a real edit amid removable blank formatting", () => {
+test("the integrity contract preserves blank paragraphs while detecting real text edits", () => {
   fc.assert(fc.property(words, (tokens) => {
     const text = tokens.join(" ");
     const source = `<p>${escape(text)}</p><p><span style="color:red">&nbsp;</span></p><p>结尾</p>`;
-    assert.doesNotThrow(() => assertPaginationSemantics(source, [`<p>${escape(text)}</p><p>结尾</p>`]));
-    assert.throws(() => assertPaginationSemantics(source, [`<p>${escape(text)}</p><p>结</p>`]), /正文/);
+    assert.doesNotThrow(() => assertPaginationSemantics(source, [`<p>${escape(text)}</p><p></p><p>结尾</p>`]));
+    assert.throws(() => assertPaginationSemantics(source, [`<p>${escape(text)}</p><p>结尾</p>`]), /空行/);
+    assert.throws(() => assertPaginationSemantics(source, [`<p>${escape(text)}</p><p></p><p>结</p>`]), /正文/);
     const image = '<img src="https://example.com/image.png">';
     assert.throws(() => assertPaginationSemantics(`<p>${escape(text)}</p>${image}<p>结尾</p>`, [`<p>${escape(text)}结尾</p>${image}`]), /图片/);
   }), { seed: 20260911, numRuns: 80 });
