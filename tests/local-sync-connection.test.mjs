@@ -127,6 +127,7 @@ test("the first connection has no credential or file fields", async (context) =>
   assert.ok(button.classList.contains("primary"));
   assert.equal(f.container.querySelector("input"), null);
   assert.match(f.container.textContent, /共用此连接/);
+  assert.match(f.container.textContent, /这台 Mac 上的 Chrome/);
   assert.match(f.container.textContent, /安装一次.*随登录启动/);
   assert.match(f.container.textContent, /无需上传文件或填写连接口令/);
   assert.doesNotMatch(f.container.textContent, /config\.env|WECHAT_SYNC_TOKEN/);

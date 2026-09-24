@@ -5,6 +5,7 @@ Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcryp
 import { loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const { createWechatClient, WechatUnconfirmedError, WechatRequestError } = loadDomModule("lib/wechat/client.ts");
+const { LocalSyncBrowserError } = loadDomModule("lib/localSync/transport.ts");
 const id = "76f6dbe5-a12d-4fe2-8ee7-35e6e988ab8e";
 const appId = "wx-test-account";
 const accountId = createHash("sha256").update(appId).digest("hex").slice(0, 20);
@@ -69,6 +70,12 @@ test("connection cancellation preserves its reason without a reconnect warning",
   await assert.rejects(waiting, (error) => error === reason);
   const abort = new DOMException("request aborted", "AbortError");
   await assert.rejects(createWechatClient("pass", async () => { throw abort; }).getConnection(signal()), (error) => error === abort);
+});
+
+test("unsupported browser instructions survive connection error handling unchanged", async () => {
+  const failure = new LocalSyncBrowserError();
+  const client = createWechatClient("pass", async () => { throw failure; });
+  await assert.rejects(client.getConnection(signal()), (error) => error === failure && /这台 Mac 上的 Chrome/.test(error.message));
 });
 
 test("create sends complete original images in order and exact independent copy once", async () => {

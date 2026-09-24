@@ -41,11 +41,28 @@ export async function startWechatTestServer(
       await page.route(`${PAIRING_APP_ORIGIN}/**`, async (route) => {
         const requested = new URL(route.request().url());
         if (requested.pathname.startsWith("/api/")) { failure = new Error("Platform requests must remain on this device"); await route.abort(); return; }
-        const response = await route.fetch({ url: new URL(requested.pathname + requested.search, previewOrigin).href });
+        const response = await route.fetch({ url: new URL(requested.pathname + requested.search, previewOrigin).href, headers: { ...route.request().headers(), host: new URL(previewOrigin).host } });
         await route.fulfill({ response });
       });
-      await page.route("http://127.0.0.1:8788/**", (route) => route.continue({ url: new URL(new URL(route.request().url()).pathname, apiOrigin).href }));
-      await page.route("http://127.0.0.1:8789/**", (route) => route.continue({ url: new URL(new URL(route.request().url()).pathname, pairingOrigin).href }));
+      if (page.context().browser()?.browserType().name() === "firefox") {
+        // Firefox keeps the original Host when Playwright changes a request URL.
+        // Adapt only the fixture ports before network dispatch; fetch still uses
+        // the browser's real cross-origin transport and unmodified server replies.
+        await page.addInitScript(({ apiOrigin, pairingOrigin }) => {
+          const nativeFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const source = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+            const target = new URL(source, location.href);
+            const mappedOrigin = target.origin === "http://127.0.0.1:8788" ? apiOrigin : target.origin === "http://127.0.0.1:8789" ? pairingOrigin : undefined;
+            if (!mappedOrigin) return nativeFetch(input, init);
+            const mapped = new URL(target.pathname + target.search, mappedOrigin).href;
+            return nativeFetch(input instanceof Request ? new Request(mapped, input) : mapped, init);
+          };
+        }, { apiOrigin, pairingOrigin });
+      } else {
+        await page.route("http://127.0.0.1:8788/**", (route) => route.continue({ url: new URL(new URL(route.request().url()).pathname, apiOrigin).href }));
+        await page.route("http://127.0.0.1:8789/**", (route) => route.continue({ url: new URL(new URL(route.request().url()).pathname, pairingOrigin).href }));
+      }
     },
     failure: () => failure,
     close: () => closeLocalServers(server, pairing),

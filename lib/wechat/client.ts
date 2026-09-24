@@ -1,5 +1,5 @@
 import type { DraftContent, DraftImage } from "../draftSync/types";
-import { localSyncFetch } from "../localSync/transport";
+import { LocalSyncBrowserError, localSyncFetch } from "../localSync/transport";
 
 export type WechatAccount = { id: string; name: string };
 export type WechatPublication = {
@@ -116,6 +116,7 @@ export function createWechatClient(password: string, fetcher: typeof fetch = loc
         return { deviceId: data.deviceId, ...(typeof data.busy === "boolean" ? { busy: data.busy } : {}) };
       } catch (error) {
         signal.throwIfAborted();
+        if (error instanceof LocalSyncBrowserError) throw error;
         if (error instanceof Error && error.name === "AbortError") throw error;
         if (error instanceof WechatRequestError) {
           if (error.status === 401) throw new WechatRequestError("连接信息已失效，请在连接设置中重新连接这台电脑。", error.status);

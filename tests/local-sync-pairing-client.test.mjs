@@ -5,6 +5,7 @@ import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
 Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
 const { beginLocalSyncConnection } = loadDomModule("lib/localSync/connection.ts");
+const { LocalSyncBrowserError } = loadDomModule("lib/localSync/transport.ts");
 const origin = "http://127.0.0.1:8789";
 const deviceId = "a".repeat(32), token = "b".repeat(64);
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status });
@@ -12,6 +13,7 @@ const signal = () => new AbortController().signal;
 
 function fixture(t, options = {}) {
   const dom = installDom(), requests = [], opened = [];
+  Object.defineProperty(navigator, "userAgent", { configurable: true, value: options.userAgent || "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/140.0 Safari/537.36" });
   t.mock.method(window, "open", (...args) => { opened.push(args); throw new Error("pairing must not open a window"); });
   t.mock.method(globalThis, "fetch", async (url, init) => {
     requests.push({ url, init });
@@ -26,6 +28,13 @@ function fixture(t, options = {}) {
   t.after(() => { attempt.close(); dom.window.close(); });
   return { attempt, requests, opened };
 }
+
+test("Safari pairing gives its browser instruction immediately without a timer or request", async (t) => {
+  const f = fixture(t, { userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15" });
+  t.mock.method(globalThis, "setTimeout", () => assert.fail("unsupported browser must not wait for a timeout"));
+  await assert.rejects(f.attempt.connect(signal()), (error) => error instanceof LocalSyncBrowserError && /这台 Mac 上的 Chrome/.test(error.message));
+  assert.equal(f.requests.length, 0); assert.equal(f.opened.length, 0);
+});
 
 test("a click pairs directly with a fresh challenge and verifies the service without opening a window", async (t) => {
   const f = fixture(t);

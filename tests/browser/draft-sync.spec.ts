@@ -206,7 +206,8 @@ test("mobile draft controls stay usable and a denied local save never reports su
   await expect(page.getByRole("button", { name: "同步草稿", exact: true })).toBeFocused();
 });
 
-test("WeChat local accounts batch real PNG drafts and require explicit publication confirmation", async ({ page }) => {
+test("WeChat local accounts batch real PNG drafts and require explicit publication confirmation", async ({ page, browserName }) => {
+  test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; sync is supported in Chrome/Firefox and its Safari guidance is tested separately.");
   test.setTimeout(240_000);
   const requests: string[] = [];
   const accounts = [1, 2].map((number) => { const appId = `wx-browser-account-${number}`; return { appId, id: createHash("sha256").update(appId).digest("hex").slice(0, 20), name: `贴图测试公众号${number}`, appSecret: `browser-private-secret-${number}` }; });
@@ -411,7 +412,8 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
   } finally { await server.close(); }
 });
 
-test("a fresh browser connects once and saves original XHS images without configuring a public account", async ({ page }) => {
+test("a fresh browser connects once and saves original XHS images without configuring a public account", async ({ page, browserName }) => {
+  test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; sync is supported in Chrome/Firefox and its Safari guidance is tested separately.");
   test.setTimeout(240_000);
   const connectionToken = "xhs-browser-private-connection-token", deviceId = "22222222222222222222222222222222";
   const account = { id: "0123456789abcdefabcd", name: "小红书测试账号" };
@@ -530,7 +532,8 @@ test("a fresh browser connects once and saves original XHS images without config
   } finally { await server.close(); }
 });
 
-test("an unavailable helper shows recovery inside the editor without opening a refused localhost page", async ({ page, context }) => {
+test("an unavailable helper shows recovery inside the editor without opening a refused localhost page", async ({ page, context, browserName }) => {
+  test.skip(browserName === "webkit", "WebKit rejects the transport before it can test an offline helper; Safari guidance has its own case.");
   test.setTimeout(180_000);
   const server = await startWechatTestServer(new URL(page.url()).origin, async () => { throw new Error("A stopped fixture must not receive API work"); },
     { deviceId: "a".repeat(32), connectionToken: "offline-fixture-private-connection-token-".repeat(2) });
@@ -547,6 +550,28 @@ test("an unavailable helper shows recovery inside the editor without opening a r
     expect(context.pages()).toHaveLength(pagesBefore);
     expect(new URL(page.url()).origin).toBe(server.origin);
     await captureConnectionSteps(page, dialog, "local-assistant-offline");
+    expect(server.failure()).toBeUndefined();
+  } finally { await server.close(); }
+});
+
+
+test("Safari explains which browser to use immediately without attempting local pairing or opening a window", async ({ page, context, browserName }) => {
+  test.skip(browserName !== "webkit", "This case verifies the real WebKit mixed-content boundary and Safari-specific product guidance.");
+  const server = await startWechatTestServer(new URL(page.url()).origin, async () => { throw new Error("Unsupported browsers must not start platform API work"); },
+    { deviceId: "a".repeat(32), connectionToken: "safari-fixture-private-connection-token-".repeat(2) });
+  const localRequests: string[] = [];
+  page.on("request", (request) => { if (/^http:\/\/127\.0\.0\.1:878[89]\//.test(request.url())) localRequests.push(request.url()); });
+  try {
+    await server.mount(page); await page.goto(server.origin);
+    const dialog = await prepareRealImages(page);
+    await dialog.getByRole("button", { name: "下一步：连接小红书", exact: true }).click();
+    const pagesBefore = context.pages().length;
+    await dialog.getByRole("button", { name: "连接这台电脑", exact: true }).click();
+    await expect(dialog.getByRole("alert").first()).toContainText("请使用这台 Mac 上的 Chrome", { timeout: 2_000 });
+    await expect(dialog.getByText("本机连接已保存", { exact: true })).toHaveCount(0);
+    expect(localRequests).toEqual([]);
+    expect(context.pages()).toHaveLength(pagesBefore);
+    expect(new URL(page.url()).origin).toBe(server.origin);
     expect(server.failure()).toBeUndefined();
   } finally { await server.close(); }
 });

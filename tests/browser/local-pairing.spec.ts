@@ -71,7 +71,8 @@ async function fixture(context: BrowserContext, appOrigin: string) {
   return { url, pairingOrigin, apiOrigin, requests, unexpected, restart: start, close: () => closeLocalServers(pairing, api) };
 }
 
-test("trusted HTTPS origin pairs and authenticates through real cross-origin loopback responses without a popup", async ({ context, page }) => {
+test("trusted HTTPS origin pairs and authenticates through real cross-origin loopback responses without a popup", async ({ context, page, browserName }) => {
+  test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; the boundary is asserted in its dedicated test.");
   const f = await fixture(context, PAIRING_APP_ORIGIN);
   try {
     await page.goto(f.url);
@@ -118,7 +119,8 @@ test("foreign HTTPS origin cannot read pairing credentials or an authenticated l
   } finally { await f.close(); }
 });
 
-test("a stopped helper stays an inline failure and restarting the same local service reuses its saved connection", async ({ context, page }) => {
+test("a stopped helper stays an inline failure and restarting the same local service reuses its saved connection", async ({ context, page, browserName }) => {
+  test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; the boundary is asserted in its dedicated test.");
   const f = await fixture(context, PAIRING_APP_ORIGIN);
   try {
     await page.goto(f.url);
@@ -136,6 +138,26 @@ test("a stopped helper stays an inline failure and restarting the same local ser
     await page.getByRole("button", { name: "检查已保存连接" }).click();
     await expect(page.locator("#status")).toHaveText("已连接");
     expect(f.requests.filter(({ service, method }) => service === "pairing" && method === "POST")).toHaveLength(pairRequests);
+    expect(f.unexpected).toEqual([]);
+  } finally { await f.close(); }
+});
+
+
+test("WebKit blocks real HTTPS-to-loopback pairing before any credential-bearing response reaches the page", async ({ context, page, browserName }) => {
+  test.skip(browserName !== "webkit", "This is WebKit's actual mixed-content boundary; no browser security setting is disabled.");
+  const f = await fixture(context, PAIRING_APP_ORIGIN);
+  const blockedMessages: string[] = [];
+  page.on("console", (message) => { if (message.text().includes("insecure content")) blockedMessages.push(message.text()); });
+  try {
+    await page.goto(f.url);
+    await context.unrouteAll({ behavior: "wait" });
+    await page.getByRole("button", { name: "连接测试助手" }).click();
+    await expect(page.locator("#status")).toContainText("助手尚未连接");
+    await expect(page.locator("#received")).toBeEmpty();
+    expect(blockedMessages.some((message) => message.includes(f.pairingOrigin))).toBe(true);
+    expect(f.requests).toEqual([]);
+    expect(context.pages()).toHaveLength(1);
+    expect(page.url()).toBe(f.url);
     expect(f.unexpected).toEqual([]);
   } finally { await f.close(); }
 });

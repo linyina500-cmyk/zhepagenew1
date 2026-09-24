@@ -1,5 +1,6 @@
 import { createWechatClient } from "../wechat/client";
 import type { Binding } from "../wechat/deviceVault";
+import { assertLocalSyncBrowser } from "./transport";
 
 const LOCAL_ORIGIN = "http://127.0.0.1:8789";
 const notRunning = () => new Error("暂时连不上本机助手。请先打开折页同步助手；若 Chrome 提示访问本机，请允许后重试。");
@@ -11,6 +12,9 @@ export function beginLocalSyncConnection(): { connect(signal: AbortSignal): Prom
   let started = false;
   return {
     async connect(signal) {
+      signal.throwIfAborted();
+      controller.signal.throwIfAborted();
+      assertLocalSyncBrowser();
       if (started) throw new Error("连接正在处理中，请稍候。");
       started = true;
       const abort = () => controller.abort(signal.reason);
