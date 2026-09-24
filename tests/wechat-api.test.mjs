@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createWechatApi, WechatApiError } from "../lib/wechat/api.mjs";
+import { createWechatApi, normalizeDraftCoverInfo, WechatApiError } from "../lib/wechat/api.mjs";
 
 const appId = "wx-test";
 const appSecret = "private-app-secret";
@@ -218,6 +218,50 @@ test("failed readback never causes another draft creation", async () => {
   const draftId = await api.createDraft(draft);
   await assert.rejects(api.verifyDraft({ draftId, ...draft }), (error) => assertControlledError(error, "uncertain"));
   assert.deepEqual(calls.map((call) => call.url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/draft/add", "/cgi-bin/draft/get"]);
+});
+
+test("draft readback keeps only bounded cover crop diagnostics without judging cover appearance", async () => {
+  const crops = [
+    { ratio: "3_4", x1: 0, y1: 0, x2: 1, y2: 1 },
+    { ratio: "future-ratio:3/4", x1: 0.125, y1: 0.25, x2: 0.875, y2: 0.75 },
+  ];
+  for (const verified of [true, false]) {
+    const { api, calls } = fixture([tokenResponse(), draftResponse({
+      ...(verified ? {} : { title: "后台已修改的标题" }),
+      cover_info: { thumb_url: "https://private.example/cover?secret=hidden", unknown: "hidden",
+        crop_percent_list: crops.map((crop) => ({ ...crop, x1: String(crop.x1), y1: String(crop.y1), x2: String(crop.x2), y2: String(crop.y2), thumb_url: "hidden", extra: "hidden" })) },
+    })]);
+    const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
+    assert.equal(result.verified, verified);
+    assert.deepEqual(result.coverInfo, { crop_percent_list: crops });
+    assert.doesNotMatch(JSON.stringify(result), /hidden|thumb_url|private\.example|extra/);
+    assert.deepEqual(calls.map((call) => call.url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/draft/get"]);
+  }
+});
+
+test("missing or invalid crop diagnostics do not change successful content verification", async () => {
+  const crop = { ratio: "1_1", x1: 0, y1: 0, x2: 1, y2: 1 };
+  const invalid = [undefined, null, {}, { crop_percent_list: {} },
+    { crop_percent_list: Array(9).fill(crop) },
+    ...[null, { ...crop, ratio: "" }, { ...crop, ratio: "a".repeat(33) }, { ...crop, ratio: "1_1\n" },
+      { ...crop, x1: "" }, { ...crop, x1: " 0" }, { ...crop, x1: "0 " }, { ...crop, x1: "0e0" },
+      { ...crop, x1: "0." }, { ...crop, x1: ".1" }, { ...crop, x1: "00" }, { ...crop, x1: "-0" },
+      { ...crop, x1: "0." + "0".repeat(31) }, { ...crop, x2: "1.01" }, { ...crop, x1: null }, { ...crop, x1: false },
+      { ...crop, x1: -0.01 }, { ...crop, x2: 1.01 },
+      { ...crop, y1: 1 }, { ...crop, y2: 0 }, { ...crop, x2: 0 },
+      { ...crop, x1: NaN }, { ...crop, y2: Infinity },
+    ].map((value) => ({ crop_percent_list: [crop, value] })),
+  ];
+  for (const cover_info of invalid) {
+    assert.equal(normalizeDraftCoverInfo(cover_info), undefined);
+    const { api } = fixture([tokenResponse(), draftResponse({ cover_info })]);
+    const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
+    assert.equal(result.verified, true);
+    assert.equal(Object.hasOwn(result, "coverInfo"), false);
+  }
+  assert.deepEqual(normalizeDraftCoverInfo({ crop_percent_list: [] }), { crop_percent_list: [] });
+  assert.deepEqual(normalizeDraftCoverInfo({ crop_percent_list: [{ ...crop, x1: "0.0", x2: "1.00" }] }), { crop_percent_list: [crop] });
+  assert.equal(normalizeDraftCoverInfo({ crop_percent_list: Array(8).fill(crop) }).crop_percent_list.length, 8);
 });
 
 test("invalid input is rejected before any account request", async () => {

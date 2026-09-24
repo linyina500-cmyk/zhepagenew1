@@ -132,6 +132,53 @@ test("readback failure preserves the returned draft ID and verify performs no wr
   assert.equal(f.calls.filter(([kind]) => kind === "create").length, 1);
 });
 
+test("cover readback is stored only in the local job and never upgrades content verification", async (t) => {
+  const crop = { ratio: "3_4", x1: 0, y1: 0, x2: 1, y2: 1 };
+  const coverInfo = { crop_percent_list: [crop] };
+  let verified = true;
+  const f = await fixture(t, { async verifyDraft() { return { verified, message: "内容需核对",
+    coverInfo: { thumb_url: "private-cover-url", crop_percent_list: [{ ...crop, unexpected: "private-value" }] } }; } });
+  const input = await readSubmission(form());
+  await f.jobs.submit(input); await f.jobs.idle();
+  const path = join(f.dataDir, f.jobs.account.id, input.id, "job.json");
+  const record = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(record.coverInfo, coverInfo);
+  assert.equal(record.status, "saved");
+  assert.doesNotMatch(JSON.stringify(record), /private-cover-url|private-value|thumb_url|unexpected/);
+  const restarted = createJobService(f.options);
+  for (const result of [await f.jobs.get(input.id), await restarted.get(input.id), await restarted.submit(input)]) {
+    assert.equal(Object.hasOwn(result, "coverInfo"), false);
+    assert.equal(result.status, "saved");
+  }
+  verified = false;
+  const result = await restarted.verify(input.id);
+  assert.equal(result.status, "needs_confirmation");
+  assert.equal(Object.hasOwn(result, "coverInfo"), false);
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")).coverInfo, coverInfo);
+  assert.equal(f.calls.filter(([kind]) => kind === "create").length, 1);
+  assert.equal(f.calls.filter(([kind]) => kind === "upload").length, 2);
+});
+
+test("missing, invalid or failed cover readback removes stale local diagnostics", async (t) => {
+  const valid = { crop_percent_list: [{ ratio: "3_4", x1: 0, y1: 0, x2: 1, y2: 1 }] };
+  let next = { verified: true, coverInfo: valid };
+  const f = await fixture(t, { async verifyDraft() { if (next instanceof Error) throw next; return next; } });
+  const input = await readSubmission(form());
+  await f.jobs.submit(input); await f.jobs.idle();
+  const path = join(f.dataDir, f.jobs.account.id, input.id, "job.json");
+  for (const result of [{ verified: true }, { verified: true, coverInfo: { crop_percent_list: [{ ratio: "3_4", x1: 0 }] } }, new Error("upstream unavailable")]) {
+    next = { verified: true, coverInfo: valid };
+    await f.jobs.verify(input.id);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")).coverInfo, valid);
+    next = result;
+    const publicResult = await f.jobs.verify(input.id);
+    assert.equal(publicResult.status, result instanceof Error ? "needs_confirmation" : "saved");
+    assert.equal(Object.hasOwn(publicResult, "coverInfo"), false);
+    assert.equal(Object.hasOwn(JSON.parse(await readFile(path, "utf8")), "coverInfo"), false);
+  }
+  assert.equal(f.calls.filter(([kind]) => kind === "create").length, 1);
+});
+
 test("two failed disk writes retain a known draft ID until verification can persist it", async (t) => {
   let diskFull = false, failedWrites = 0, creates = 0;
   const f = await fixture(t, {
