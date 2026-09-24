@@ -148,23 +148,30 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
   function read(account: LocalWechatAccount, verify = false) {
     const previous = receiptForAccount(account.id);
     if (busy || !previous?.jobId) return;
-    void runOperation("正在读取公众号任务状态…", async (signal) => {
-      const { client, binding: target } = await clientForDevice(signal);
-      await connectAccount(client, target, account, signal);
-      const existing = await client.getPublication(previous.jobId!, account.id, signal);
-      signal.throwIfAborted();
-      if (existing) {
-        const publication = existing.publishId && ["submitting", "publishing", "needs_confirmation"].includes(existing.status) ? await client.refreshPublication(previous.jobId!, account.id, signal) : existing;
+    void runOperation(verify ? "正在核对公众号草稿…" : "正在读取公众号任务状态…", async (signal) => {
+      result(account.id, { text: verify ? "正在核对草稿…" : "正在读取状态…", error: false });
+      try {
+        const { client, binding: target } = await clientForDevice(signal);
+        await connectAccount(client, target, account, signal);
+        const existing = await client.getPublication(previous.jobId!, account.id, signal);
         signal.throwIfAborted();
-        await persistReceipt(draft, { ...previous, publicationAttempted: true, message: publicationText(publication) }, signal);
-        signal.throwIfAborted(); result(account.id, { publication, text: publicationText(publication), error: !["published", "submitting", "publishing"].includes(publication.status) });
-        return;
+        if (existing) {
+          const publication = existing.publishId && ["submitting", "publishing", "needs_confirmation"].includes(existing.status) ? await client.refreshPublication(previous.jobId!, account.id, signal) : existing;
+          signal.throwIfAborted();
+          await persistReceipt(draft, { ...previous, publicationAttempted: true, message: publicationText(publication) }, signal);
+          signal.throwIfAborted(); result(account.id, { publication, text: `${verify ? "已重新核对" : "已刷新状态"}：${publicationText(publication)}`, error: !["published", "submitting", "publishing"].includes(publication.status) });
+          return;
+        }
+        if (previous.publicationAttempted) throw new Error("这份内容曾提交发表，但结果还未读到。请核对原任务和公众号后台，不要再次发表。");
+        const job = verify ? await client.verifyJob(previous.jobId!, account.id, signal) : await client.getJob(previous.jobId!, account.id, signal);
+        signal.throwIfAborted();
+        await persistReceipt(draft, receiptFor(job, previous), signal);
+        signal.throwIfAborted(); result(account.id, { job, publication: null, text: `${verify ? "已重新核对" : "已刷新状态"}：${job.message}`, error: job.status === "failed" || job.status === "needs_confirmation" });
+      } catch (error) {
+        if (signal.aborted) return;
+        result(account.id, { text: message(error), error: true });
+        throw error;
       }
-      if (previous.publicationAttempted) throw new Error("这份内容曾提交发表，但结果还未读到。请核对原任务和公众号后台，不要再次发表。");
-      const job = verify ? await client.verifyJob(previous.jobId!, account.id, signal) : await client.getJob(previous.jobId!, account.id, signal);
-      signal.throwIfAborted();
-      await persistReceipt(draft, receiptFor(job, previous), signal);
-      signal.throwIfAborted(); result(account.id, { job, publication: null, text: job.message, error: job.status === "failed" || job.status === "needs_confirmation" });
     });
   }
   function confirmVisual(account: LocalWechatAccount) {

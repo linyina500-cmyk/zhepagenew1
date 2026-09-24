@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createWechatApi, normalizeDraftCoverInfo, WechatApiError } from "../lib/wechat/api.mjs";
+import { createWechatApi, normalizeDraftCoverInfo, normalizeDraftCoverSource, normalizeDraftVerificationMismatches, WechatApiError } from "../lib/wechat/api.mjs";
 
 const appId = "wx-test";
 const appSecret = "private-app-secret";
@@ -208,7 +208,7 @@ test("draft readback requires the exact newspic title, plain text and image orde
     const { api, calls } = fixture([tokenResponse(), response]);
     const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
     assert.equal(result.verified, false);
-    assert.match(result.message, /尚未通过/);
+    assert.match(result.message, /公众号后台核对.*无需重复同步/u);
     assert.deepEqual(calls.map((call) => call.url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/draft/get"]);
   }
 });
@@ -218,6 +218,68 @@ test("failed readback never causes another draft creation", async () => {
   const draftId = await api.createDraft(draft);
   await assert.rejects(api.verifyDraft({ draftId, ...draft }), (error) => assertControlledError(error, "uncertain"));
   assert.deepEqual(calls.map((call) => call.url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/draft/add", "/cgi-bin/draft/get"]);
+});
+
+test("cover saves may trim outer title spaces without accepting changed text or body", async () => {
+  const { api, calls } = fixture([tokenResponse(), jsonResponse({ media_id: "draft-1" }), draftResponse()]);
+  await api.createDraft({ ...draft, title: ` ${draft.title} ` });
+  assert.equal(JSON.parse(calls[1].options.body).articles[0].title, draft.title);
+  const result = await api.verifyDraft({ ...draft, title: ` ${draft.title} `, draftId: "draft-1" });
+  assert.equal(result.verified, true);
+  for (const patch of [{ title: "海报 草稿" }, { title: "海报草稿！" }, { content: ` ${draft.body} ` }]) {
+    const changed = fixture([tokenResponse(), draftResponse(patch)]);
+    assert.equal((await changed.api.verifyDraft({ ...draft, draftId: "draft-1" })).verified, false);
+  }
+});
+
+test("verification diagnostics identify exact mismatched fields without retaining article values", async () => {
+  for (const [patch, expected] of [
+    [{}, []],
+    [{ article_type: "news" }, ["type"]],
+    [{ title: "private-changed-title" }, ["title"]],
+    [{ content: "private-changed-body" }, ["content"]],
+    [{ image_info: { image_list: [{ image_media_id: "picture-1" }] } }, ["imageCount"]],
+    [{ image_info: null }, ["imageCount"]],
+    [{ image_info: { image_list: [{ image_media_id: "picture-2" }, { image_media_id: "picture-1" }] } }, ["imageOrder"]],
+    [{ image_info: { image_list: [{ image_media_id: "picture-1" }, null] } }, ["imageOrder"]],
+    [{ article_type: "news", title: "private-changed-title", content: "private-changed-body", image_info: null }, ["type", "title", "content", "imageCount"]],
+  ]) {
+    const { api } = fixture([tokenResponse(), draftResponse(patch)]);
+    const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
+    assert.deepEqual(result.verificationMismatches, expected);
+    assert.equal(result.verified, expected.length === 0);
+    assert.doesNotMatch(JSON.stringify(result), /private-changed-title|private-changed-body/);
+  }
+  assert.deepEqual(normalizeDraftVerificationMismatches(["imageOrder", "title"]), ["title", "imageOrder"]);
+  assert.deepEqual(normalizeDraftVerificationMismatches([]), []);
+  for (const invalid of [undefined, null, {}, ["content", "content"], ["private-body"], [123], Array(6).fill("title")]) {
+    assert.equal(normalizeDraftVerificationMismatches(invalid), undefined);
+  }
+});
+
+test("readback messages name content differences without implying that upload must be repeated", async () => {
+  for (const [patch, label] of [
+    [{ title: "后台新标题" }, "标题"],
+    [{ content: "后台新配文" }, "配文"],
+    [{ image_info: { image_list: [] } }, "图片数量"],
+    [{ image_info: { image_list: [{ image_media_id: "picture-2" }, { image_media_id: "picture-1" }] } }, "图片或顺序"],
+    [{ title: "后台新标题", content: "后台新配文" }, "标题、配文"],
+  ]) {
+    const { api } = fixture([tokenResponse(), draftResponse(patch)]);
+    const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
+    assert.equal(result.verified, false);
+    assert.equal(result.message, `草稿已存在，但${label}与本次同步记录不一致。请在公众号后台核对，无需重复同步。`);
+  }
+  for (const [response, message] of [
+    [jsonResponse({ news_item: [] }), "暂未读到完整的草稿详情。请在公众号后台核对，无需重复同步。"],
+    [draftResponse({ article_type: "news" }), "读取的草稿类型与本次贴图不一致。请在公众号后台核对，无需重复同步。"],
+  ]) {
+    const { api } = fixture([tokenResponse(), response]);
+    const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
+    assert.equal(result.verified, false);
+    assert.equal(result.message, message);
+    assert.doesNotMatch(result.message, /草稿已存在|已核对|上传失败/u);
+  }
 });
 
 test("draft readback keeps only bounded cover crop diagnostics without judging cover appearance", async () => {
@@ -234,7 +296,8 @@ test("draft readback keeps only bounded cover crop diagnostics without judging c
     const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
     assert.equal(result.verified, verified);
     assert.deepEqual(result.coverInfo, { crop_percent_list: crops });
-    assert.doesNotMatch(JSON.stringify(result), /hidden|thumb_url|private\.example|extra/);
+    assert.doesNotMatch(JSON.stringify(result.coverInfo), /hidden|thumb_url|private\.example|extra/);
+    assert.doesNotMatch(JSON.stringify(result), /hidden|private\.example/);
     assert.deepEqual(calls.map((call) => call.url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/draft/get"]);
   }
 });
@@ -262,6 +325,50 @@ test("missing or invalid crop diagnostics do not change successful content verif
   assert.deepEqual(normalizeDraftCoverInfo({ crop_percent_list: [] }), { crop_percent_list: [] });
   assert.deepEqual(normalizeDraftCoverInfo({ crop_percent_list: [{ ...crop, x1: "0.0", x2: "1.00" }] }), { crop_percent_list: [crop] });
   assert.equal(normalizeDraftCoverInfo({ crop_percent_list: Array(8).fill(crop) }).crop_percent_list.length, 8);
+});
+
+test("cover source readback compares only valid media IDs and retains field names without other values", async () => {
+  for (const thumb_media_id of ["picture-1", "another-cover"]) {
+    const { api, calls } = fixture([tokenResponse(), draftResponse({
+      thumb_media_id, thumb_url: "https://private.example/cover?secret=hidden",
+      cover_info: { crop_percent_list: [], unknown_crop_setting: "hidden-value" },
+    })]);
+    const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
+    assert.equal(result.verified, true);
+    assert.deepEqual(result.coverSource, {
+      thumbMediaId: thumb_media_id, firstImageMediaId: "picture-1", isFirstImage: thumb_media_id === "picture-1",
+      articleFieldNames: ["article_type", "title", "content", "image_info", "thumb_media_id", "thumb_url", "cover_info"],
+      coverFieldNames: ["crop_percent_list", "unknown_crop_setting"],
+    });
+    assert.doesNotMatch(JSON.stringify(result), /private\.example|secret=|hidden-value/);
+    assert.deepEqual(calls.map((call) => call.url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/draft/get"]);
+  }
+});
+
+test("cover source bounds field names and rejects invalid IDs without inventing a comparison", async () => {
+  const names = { articleFieldNames: ["thumb_media_id"], coverFieldNames: [] };
+  for (const invalid of [undefined, null, false, 123, "", "has space", "line\nbreak", "null\0byte", "x".repeat(513),
+    "https://private.example/image", "//private.example/image", "data:image/png;base64,private"]) {
+    const source = normalizeDraftCoverSource({ ...names, thumbMediaId: invalid, firstImageMediaId: "picture-1", isFirstImage: true });
+    assert.deepEqual(source, { ...names, firstImageMediaId: "picture-1" });
+    assert.deepEqual(normalizeDraftCoverSource({ ...names, thumbMediaId: "picture-1", firstImageMediaId: invalid, isFirstImage: true }),
+      { ...names, thumbMediaId: "picture-1" });
+  }
+  assert.equal(normalizeDraftCoverSource({ ...names, thumbMediaId: "x".repeat(512) }).thumbMediaId.length, 512);
+  for (const invalid of [undefined, null, [], {}, { ...names, articleFieldNames: Array(65).fill("key") },
+    { ...names, coverFieldNames: ["key".repeat(22)] }, { ...names, coverFieldNames: ["bad-key"] },
+    { ...names, coverFieldNames: ["https://private.example"] }, { ...names, coverFieldNames: [123] }]) {
+    assert.equal(normalizeDraftCoverSource(invalid), undefined);
+  }
+  const many = Object.fromEntries(Array.from({ length: 70 }, (_, index) => [`key_${index}`, "hidden"]));
+  const { api } = fixture([tokenResponse(), draftResponse({ ...many, "invalid-key": "hidden", ["x".repeat(65)]: "hidden", cover_info: many })]);
+  const result = await api.verifyDraft({ draftId: "draft-1", ...draft });
+  assert.equal(result.coverSource.articleFieldNames.length, 64);
+  assert.equal(result.coverSource.coverFieldNames.length, 64);
+  assert.equal(Object.hasOwn(result.coverSource, "isFirstImage"), false);
+  assert.doesNotMatch(JSON.stringify(result), /hidden|invalid-key/);
+  const missing = fixture([tokenResponse(), jsonResponse({ news_item: [] })]);
+  assert.equal(Object.hasOwn(await missing.api.verifyDraft({ draftId: "draft-1", ...draft }), "coverSource"), false);
 });
 
 test("invalid input is rejected before any account request", async () => {

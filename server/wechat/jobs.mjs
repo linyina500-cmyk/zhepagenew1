@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { normalizeDraftCoverInfo } from "../../lib/wechat/api.mjs";
+import { normalizeDraftCoverInfo, normalizeDraftCoverSource, normalizeDraftVerificationMismatches } from "../../lib/wechat/api.mjs";
 
 export const JOB_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 export const MAX_REQUEST_BYTES = 60 * 1024 * 1024 + 64 * 1024;
@@ -112,10 +112,16 @@ export function createJobService({ dataDir, appId, accountName, api }) {
   async function verify(record) {
     if (!record.draftId) return record;
     delete record.coverInfo;
+    delete record.coverSource;
+    delete record.verificationMismatches;
     try {
       const result = await api.verifyDraft({ draftId: record.draftId, title: record.title, body: record.body, imageMediaIds: record.imageMediaIds });
       const coverInfo = normalizeDraftCoverInfo(result.coverInfo);
       if (coverInfo) record.coverInfo = coverInfo;
+      const coverSource = normalizeDraftCoverSource(result.coverSource);
+      if (coverSource) record.coverSource = coverSource;
+      const verificationMismatches = normalizeDraftVerificationMismatches(result.verificationMismatches);
+      if (verificationMismatches) record.verificationMismatches = verificationMismatches;
       record.status = result.verified ? "saved" : "needs_confirmation";
       record.message = result.verified ? "公众号接口已确认草稿的标题、配文和全部图片顺序。请打开草稿箱检查实际图片显示。" : result.message;
     } catch {

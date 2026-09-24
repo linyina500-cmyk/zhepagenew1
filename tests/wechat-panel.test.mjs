@@ -18,10 +18,10 @@ async function fixture(context, options = {}) {
   const nativeRequire = createRequire(filename), React = nativeRequire("react"), { createRoot } = nativeRequire("react-dom/client"), { act } = React;
   const binding = { deviceId: "local-test-device", connectionToken: "test-token" };
   let saved = { schemaVersion: 1, id: "local-draft", updatedAt: new Date().toISOString(), sourceFormat: "wechat", images: [1, 2].map((id) => ({ id: String(id), name: `${id}.png`, blob: new Blob([`original-${id}`], { type: "image/png" }), width: 1080, height: 1440 })), content: { wechat: { title: "测试标题", body: "测试配文" }, xiaohongshu: { title: "", body: "" } }, selectedAccountIds: [], receipts: [] };
-  let busy = false, active, renderDraft, renderReady, mounted = true, persistFailure = false, createOverride, publicationOverride, failAccount;
-  const creates = [], publications = [], connects = [], jobs = new Map(), published = new Map();
+  let busy = false, active, renderDraft, renderReady, mounted = true, persistFailure = false, createOverride, publicationOverride, connectionOverride, verifyOverride, failAccount;
+  const creates = [], publications = [], connects = [], verifies = [], jobs = new Map(), published = new Map();
   const client = {
-    getConnection: async () => ({ deviceId: binding.deviceId }),
+    getConnection: async () => connectionOverride ? connectionOverride() : ({ deviceId: binding.deviceId }),
     connectAccount: async (input) => { connects.push(input); const account = accounts.find((item) => item.appId === input.appId); if (account.id === failAccount) throw new Error("此账号连接失败"); return account; },
     getJob: async (id) => { const job = jobs.get(id); if (!job) throw new Error("任务不存在，请核对后台"); return job; },
     async createJob(input, signal) {
@@ -35,7 +35,7 @@ async function fixture(context, options = {}) {
       jobs.set(job.id, job); return job;
     },
     waitForJob: async (job) => job,
-    verifyJob: async (id) => jobs.get(id),
+    verifyJob: async (id) => { verifies.push(id); return verifyOverride ? verifyOverride(id) : jobs.get(id); },
     getPublication: async (id) => published.get(id) || null,
     refreshPublication: async (id) => published.get(id),
     submitPublication: async (id, accountId) => {
@@ -77,8 +77,9 @@ async function fixture(context, options = {}) {
     await act(async () => { inputs[index === null ? 0 : index + 1].click(); });
   }
   context.after(async () => { active?.abort(); mounted = false; await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = false; });
-  return { container, creates, publications, connects, jobs, published, click, select, settle, act, get saved() { return saved; },
+  return { container, creates, publications, connects, verifies, jobs, published, click, select, settle, act, get saved() { return saved; },
     set persistFailure(value) { persistFailure = value; }, set createOverride(value) { createOverride = value; }, set publicationOverride(value) { publicationOverride = value; }, set failAccount(value) { failAccount = value; },
+    set connectionOverride(value) { connectionOverride = value; }, set verifyOverride(value) { verifyOverride = value; },
     close: async () => { active?.abort(); mounted = false; await act(async () => root.render(null)); },
     changeContent: async () => { saved = { ...saved, content: { ...saved.content, wechat: { title: "新标题", body: "新内容" } } }; await act(async () => renderDraft(saved)); },
     changeImages: async () => { saved = { ...saved, images: [...saved.images, { ...saved.images[0], id: "risk-wechat", name: "新风险提示.png" }] }; await act(async () => renderDraft(saved)); },
@@ -132,6 +133,34 @@ test("changed copy cannot publish an older saved draft", async (context) => {
   const oldId = f.creates[0].id; await f.changeContent(); await f.click("立即发布"); await f.click("确认立即发布");
   assert.equal(f.creates.length, 2); assert.notEqual(f.publications[0].id, oldId);
   assert.equal(f.creates[1].content.title, "新标题");
+});
+
+test("rechecking reconnects the browser account and visibly completes even when the draft is unchanged", async (context) => {
+  const f = await fixture(context); await f.select(0); await f.click("同步到草稿箱");
+  const id = f.creates[0].id, row = f.container.querySelector('[aria-label="测试公众号1 的结果"]');
+  f.connects.length = 0; // The restarted helper has no remembered accounts.
+  const gate = Promise.withResolvers(); f.verifyOverride = () => gate.promise;
+  await f.click("重新核对草稿");
+  assert.match(row.textContent, /正在核对草稿…/);
+  assert.equal(f.connects.length, 1); assert.equal(f.connects[0].appId, accounts[0].appId);
+  assert.deepEqual(f.verifies, [id]);
+  assert.equal([...row.querySelectorAll("button")].every((button) => button.disabled), true);
+  await f.act(async () => { gate.resolve(f.jobs.get(id)); }); await f.settle();
+  assert.match(row.textContent, /已重新核对：草稿已保存/);
+  assert.equal(f.saved.receipts[0].jobId, id); assert.equal(f.creates.length, 1); assert.equal(f.publications.length, 0);
+});
+
+test("a fast recheck failure appears beside the account and retry reads the same saved task", async (context) => {
+  const f = await fixture(context); await f.select(0); await f.click("同步到草稿箱");
+  const id = f.creates[0].id, row = f.container.querySelector('[aria-label="测试公众号1 的结果"]');
+  f.connectionOverride = () => { throw new Error("暂时连不上本机助手，请打开折页同步助手。"); };
+  await f.click("重新核对草稿");
+  assert.match(row.querySelector('.draft-sync-message.error').textContent, /请打开折页同步助手/);
+  assert.equal(f.verifies.length, 0); assert.equal(f.saved.receipts[0].jobId, id);
+  f.connectionOverride = undefined; await f.click("重新核对草稿");
+  assert.match(row.textContent, /已重新核对：草稿已保存/);
+  assert.equal(row.querySelector('.draft-sync-message.error'), null);
+  assert.deepEqual(f.verifies, [id]); assert.equal(f.creates.length, 1); assert.equal(f.publications.length, 0);
 });
 
 test("editing WeChat copy dismisses an open publication approval and requires a fresh one", async (context) => {
