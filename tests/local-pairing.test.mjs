@@ -1,19 +1,15 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
-import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { createPairingServer, listenLocalServers, closeLocalServers, PAIRING_APP_ORIGIN } from "../server/wechat/pairing.mjs";
-
+import { createWechatServer } from "../server/wechat/http.mjs";
 const connectionToken = "fixture-only-connection-token-".repeat(2);
-const deviceId = "a".repeat(32);
-const nonce = "b".repeat(64);
+const deviceId = "a".repeat(32), nonce = "b".repeat(64);
 async function listen(server) { await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve)); return server.address().port; }
-async function fixture(t) {
-  const server = createPairingServer({ deviceId, syncToken: connectionToken });
+async function fixture(t, server = createPairingServer({ deviceId, syncToken: connectionToken })) {
   t.after(() => closeLocalServers(server));
-  const port = await listen(server), host = `127.0.0.1:${port}`, origin = `http://${host}`;
-  return { server, port, host, origin, call(path, headers = {}, method = "GET", body) {
+  const port = await listen(server), host = `127.0.0.1:${port}`;
+  return { server, port, host, call(path, headers = {}, method = "GET", body) {
     return new Promise((resolve, reject) => {
       const request = httpRequest({ hostname: "127.0.0.1", port, path, method, headers: { Host: host, ...headers } }, (response) => {
         const chunks = []; response.on("data", (chunk) => chunks.push(chunk));
@@ -23,77 +19,64 @@ async function fixture(t) {
     });
   } };
 }
-function pageRuntime(html, fetcher = async () => ({ ok: true, json: async () => ({ deviceId, connectionToken }) })) {
-  const source = html.match(/<script>([\s\S]+)<\/script>/u)[1];
-  const messages = [], status = { textContent: "" }, requests = [];
-  const opener = { postMessage(data, origin) { messages.push({ data, origin }); } };
-  let listener;
-  const window = { opener, addEventListener(type, fn) { assert.equal(type, "message"); listener = fn; } };
-  runInNewContext(source, { window, document: { getElementById: () => status }, fetch: async (...args) => { requests.push(args); return fetcher(...args); } });
-  return { source, messages, status, requests, opener, dispatch: (event) => listener(event) };
-}
-
-test("pairing page has strict no-cache/frame/script headers and contains no credentials", async (t) => {
-  const f = await fixture(t), page = await f.call("/connect");
-  assert.equal(page.status, 200); assert.equal(page.headers["cache-control"], "no-store");
-  assert.equal(page.headers["x-frame-options"], "DENY"); assert.equal(page.headers["referrer-policy"], "no-referrer");
-  assert.equal(page.body.includes(connectionToken), false); assert.equal(page.body.includes(deviceId), false);
-  const runtime = pageRuntime(page.body);
-  assert.ok(page.headers["content-security-policy"].includes(`script-src 'sha256-${createHash("sha256").update(runtime.source).digest("base64")}'`));
-  assert.ok(page.headers["content-security-policy"].includes("frame-ancestors 'none'"));
-  assert.equal(page.headers["access-control-allow-origin"], undefined);
-  assert.equal(JSON.stringify(runtime.messages), JSON.stringify([{ data: { type: "zhepage-local-ready" }, origin: "*" }]));
-  assert.equal(runtime.requests.length, 0);
+const pairHeaders = { Origin: PAIRING_APP_ORIGIN, "Content-Type": "application/json" };
+test("trusted app pairs through an exact-origin JSON POST without credentials in URLs or HTML", async (t) => {
+  const f = await fixture(t), health = await f.call("/health");
+  assert.equal(health.status, 200);
+  assert.deepEqual(JSON.parse(health.body), { service: "zhepage-local-pairing", ready: true });
+  assert.equal(health.body.includes(connectionToken), false);
+  const result = await f.call("/pair", pairHeaders, "POST", JSON.stringify({ nonce }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(JSON.parse(result.body), { nonce, deviceId, connectionToken });
+  assert.equal(result.headers["cache-control"], "no-store");
+  assert.equal(result.headers["access-control-allow-origin"], PAIRING_APP_ORIGIN);
+  assert.equal(result.headers["access-control-allow-credentials"], undefined);
+  assert.equal((await f.call("/connect")).status, 404);
 });
-
-test("only same-origin POST on the actual numeric loopback port returns credentials", async (t) => {
+test("pairing rejects missing, opaque and foreign origins plus DNS rebinding Hosts", async (t) => {
   const f = await fixture(t);
-  const result = await f.call("/pair", { Origin: f.origin, "Sec-Fetch-Site": "same-origin" }, "POST");
-  assert.equal(result.status, 200); assert.deepEqual(JSON.parse(result.body), { deviceId, connectionToken });
-  assert.equal(result.headers["cache-control"], "no-store"); assert.equal(result.headers["access-control-allow-origin"], undefined);
-  for (const origin of [undefined, "null", PAIRING_APP_ORIGIN, "https://malicious.example", `http://localhost:${f.port}`, `${f.origin}/`, "http://127.0.0.1:1"]) {
-    const bad = await f.call("/pair", origin ? { Origin: origin } : {}, "POST");
-    assert.equal(bad.status, 403); assert.equal(bad.body.includes(connectionToken), false);
-  }
-  assert.equal((await f.call("/pair", { Origin: f.origin, "Sec-Fetch-Site": "cross-site" }, "POST")).status, 403);
-});
-
-test("host aliases, malformed routes, bodies and CORS preflights never expose credentials", async (t) => {
-  const f = await fixture(t);
-  for (const host of [`localhost:${f.port}`, "127.0.0.1", "127.0.0.1:1", `malicious.example:${f.port}`, `[::1]:${f.port}`]) {
-    assert.equal((await f.call("/connect", { Host: host })).status, 403);
-    assert.equal((await f.call("/pair", { Host: host, Origin: f.origin }, "POST")).status, 403);
-  }
-  for (const [path, method] of [["/pair", "GET"], ["/pair", "OPTIONS"], ["/pair?token=ignored", "POST"], ["/connect?returnTo=https://malicious.example", "GET"], ["//pair", "POST"], ["/pair/", "POST"]]) {
-    const result = await f.call(path, { Origin: f.origin }, method);
-    assert.equal(result.status, 404); assert.equal(result.body.includes(connectionToken), false);
+  for (const origin of [undefined, "null", "https://malicious.example", `${PAIRING_APP_ORIGIN}.evil.test`, `${PAIRING_APP_ORIGIN}/`, `http://${f.host}`]) {
+    const result = await f.call("/pair", { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) }, "POST", JSON.stringify({ nonce }));
+    assert.equal(result.status, 403); assert.equal(result.body.includes(connectionToken), false);
     assert.equal(result.headers["access-control-allow-origin"], undefined);
   }
-  assert.equal((await f.call("/pair", { Origin: f.origin, "Content-Length": "2" }, "POST", "{}")).status, 400);
+  for (const host of [`localhost:${f.port}`, "127.0.0.1", "127.0.0.1:1", `malicious.example:${f.port}`, `[::1]:${f.port}`]) {
+    const result = await f.call("/pair", { ...pairHeaders, Host: host }, "POST", JSON.stringify({ nonce }));
+    assert.equal(result.status, 403); assert.equal(result.body.includes(connectionToken), false);
+  }
 });
-
-test("page ignores foreign senders, origins and nonces, then replies only once to the verified opener", async (t) => {
-  const f = await fixture(t), { body } = await f.call("/connect"), runtime = pageRuntime(body);
-  const event = { source: runtime.opener, origin: PAIRING_APP_ORIGIN, data: { type: "zhepage-local-connect", nonce } };
-  for (const invalid of [{ ...event, source: {} }, { ...event, origin: "https://malicious.example" }, { ...event, origin: `${PAIRING_APP_ORIGIN}.malicious.example` },
-    { ...event, data: { type: "zhepage-local-ready", nonce } }, { ...event, data: null }, { ...event, data: { type: "zhepage-local-connect", nonce: "short" } },
-    { ...event, data: { type: "zhepage-local-connect", nonce: "g".repeat(64) } }]) await runtime.dispatch(invalid);
-  assert.equal(runtime.requests.length, 0);
-  await runtime.dispatch(event); await runtime.dispatch(event);
-  assert.equal(runtime.requests.length, 1); assert.equal(runtime.requests[0][0], "/pair");
-  assert.equal(runtime.requests[0][1].method, "POST"); assert.equal(runtime.messages.length, 2);
-  assert.equal(JSON.stringify(runtime.messages[1]), JSON.stringify({ data: { type: "zhepage-local-connected", nonce, deviceId, connectionToken }, origin: PAIRING_APP_ORIGIN }));
+test("pairing preflight permits only JSON POST from the trusted app and never returns credentials", async (t) => {
+  const f = await fixture(t);
+  const headers = { Origin: PAIRING_APP_ORIGIN, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" };
+  const good = await f.call("/pair", headers, "OPTIONS");
+  assert.equal(good.status, 204); assert.equal(good.body, "");
+  assert.equal(good.headers["access-control-allow-origin"], PAIRING_APP_ORIGIN);
+  for (const overrides of [{ Origin: "null" }, { "Access-Control-Request-Method": "GET" }, { "Access-Control-Request-Headers": "x-arbitrary" }]) {
+    assert.equal((await f.call("/pair", { ...headers, ...overrides }, "OPTIONS")).status, 403);
+  }
 });
-
-test("concurrent messages and failed pairing cannot retry or leak a partial response", async (t) => {
-  const f = await fixture(t), { body } = await f.call("/connect");
-  let finish;
-  const runtime = pageRuntime(body, () => new Promise((resolve) => { finish = resolve; }));
-  const event = { source: runtime.opener, origin: PAIRING_APP_ORIGIN, data: { type: "zhepage-local-connect", nonce } };
-  const first = runtime.dispatch(event); await runtime.dispatch(event);
-  assert.equal(runtime.requests.length, 1); finish({ ok: false }); await first; await runtime.dispatch(event);
-  assert.equal(runtime.messages.length, 1); assert.equal(runtime.requests.length, 1);
-  assert.match(runtime.status.textContent, /未完成/u);
+test("malformed challenges, simple form posts and extra routes never pair", async (t) => {
+  const f = await fixture(t);
+  for (const body of ["{invalid", "null", "[]", "{}", JSON.stringify({ nonce: "short" }), JSON.stringify({ nonce, extra: true }), JSON.stringify({ nonce: "x".repeat(300) })]) {
+    const result = await f.call("/pair", pairHeaders, "POST", body);
+    assert.ok([400, 413].includes(result.status)); assert.equal(result.body.includes(connectionToken), false);
+  }
+  assert.equal((await f.call("/pair", { ...pairHeaders, "Content-Type": "text/plain" }, "POST", JSON.stringify({ nonce }))).status, 400);
+  for (const path of ["/pair?token=ignored", "//pair", "/pair/"]) assert.equal((await f.call(path, pairHeaders, "POST", JSON.stringify({ nonce }))).status, 404);
+});
+test("sync API enforces Host, origin, preflight and Bearer before dispatching platform work", async (t) => {
+  const accounts = { deviceId, busy: () => false };
+  const f = await fixture(t, createWechatServer({ accounts, syncToken: connectionToken }));
+  const path = "/api/wechat/connection";
+  const headers = { Origin: PAIRING_APP_ORIGIN, Authorization: `Bearer ${connectionToken}` };
+  const ok = await f.call(path, headers);
+  assert.equal(ok.status, 200); assert.equal(ok.headers["access-control-allow-origin"], PAIRING_APP_ORIGIN);
+  assert.equal((await f.call(path, { Authorization: headers.Authorization })).status, 200, "local CLI diagnostics require authentication");
+  assert.equal((await f.call(path, { Origin: PAIRING_APP_ORIGIN })).status, 401);
+  for (const overrides of [{ Origin: "https://malicious.example" }, { Origin: "null" }, { Host: `malicious.example:${f.port}` }]) assert.equal((await f.call(path, { ...headers, ...overrides })).status, 403);
+  const preflight = await f.call(path, { Origin: PAIRING_APP_ORIGIN, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization, content-type" }, "OPTIONS");
+  assert.equal(preflight.status, 204);
+  assert.equal((await f.call(path, { Origin: PAIRING_APP_ORIGIN, "Access-Control-Request-Method": "DELETE" }, "OPTIONS")).status, 403);
 });
 
 test("both loopback listeners become available together and close cleanly", async (t) => {

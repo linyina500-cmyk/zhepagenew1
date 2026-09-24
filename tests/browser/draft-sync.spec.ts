@@ -29,22 +29,11 @@ async function choosePlatform(dialog: Locator, platform: "xiaohongshu" | "wechat
   await dialog.locator(".draft-sync-platforms").getByRole("button", { name: platform === "wechat" ? /^公众号贴图/ : /^小红书/ }).click();
 }
 
-async function connectLocalDevice(page: Page, dialog: Locator, connectionToken: string, deviceId: string) {
-  const parentOrigin = new URL(page.url()).origin;
-  // A fresh, isolated popup follows the production pairing protocol. No real
-  // local helper or platform window is opened by this test.
-  await page.context().route("http://127.0.0.1:8789/connect", (route) => route.fulfill({
-    status: 200, contentType: "text/html", body: `<!doctype html><title>测试本机连接</title><p>正在连接</p><script>
-      const parentOrigin = ${JSON.stringify(parentOrigin)};
-      addEventListener("message", (event) => {
-        if (event.source !== opener || event.origin !== parentOrigin || event.data?.type !== "zhepage-local-connect" || !/^[a-f0-9]{64}$/.test(event.data.nonce)) return;
-        opener.postMessage({ type: "zhepage-local-connected", nonce: event.data.nonce, deviceId: ${JSON.stringify(deviceId)}, connectionToken: ${JSON.stringify(connectionToken)} }, parentOrigin);
-      });
-      opener.postMessage({ type: "zhepage-local-ready" }, "*");
-    </script>`,
-  }));
+async function connectLocalDevice(page: Page, dialog: Locator) {
+  const pagesBefore = page.context().pages().length;
   await dialog.getByRole("button", { name: "连接这台电脑", exact: true }).click();
   await expect(dialog.locator(".draft-sync-connection")).toContainText("本机连接已保存");
+  expect(page.context().pages()).toHaveLength(pagesBefore);
   await expect(dialog.getByLabel("本机连接口令", { exact: true })).toHaveCount(0);
   await expect(dialog.locator('.draft-sync-connection input[type="file"]')).toHaveCount(0);
 }
@@ -265,8 +254,9 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     expect(stored?.content.wechat.body).toBe("多张海报完整同步。\n\n这一行也保留。\n");
     const job = { id: upload.id, accountId, accountName: account.name, title: upload.title, imageCount: images.length, uploadedCount: images.length, status: "saved", message: "模拟官方草稿读回核对通过", draftId: `mock-draft-${accountId}`, createdAt: "2026-09-22T00:00:00Z", updatedAt: "2026-09-22T00:00:00Z" };
     jobs.set(upload.id, job); reply(202, { job });
-  });
+  }, { connectionToken: "browser-test-password-0123456789abcdef", deviceId: "11111111111111111111111111111111" });
   try {
+    await server.mount(page);
     await page.goto(server.origin);
     let dialog = await prepareRealImages(page);
     await choosePlatform(dialog, "wechat");
@@ -287,7 +277,7 @@ test("WeChat local accounts batch real PNG drafts and require explicit publicati
     }
     await page.setViewportSize({ width: 1110, height: 770 });
     expect(requests).toEqual([]);
-    await connectLocalDevice(page, dialog, "browser-test-password-0123456789abcdef", "11111111111111111111111111111111");
+    await connectLocalDevice(page, dialog);
     expect(requests).toEqual(["GET /api/wechat/connection"]);
     for (const account of accounts) {
       const settings = dialog.locator(".draft-sync-wechat-settings");
@@ -461,8 +451,9 @@ test("a fresh browser connects once and saves original XHS images without config
     const read = /^\/api\/xiaohongshu\/jobs\/([a-f0-9-]+)$/.exec(path);
     if (read && request.method === "GET") { expect(jobs.has(read[1])).toBe(true); reply(200, { job: jobs.get(read[1]) }); return; }
     throw new Error(`Unexpected platform request: ${request.method} ${path}`);
-  });
+  }, { connectionToken, deviceId });
   try {
+    await server.mount(page);
     await page.goto(server.origin);
     let dialog = await prepareRealImages(page);
     await dialog.getByLabel("小红书标题", { exact: true }).fill("小红书独立贴图");
@@ -490,7 +481,7 @@ test("a fresh browser connects once and saves original XHS images without config
     await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
     expect(requests).toEqual([]);
     await captureConnectionSteps(page, dialog, "xiaohongshu-first-connection");
-    await connectLocalDevice(page, dialog, connectionToken, deviceId);
+    await connectLocalDevice(page, dialog);
     expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual(["GET /api/wechat/connection"]);
     await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "我已登录", exact: true })).toBeEnabled();
@@ -535,6 +526,27 @@ test("a fresh browser connects once and saves original XHS images without config
     await dialog.getByRole("button", { name: "读取小红书同步状态", exact: true }).click();
     await expect(dialog.getByRole("region", { name: "小红书同步结果", exact: true })).toContainText("模拟小红书草稿回读通过");
     expect(createCount).toBe(1);
+    expect(server.failure()).toBeUndefined();
+  } finally { await server.close(); }
+});
+
+test("an unavailable helper shows recovery inside the editor without opening a refused localhost page", async ({ page, context }) => {
+  test.setTimeout(180_000);
+  const server = await startWechatTestServer(new URL(page.url()).origin, async () => { throw new Error("A stopped fixture must not receive API work"); },
+    { deviceId: "a".repeat(32), connectionToken: "offline-fixture-private-connection-token-".repeat(2) });
+  try {
+    await server.mount(page); await page.goto(server.origin);
+    const dialog = await prepareRealImages(page);
+    await dialog.getByRole("button", { name: "下一步：连接小红书", exact: true }).click();
+    await server.close();
+    const pagesBefore = context.pages().length;
+    await dialog.getByRole("button", { name: "连接这台电脑", exact: true }).click();
+    await expect(dialog.getByRole("alert").first()).toContainText("本机助手");
+    await expect(dialog.getByText("本机连接已保存", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeEnabled();
+    expect(context.pages()).toHaveLength(pagesBefore);
+    expect(new URL(page.url()).origin).toBe(server.origin);
+    await captureConnectionSteps(page, dialog, "local-assistant-offline");
     expect(server.failure()).toBeUndefined();
   } finally { await server.close(); }
 });

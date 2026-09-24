@@ -1,4 +1,5 @@
 import type { DraftContent, DraftImage } from "../draftSync/types";
+import { localSyncFetch } from "../localSync/transport";
 
 export type WechatAccount = { id: string; name: string };
 export type WechatPublication = {
@@ -71,7 +72,7 @@ function pause(milliseconds: number, signal: AbortSignal) {
 
 // Credentials travel only in the header or explicit account connection body;
 // the encrypted device vault owns persistence, never draft records or URLs.
-export function createWechatClient(password: string, fetcher: typeof fetch = fetch) {
+export function createWechatClient(password: string, fetcher: typeof fetch = localSyncFetch) {
   const token = password.trim();
   async function request(path: string, signal: AbortSignal, body?: FormData | Record<string, unknown>, method = "GET", timeoutMs = 15_000) {
     signal.throwIfAborted();

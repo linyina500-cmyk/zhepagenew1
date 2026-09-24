@@ -32,7 +32,7 @@ async function fixture(context, { empty = false } = {}) {
       beginLocalSyncConnection: () => {
         events.push("begin");
         calls.push("begin-connection");
-        return { connect: async (signal) => { calls.push("connect-local"); return pairing(signal); }, close: () => { calls.push("close-popup"); } };
+        return { connect: async (signal) => { calls.push("connect-local"); return pairing(signal); }, close: () => { calls.push("close-connection"); } };
       },
     };
     return nativeRequire(specifier);
@@ -110,11 +110,11 @@ test("aborting a delayed recovery never performs a late local clear", async (con
 });
 
 
-test("one-click connection opens the popup synchronously and preserves saved accounts", async (context) => {
+test("one-click connection starts once and preserves saved accounts", async (context) => {
   const f = await fixture(context), originalAccounts = [...f.accounts];
   await f.click("连接这台电脑");
   assert.deepEqual(f.events.slice(0, 2), ["begin", "run"]);
-  assert.deepEqual(f.calls, ["begin-connection", "connect-local", "save-binding", "close-popup"]);
+  assert.deepEqual(f.calls, ["begin-connection", "connect-local", "save-binding", "close-connection"]);
   assert.deepEqual(f.binding, { deviceId: "old-device", connectionToken: "paired-token" });
   assert.deepEqual(f.accounts, originalAccounts);
   assert.match(f.container.querySelector('[role="status"]').textContent, /连接/);
@@ -127,7 +127,9 @@ test("the first connection has no credential or file fields", async (context) =>
   assert.ok(button.classList.contains("primary"));
   assert.equal(f.container.querySelector("input"), null);
   assert.match(f.container.textContent, /共用此连接/);
-  assert.doesNotMatch(f.container.textContent, /config\.env|WECHAT_SYNC_TOKEN|连接口令/);
+  assert.match(f.container.textContent, /安装一次.*随登录启动/);
+  assert.match(f.container.textContent, /无需上传文件或填写连接口令/);
+  assert.doesNotMatch(f.container.textContent, /config\.env|WECHAT_SYNC_TOKEN/);
   assert.equal(f.container.querySelector(".draft-sync-connection-help").open, false);
   assert.deepEqual(f.calls, []);
 });
@@ -142,34 +144,34 @@ test("saved connection is compact and its settings stay collapsed", async (conte
   assert.equal(f.container.textContent.includes("old-token"), false);
 });
 
-test("cancelled pairing closes its window without changing browser credentials", async (context) => {
+test("cancelled pairing cleans up without changing browser credentials", async (context) => {
   const f = await fixture(context); let finish;
   f.pairing = () => new Promise((resolve) => { finish = resolve; });
   await f.click("连接这台电脑"); f.abort();
   await f.act(async () => finish({ deviceId: "old-device", connectionToken: "late-token" }));
   assert.equal(f.calls.includes("save-binding"), false);
-  assert.equal(f.calls.at(-1), "close-popup");
+  assert.equal(f.calls.at(-1), "close-connection");
   assert.equal(f.binding.connectionToken, "old-token");
 });
 
-test("pairing failures close the popup and surface a useful error without saving", async (context) => {
+test("pairing failures clean up and surface a useful error without saving", async (context) => {
   const f = await fixture(context);
   f.pairing = async () => { throw new Error("请先打开本机同步工具，再试一次。"); };
   await f.click("连接这台电脑");
   assert.equal(f.calls.includes("save-binding"), false);
-  assert.equal(f.calls.at(-1), "close-popup");
+  assert.equal(f.calls.at(-1), "close-connection");
   assert.match(f.container.querySelector('[role="alert"]').textContent, /打开本机同步工具/);
 });
 
 test("pairing errors appear inside the connection region and the button permits a retry", async (context) => {
   const f = await fixture(context, { empty: true });
-  f.pairing = async () => { throw new Error("请允许弹出连接窗口，然后再试一次。"); };
+  f.pairing = async () => { throw new Error("若 Chrome 提示访问本机，请允许后重试。"); };
   await f.click("连接这台电脑");
-  assert.match(f.container.querySelector('.draft-sync-connection [role="alert"]').textContent, /允许弹出连接窗口/);
+  assert.match(f.container.querySelector('.draft-sync-connection [role="alert"]').textContent, /访问本机，请允许/);
   assert.equal(f.calls.includes("save-binding"), false);
   f.pairing = async () => ({ deviceId: "old-device", connectionToken: "paired-token" });
   await f.click("连接这台电脑");
   assert.equal(f.container.querySelector('.draft-sync-connection [role="alert"]'), null);
   assert.equal(f.binding.connectionToken, "paired-token");
-  assert.equal(f.calls.filter((call) => call === "close-popup").length, 2);
+  assert.equal(f.calls.filter((call) => call === "close-connection").length, 2);
 });

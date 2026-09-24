@@ -90,7 +90,7 @@ export default function LocalSyncConnection({ binding, accounts, busy, runOperat
       <p className="draft-sync-small">小红书和公众号共用此连接，只需连接一次。</p>
       {connectButton}
       <details className="draft-sync-connection-help"><summary>连接帮助</summary>
-        <p className="draft-sync-small">先打开本机助手，再点击连接。使用期间保持助手运行。</p>
+        <p className="draft-sync-small">安装一次折页同步助手，之后随登录启动。无需上传文件或填写连接口令；若 Chrome 提示访问本机，请允许。</p>
         {resetButton}
       </details>
     </>}

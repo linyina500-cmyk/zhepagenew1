@@ -27,8 +27,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Check the WeChat proxy in the Cloudflare runtime
-        run: node --test tests/wechat-proxy.workerd.mjs
       - run: npm test
       - run: npm run lint
       - run: npm run typecheck

@@ -58,7 +58,7 @@ async function fixture(t, customize) {
     const bytes = Buffer.from(await web.arrayBuffer());
     const request = Readable.from(bytes.length ? [bytes] : []);
     request.url = new URL(web.url).pathname + new URL(web.url).search; request.method = web.method;
-    request.headers = Object.fromEntries(web.headers);
+    request.socket = { localPort: 8788 }; request.headers = { host: "127.0.0.1:8788", ...Object.fromEntries(web.headers) };
     const response = { headersSent: false,
       writeHead(status, values) { this.status = status; this.headers = values; this.headersSent = true; },
       end(body) { this.body = JSON.parse(body); },
@@ -127,7 +127,7 @@ test("disconnect is idempotent after a RAM-only registry restart and preserves d
   const handler = createWechatServer({ accounts: restarted, syncToken: token }).listeners("request")[0];
   for (let attempt = 0; attempt < 2; attempt++) {
     const request = Readable.from([]);
-    Object.assign(request, { method: "POST", url: `/api/wechat/accounts/${account.id}/disconnect`, headers: { authorization: `Bearer ${token}` } });
+    Object.assign(request, { method: "POST", url: `/api/wechat/accounts/${account.id}/disconnect`, socket: { localPort: 8788 }, headers: { host: "127.0.0.1:8788", authorization: `Bearer ${token}` } });
     const response = { headersSent: false, writeHead(status) { this.status = status; this.headersSent = true; }, end(body) { this.body = JSON.parse(body); } };
     await handler(request, response);
     assert.equal(response.status, 200); assert.deepEqual(response.body, { disconnected: true });

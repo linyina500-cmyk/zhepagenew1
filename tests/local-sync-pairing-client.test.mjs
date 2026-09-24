@@ -7,91 +7,171 @@ Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcryp
 const { beginLocalSyncConnection } = loadDomModule("lib/localSync/connection.ts");
 const origin = "http://127.0.0.1:8789";
 const deviceId = "a".repeat(32), token = "b".repeat(64);
+const response = (data, status = 200) => new Response(JSON.stringify(data), { status });
+const signal = () => new AbortController().signal;
 
 function fixture(t, options = {}) {
-  const dom = installDom(), messages = [], requests = [], opened = [];
-  const popup = { closed: false, close() { this.closed = true; }, postMessage(data, target) { messages.push({ data, target }); } };
-  t.mock.method(window, "open", (...args) => { opened.push(args); return options.blocked ? null : popup; });
+  const dom = installDom(), requests = [], opened = [];
+  t.mock.method(window, "open", (...args) => { opened.push(args); throw new Error("pairing must not open a window"); });
   t.mock.method(globalThis, "fetch", async (url, init) => {
     requests.push({ url, init });
-    return new Response(JSON.stringify({ deviceId: options.otherDevice || deviceId }));
+    if (url === `${origin}/pair`) {
+      if (options.pair) return options.pair(init);
+      return response({ nonce: JSON.parse(init.body).nonce, deviceId, connectionToken: token });
+    }
+    if (options.verify) return options.verify(init);
+    return response({ deviceId: options.otherDevice || deviceId });
   });
   const attempt = beginLocalSyncConnection();
-  const send = (data, source = popup, eventOrigin = origin) => window.dispatchEvent(new window.MessageEvent("message", { data, source, origin: eventOrigin }));
-  const ready = () => { send({ type: "zhepage-local-ready" }); return messages.at(-1)?.data.nonce; };
-  const connected = (nonce) => send({ type: "zhepage-local-connected", nonce, deviceId, connectionToken: token });
   t.after(() => { attempt.close(); dom.window.close(); });
-  return { attempt, send, ready, connected, messages, requests, opened, popup };
+  return { attempt, requests, opened };
 }
 
-test("pairing verifies the exact popup, local origin and fresh challenge before verifying the service", async (t) => {
+test("a click pairs directly with a fresh challenge and verifies the service without opening a window", async (t) => {
   const f = fixture(t);
-  const result = f.attempt.connect(new AbortController().signal);
-  const payload = { type: "zhepage-local-ready" };
-  f.send(payload, {}, origin); f.send(payload, f.popup, "https://untrusted.example");
-  assert.equal(f.messages.length, 0);
-  const nonce = f.ready();
-  assert.match(nonce, /^[a-f0-9]{64}$/); assert.equal(f.messages[0].target, origin);
-  f.connected("0".repeat(64));
-  f.send({ type: "zhepage-local-connected", nonce, deviceId, connectionToken: token }, {}, origin);
-  f.send({ type: "zhepage-local-connected", nonce, deviceId, connectionToken: token }, f.popup, "http://localhost:8789");
-  await Promise.resolve(); assert.equal(f.requests.length, 0);
-  f.connected(nonce);
-  assert.deepEqual(await result, { deviceId, connectionToken: token });
-  assert.equal(f.requests.length, 1); assert.equal(f.requests[0].url, "/api/wechat/connection");
-  assert.equal(f.requests[0].init.headers.Authorization, `Bearer ${token}`);
-  assert.equal(f.opened[0][0], `${origin}/connect`);
-  assert.ok(!f.opened.flat().join(" ").includes(token));
-  assert.ok(!f.opened.flat().join(" ").includes(nonce));
-  f.connected(nonce); f.ready(); assert.equal(f.messages.length, 1);
+  assert.equal(f.requests.length, 0, "creating an attempt does not connect before the user operation starts");
+  assert.deepEqual(await f.attempt.connect(signal()), { deviceId, connectionToken: token });
+  assert.equal(f.requests.length, 2);
+  const pair = f.requests[0], challenge = JSON.parse(pair.init.body);
+  assert.equal(pair.url, `${origin}/pair`);
+  assert.deepEqual(Object.keys(challenge), ["nonce"]);
+  assert.match(challenge.nonce, /^[a-f0-9]{64}$/);
+  assert.equal(pair.init.method, "POST");
+  assert.deepEqual(pair.init.headers, { "Content-Type": "application/json" });
+  assert.equal(pair.init.credentials, "omit");
+  assert.equal(pair.init.redirect, "error");
+  assert.equal(pair.init.cache, "no-store");
+  assert.equal(f.requests[1].init.headers.Authorization, `Bearer ${token}`);
+  assert.equal(f.requests[1].init.method, "GET");
+  assert.ok(f.requests[1].url.endsWith("/connection"));
+  assert.equal(f.opened.length, 0);
+  for (const request of f.requests) {
+    assert.ok(!request.url.includes(token));
+    assert.ok(!request.url.includes(challenge.nonce));
+  }
+  await assert.rejects(f.attempt.connect(signal()), /正在处理中/);
+  assert.equal(f.requests.length, 2);
+  const second = beginLocalSyncConnection();
+  t.after(() => second.close());
+  await second.connect(signal());
+  assert.notEqual(JSON.parse(f.requests[2].init.body).nonce, challenge.nonce);
 });
 
-test("blocked popup produces actionable inline help without making any service request", async (t) => {
-  const f = fixture(t, { blocked: true });
-  await assert.rejects(f.attempt.connect(new AbortController().signal), /允许此网站打开连接窗口/);
+test("network denial or an unavailable helper gives actionable inline help without a window", async (t) => {
+  for (const pair of [async () => { throw new TypeError("Failed to fetch"); }, async () => response({}, 403), async () => response({}, 503)]) {
+    await t.test("connection unavailable", async (t) => {
+      const f = fixture(t, { pair });
+      await assert.rejects(f.attempt.connect(signal()), (error) => /请先打开折页同步助手/.test(error.message) && /Chrome 提示访问本机，请允许/.test(error.message));
+      assert.equal(f.requests.length, 1); assert.equal(f.opened.length, 0);
+    });
+  }
+});
+
+test("malformed credentials and mismatched challenges never reach authenticated verification", async (t) => {
+  const invalid = [null, [], {}, { nonce: "0".repeat(64) }, { deviceId: "wrong-device" }, { connectionToken: "short" }, { connectionToken: "x".repeat(257) }, { connectionToken: "x".repeat(32) + "\0" }, { connectionToken: "x".repeat(32) + " " }];
+  for (const value of invalid) {
+    await t.test("invalid pairing response", async (t) => {
+      const f = fixture(t, { pair: async (init) => response(value === null || Array.isArray(value) || !Object.keys(value).length ? value : { nonce: JSON.parse(init.body).nonce, deviceId, connectionToken: token, ...value }) });
+      await assert.rejects(f.attempt.connect(signal()), /连接信息不完整/);
+      assert.equal(f.requests.length, 1);
+    });
+  }
+  await t.test("invalid JSON", async (t) => {
+    const f = fixture(t, { pair: async () => new Response("invalid json") });
+    await assert.rejects(f.attempt.connect(signal()), /连接信息不完整/);
+    assert.equal(f.requests.length, 1);
+  });
+});
+
+test("a different service device is never accepted", async (t) => {
+  const f = fixture(t, { otherDevice: "c".repeat(32) });
+  await assert.rejects(f.attempt.connect(signal()), /电脑与本机助手不一致/);
+  assert.equal(f.requests.length, 2);
+});
+
+test("failed authenticated verification retains the local access guidance", async (t) => {
+  const f = fixture(t, { verify: async () => { throw new TypeError("network lost"); } });
+  await assert.rejects(f.attempt.connect(signal()), /Chrome 提示访问本机，请允许/);
+  assert.equal(f.requests.length, 2);
+});
+
+test("the total deadline covers both pairing and service verification even when a request hangs", async (t) => {
+  for (const stage of ["pair", "verify"]) {
+    await t.test(stage, async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      let started;
+      const entered = new Promise((resolve) => { started = resolve; });
+      const f = fixture(t, { [stage]: async () => { started(); return new Promise(() => {}); } });
+      const pending = f.attempt.connect(signal());
+      const rejected = assert.rejects(pending, /请先打开折页同步助手/);
+      await entered;
+      t.mock.timers.tick(9_000);
+      await rejected;
+      assert.equal(f.requests.at(-1).init.signal.aborted, true);
+    });
+  }
+});
+
+test("service verification uses only the remaining overall deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let finishPair, enteredVerification;
+  const verifying = new Promise((resolve) => { enteredVerification = resolve; });
+  const f = fixture(t, {
+    pair: (init) => new Promise((resolve) => { finishPair = () => resolve(response({ nonce: JSON.parse(init.body).nonce, deviceId, connectionToken: token })); }),
+    verify: async () => { enteredVerification(); return new Promise(() => {}); },
+  });
+  const pending = f.attempt.connect(signal());
+  const rejected = assert.rejects(pending, /请先打开折页同步助手/);
+  t.mock.timers.tick(4_000); finishPair(); await verifying;
+  t.mock.timers.tick(5_000); await rejected;
+  assert.equal(f.requests[1].init.signal.aborted, true);
+});
+
+test("a completed connection removes its deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fixture(t);
+  await f.attempt.connect(signal());
+  t.mock.timers.tick(9_000);
+  assert.equal(f.requests[0].init.signal.aborted, false);
+});
+
+test("closing or cancelling before connection does not send a request", async (t) => {
+  const f = fixture(t);
+  f.attempt.close();
+  await assert.rejects(f.attempt.connect(signal()), { name: "AbortError" });
+  assert.equal(f.requests.length, 0);
+  const other = beginLocalSyncConnection(), controller = new AbortController(), reason = new Error("cancelled");
+  t.after(() => other.close());
+  controller.abort(reason);
+  await assert.rejects(other.connect(controller.signal), (error) => error === reason);
   assert.equal(f.requests.length, 0);
 });
 
-test("closing the dialog aborts pairing and late messages cannot connect", async (t) => {
-  const f = fixture(t), controller = new AbortController();
-  const pending = f.attempt.connect(controller.signal);
-  const nonce = f.ready(); controller.abort(new Error("cancelled"));
-  await assert.rejects(pending, /cancelled/); f.connected(nonce);
-  assert.equal(f.popup.closed, true); assert.equal(f.requests.length, 0);
+test("cancellation stops a pending request and rejects late pairing or verification results", async (t) => {
+  for (const stage of ["pair", "verify"]) {
+    await t.test(stage, async (t) => {
+      let finish, started;
+      const entered = new Promise((resolve) => { started = resolve; });
+      const f = fixture(t, { [stage]: async () => { started(); return new Promise((resolve) => { finish = resolve; }); } });
+      const controller = new AbortController(), reason = new Error("cancelled");
+      const pending = f.attempt.connect(controller.signal);
+      const rejected = assert.rejects(pending, (error) => error === reason);
+      await entered;
+      controller.abort(reason);
+      await rejected;
+      assert.equal(f.requests.at(-1).init.signal.aborted, true);
+      finish(response({ nonce: JSON.parse(f.requests[0].init.body).nonce, deviceId, connectionToken: token }));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(f.requests.length, stage === "pair" ? 1 : 2);
+    });
+  }
 });
 
-test("a missing helper times out with the application name and retry action", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
-  const f = fixture(t), pending = f.attempt.connect(new AbortController().signal);
-  t.mock.timers.tick(12_000);
-  await assert.rejects(pending, /打开“折页同步助手”/); assert.equal(f.requests.length, 0);
-});
-
-test("closing the pairing window rejects promptly", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
-  const f = fixture(t), pending = f.attempt.connect(new AbortController().signal);
-  f.popup.close(); t.mock.timers.tick(300);
-  await assert.rejects(pending, /连接窗口已关闭/);
-});
-
-test("malformed response and a different service device are never accepted", async (t) => {
-  await t.test("malformed credentials", async (t) => {
-    const f = fixture(t), pending = f.attempt.connect(new AbortController().signal), nonce = f.ready();
-    f.send({ type: "zhepage-local-connected", nonce, deviceId, connectionToken: "bad\nsecret" });
-    await assert.rejects(pending, /连接信息不完整/); assert.equal(f.requests.length, 0);
-  });
-  await t.test("different device", async (t) => {
-    const f = fixture(t, { otherDevice: "c".repeat(32) }), pending = f.attempt.connect(new AbortController().signal);
-    f.connected(f.ready()); await assert.rejects(pending, /电脑与本机助手不一致/);
-  });
-});
-
-test("abort during service verification discards the result", async (t) => {
-  const f = fixture(t), controller = new AbortController();
-  let complete;
-  t.mock.method(globalThis, "fetch", () => new Promise((resolve) => { complete = resolve; }));
-  const pending = f.attempt.connect(controller.signal); f.connected(f.ready());
-  await Promise.resolve(); controller.abort(new Error("cancelled"));
-  complete(new Response(JSON.stringify({ deviceId })));
-  await assert.rejects(pending, /cancelled/); assert.equal(f.popup.closed, true);
+test("close cancels an active connection without waiting for the deadline", async (t) => {
+  const f = fixture(t, { pair: async () => new Promise(() => {}) });
+  const pending = f.attempt.connect(signal());
+  const rejected = assert.rejects(pending, { name: "AbortError" });
+  f.attempt.close();
+  await rejected;
+  assert.equal(f.requests[0].init.signal.aborted, true);
 });

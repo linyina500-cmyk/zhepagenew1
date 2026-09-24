@@ -254,7 +254,7 @@ test("HTTP service scopes every job to a connected account and requires a separa
     const body = Buffer.from(await web.arrayBuffer());
     const request = Readable.from(body.length ? [body] : []);
     request.url = new URL(url).pathname; request.method = web.method;
-    request.headers = Object.fromEntries(web.headers);
+    request.socket = { localPort: 8788 }; request.headers = { host: "127.0.0.1:8788", ...Object.fromEntries(web.headers) };
     const response = { headersSent: false, writeHead(status, headers) { this.status = status; this.headers = headers; this.headersSent = true; }, end(body) { this.body = body; } };
     await handler(request, response);
     return { status: response.status, json: async () => JSON.parse(response.body) };
@@ -294,7 +294,7 @@ test("HTTP preserves controlled WeChat errors as 424 without leaking secrets or 
       await api.checkConnection();
     } } });
     const request = Readable.from([Buffer.from("{}")]);
-    Object.assign(request, { url: "/api/wechat/accounts/connect", method: "POST", headers: { authorization: `Bearer ${syncToken}`, "content-type": "application/json" } });
+    Object.assign(request, { url: "/api/wechat/accounts/connect", method: "POST", socket: { localPort: 8788 }, headers: { host: "127.0.0.1:8788", authorization: `Bearer ${syncToken}`, "content-type": "application/json" } });
     const response = {
       headersSent: false,
       writeHead(status, headers) { this.status = status; this.headers = headers; this.headersSent = true; },

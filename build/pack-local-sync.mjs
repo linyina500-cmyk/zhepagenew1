@@ -5,10 +5,10 @@ import { execFileSync } from "node:child_process";
 
 // Explicit public-code allowlist; never copy config, receipts, or login profiles.
 const files = [
-  "server/wechat/.env.example", "server/wechat/start.mjs", "server/wechat/http.mjs", "server/wechat/pairing.mjs",
+  "server/wechat/.env.example", "server/wechat/start.mjs", "server/wechat/http.mjs", "server/wechat/pairing.mjs", "server/wechat/local-access.mjs",
   "server/wechat/jobs.mjs", "server/wechat/accounts.mjs", "server/wechat/publications.mjs",
   "server/wechat/local-setup.mjs", "server/wechat/local-start.mjs", "server/wechat/local-control.mjs", "server/wechat/配置公众号.command",
-  "server/wechat/折页同步助手.command", "server/wechat/停止折页同步助手.command", "server/wechat/本机使用说明.md", "server/wechat/README.md",
+  "server/wechat/折页同步助手.command", "server/wechat/停止折页同步助手.command", "server/wechat/停用折页自动启动.command", "server/wechat/本机使用说明.md", "server/wechat/README.md",
   "server/wechat/zhepage-wechat.service", "server/wechat/Caddyfile.example", "lib/wechat/api.mjs",
   "server/xiaohongshu/driver.mjs", "server/xiaohongshu/jobs.mjs", "server/xiaohongshu/http.mjs", "server/xiaohongshu/README.md",
 ];

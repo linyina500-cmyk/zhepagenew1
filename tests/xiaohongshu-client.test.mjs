@@ -135,7 +135,7 @@ test("shared HTTP authorization happens before the XHS login side effect", async
   const syncToken = "a".repeat(32), handler = createXhsHandler({ service: { async openLogin() { opened++; } } });
   const server = createWechatServer({ accounts: {}, syncToken, handleXhs: async (...args) => { dispatched++; return handler(...args); } });
   async function issue(authorization) {
-    const request = Readable.from([]); request.url = "/api/xiaohongshu/login"; request.method = "POST"; request.headers = { authorization };
+    const request = Readable.from([]); request.url = "/api/xiaohongshu/login"; request.method = "POST"; request.socket = { localPort: 8788 }; request.headers = { host: "127.0.0.1:8788", authorization };
     const result = Promise.withResolvers(); let status;
     const response = { headersSent: false, writeHead(value) { status = value; this.headersSent = true; }, end(body) { result.resolve({ status, body: JSON.parse(body) }); } };
     server.emit("request", request, response);

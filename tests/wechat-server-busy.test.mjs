@@ -10,7 +10,7 @@ function fixture(overrides = {}) {
   const handler = createWechatServer({ accounts, syncToken, ...overrides }).listeners("request")[0];
   const call = async (path, options = {}) => {
     const request = options.stream || Readable.from([]);
-    Object.assign(request, { url: path, method: options.method || "GET", headers: { authorization: `Bearer ${syncToken}`, ...options.headers } });
+    Object.assign(request, { url: path, method: options.method || "GET", socket: { localPort: 8788 }, headers: { host: "127.0.0.1:8788", authorization: `Bearer ${syncToken}`, ...options.headers } });
     const response = { headersSent: false, writeHead(status) { this.status = status; this.headersSent = true; }, end(body) { this.body = JSON.parse(body); } };
     await handler(request, response); return response;
   };
@@ -51,7 +51,7 @@ test("XHS requests keep reset blocked while uploading or checking a browser and 
   assert.equal((await f.call("/api/wechat/connection")).body.busy, false);
 });
 
-test("the tunneled sync listener exposes no pairing endpoint", async () => {
+test("the authenticated sync listener exposes no pairing endpoint", async () => {
   const f = fixture();
   for (const path of ["/connect", "/pair", "/api/wechat/pair"]) {
     const response = await f.call(path, { method: "POST" });

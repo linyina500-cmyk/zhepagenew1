@@ -60,7 +60,7 @@ function failed(error) {
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 try {
-  await listenLocalServers({ server, pairingServer, port, host: process.env.WECHAT_HOST || "127.0.0.1" });
+  await listenLocalServers({ server, pairingServer, port, host: "127.0.0.1" });
   server.on("error", failed); pairingServer.on("error", failed);
   if (!stopping) console.info(`公众号草稿服务已启动，端口 ${port}；本机配对端口 ${PAIRING_PORT}。公众号凭据不会输出到日志。`);
   else await closeLocalServers(server, pairingServer);

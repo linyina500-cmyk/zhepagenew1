@@ -1,4 +1,5 @@
 import type { DraftContent, DraftImage } from "../draftSync/types";
+import { localSyncFetch } from "../localSync/transport";
 export type XhsAccount = { id: string; name: string };
 export type XhsJob = {
   id: string; accountId: string; accountName: string; title: string;
@@ -19,7 +20,7 @@ function parseJob(value: unknown, id: string, accountId: string): XhsJob {
   }
   return value as XhsJob;
 }
-export function createXhsClient(token: string, fetcher: typeof fetch = fetch) {
+export function createXhsClient(token: string, fetcher: typeof fetch = localSyncFetch) {
   async function request(path: string, signal: AbortSignal, method = "GET", body?: FormData | string, timeoutMs = 90_000) {
     signal.throwIfAborted();
     if (!token.trim()) throw new Error("请先连接本机服务。");

@@ -4,6 +4,7 @@ import { WechatApiError } from "../../lib/wechat/api.mjs";
 import { ACCOUNT_ID } from "./accounts.mjs";
 import { RequestError as XhsRequestError } from "../xiaohongshu/jobs.mjs";
 import { MAX_REQUEST_BYTES, JOB_ID, RequestError, readSubmission } from "./jobs.mjs";
+import { localAccess } from "./local-access.mjs";
 
 function authorized(value, secret) {
   const digest = (text) => createHash("sha256").update(text).digest();
@@ -34,6 +35,7 @@ export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = (
   let xhsRequests = 0;
   const busy = () => readingUpload || xhsRequests > 0 || xhsBusy() || accounts.busy?.() || false;
   return createServer({ requestTimeout: 120_000, headersTimeout: 15_000 }, async (request, response) => {
+    if (!localAccess(request, response)) return;
     const send = (status, value) => {
       response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
       response.end(JSON.stringify(value));
@@ -100,8 +102,7 @@ export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = (
       } finally { readingUpload = false; }
     } catch (error) {
       // Never serialize upstream fetch errors, credentials, headers, or URLs.
-      // A controlled WeChat failure is a dependency error, not an unreachable
-      // origin: tunnel providers can replace 502 responses with their own HTML.
+      // A controlled platform failure is distinct from an unreachable service.
       const controlled = error instanceof RequestError || error instanceof XhsRequestError;
       const status = controlled ? error.status : error instanceof WechatApiError ? 424 : 502;
       const message = controlled || error instanceof WechatApiError ? error.message : "公众号同步暂未完成，请读取状态并核对草稿箱";

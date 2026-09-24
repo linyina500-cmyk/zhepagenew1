@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { JSDOM } from "jsdom";
-import { agentPlist, assistantReady, parseAgentState, startAgent, stopAgent } from "../server/wechat/local-control.mjs";
+import { agentPlist, assistantReady, bootstrapAgent, parseAgentState, runWithControlLock, startAgent, stopAgent, stopInstalledAgent, unregisterStoppedAgent } from "../server/wechat/local-control.mjs";
 
 const fixtureSecret = "synthetic-private-token-do-not-log-0123456789";
 async function directory(t) {
@@ -16,7 +15,7 @@ async function directory(t) {
 }
 const unreachable = async () => assert.fail("This operation must not be called");
 
-test("private launch agent contains only escaped paths and never enables automatic starts or credentials", () => {
+test("login agent starts at login and after failures, while a successful manual stop stays stopped", () => {
   const values = { label: "com.zhepage.fixture", nodePath: '/Applications/A&B/<node>"\'', supervisorPath: "/private/project/server/wechat/local-start.mjs", workDir: "/private/project", logPath: "/private/project/.wechat-sync-local/assistant.log" };
   const plist = agentPlist({ ...values, connectionToken: fixtureSecret, environment: { WECHAT_APP_SECRET: fixtureSecret } });
   const dom = new JSDOM(plist, { contentType: "application/xml" });
@@ -26,26 +25,29 @@ test("private launch agent contains only escaped paths and never enables automat
     assert.equal(entries.get("WorkingDirectory").textContent, values.workDir);
     assert.equal(entries.get("StandardOutPath").textContent, values.logPath);
     assert.equal(entries.get("StandardErrorPath").textContent, values.logPath);
-    assert.equal(entries.get("RunAtLoad").tagName, "false");
-    assert.equal(entries.get("KeepAlive").tagName, "false");
+    assert.equal(entries.get("RunAtLoad").tagName, "true");
+    assert.equal(entries.get("KeepAlive").tagName, "dict");
+    assert.equal(entries.get("KeepAlive").querySelector("key").textContent, "SuccessfulExit");
+    assert.equal(entries.get("KeepAlive").querySelector("key").nextElementSibling.tagName, "false");
     assert.equal(entries.get("ProcessType").textContent, "Background");
     assert.doesNotMatch(plist, /WECHAT_|EnvironmentVariables|--env-file|LaunchAgents|synthetic-private-token/);
   } finally { dom.window.close(); }
 });
 
 test("agent state distinguishes an active supervisor from an exited registered job", () => {
-  assert.deepEqual(parseAgentState("gui/501/com.zhepage.fixture = {\n\tstate = running\n\tpid = 2314\n}"), { registered: true, pid: 2314 });
+  assert.deepEqual(parseAgentState("gui/501/com.zhepage.fixture = {\n\tpath = /Users/fixture/Library/LaunchAgents/sync.plist\n\tstate = running\n\tpid = 2314\n}"), { registered: true, pid: 2314, definitionPath: "/Users/fixture/Library/LaunchAgents/sync.plist" });
   for (const output of ["\tstate = not running\n", "\tpid = 0\n", "\tlast exit code = 2314\n", "\tpid = invalid\n"]) {
-    assert.deepEqual(parseAgentState(output), { registered: true, pid: null });
+    assert.deepEqual(parseAgentState(output), { registered: true, pid: null, definitionPath: null });
   }
 });
 
-test("repeated start reuses the running supervisor without preparing or launching another instance", async () => {
-  let checks = 0;
-  const dependencies = { inspect: async () => ({ registered: true, pid: 100 }), prepare: unreachable, bootstrap: unreachable,
+test("repeated start installs login startup but preserves the running supervisor and current work", async () => {
+  let checks = 0, preparations = 0;
+  const dependencies = { inspect: async () => ({ registered: true, pid: 100 }), prepare: async () => { preparations++; }, bootstrap: unreachable,
     ready: async (pid) => { assert.equal(pid, 100); checks++; return true; }, pause: unreachable };
   await Promise.all([startAgent(dependencies), startAgent(dependencies)]);
   assert.equal(checks, 2);
+  assert.equal(preparations, 2);
 });
 
 test("first start and a manually restarted stopped job prepare once and wait for complete readiness", async () => {
@@ -75,9 +77,9 @@ test("readiness needs a current supervisor, an authenticated sync service and a 
   let connectionCalls = 0, pairingCalls = 0;
   const connection = async () => { connectionCalls++; return { deviceId: "a".repeat(32), busy: false }; };
   const fetcher = async (url, options) => {
-    pairingCalls++; assert.equal(url, "http://127.0.0.1:8789/connect"); assert.equal(options.redirect, "error");
+    pairingCalls++; assert.equal(url, "http://127.0.0.1:8789/health"); assert.equal(options.redirect, "error");
     assert.ok(options.signal instanceof AbortSignal); assert.equal(options.headers, undefined);
-    return new Response("<script>zhepage-local-ready</script>");
+    return Response.json({ service: "zhepage-local-pairing", ready: true });
   };
   for (const status of [null, "{invalid", { pid: 99, ready: true }, { pid: 100, ready: false }]) {
     if (status !== null) await writeFile(statusPath, typeof status === "string" ? status : JSON.stringify(status));
@@ -88,12 +90,87 @@ test("readiness needs a current supervisor, an authenticated sync service and a 
   assert.equal(await assistantReady({ pid: 100, statusPath, connection: async () => null, fetcher }), false);
   assert.equal(await assistantReady({ pid: 100, statusPath, connection: async () => { throw new Error("service unavailable"); }, fetcher }), false);
   assert.equal(pairingCalls, 0, "do not probe or accept pairing before the authenticated sync service is available");
-  for (const response of [new Response("zhepage-local-ready", { status: 503 }), new Response("wrong local service")]) {
+  for (const response of [Response.json({ service: "zhepage-local-pairing", ready: true }, { status: 503 }), new Response("wrong local service"),
+    Response.json({ service: "wrong-service", ready: true }), Response.json({ service: "zhepage-local-pairing", ready: false }), Response.json({ service: "zhepage-local-pairing", ready: "true" })]) {
     assert.equal(await assistantReady({ pid: 100, statusPath, connection, fetcher: async () => response }), false);
   }
   assert.equal(await assistantReady({ pid: 100, statusPath, connection, fetcher: async () => { throw new Error("pairing listener unavailable"); } }), false);
   assert.equal(await assistantReady({ pid: 100, statusPath, connection, fetcher }), true);
   assert.equal(pairingCalls, 1);
+});
+
+test("bootstrap replaces only an exited obsolete registration, while a running job is never unloaded", async () => {
+  const plistPath = "/Users/fixture/Library/LaunchAgents/sync.plist";
+  for (const definitionPath of [plistPath, "/private/old-temporary.plist", null]) {
+    const calls = []; let registered = Boolean(definitionPath);
+    const inspect = async () => ({ registered, pid: null, definitionPath });
+    await bootstrapAgent({ inspect, plistPath,
+      unregister: async () => { calls.push("unregister"); registered = false; },
+      bootstrap: async () => { calls.push("bootstrap"); registered = true; }, kickstart: async () => calls.push("kickstart") });
+    assert.deepEqual(calls, definitionPath === plistPath ? ["kickstart"] : definitionPath ? ["unregister", "bootstrap", "kickstart"] : ["bootstrap", "kickstart"]);
+  }
+  await bootstrapAgent({ inspect: async () => ({ registered: true, pid: 100 }), plistPath, unregister: unreachable, bootstrap: unreachable, kickstart: unreachable });
+  await assert.rejects(unregisterStoppedAgent({ inspect: async () => ({ registered: true, pid: 100 }), bootout: unreachable }), /仍在运行/);
+  let unloaded = 0;
+  await unregisterStoppedAgent({ inspect: async () => ({ registered: true, pid: null }), bootout: async () => { unloaded++; } });
+  await unregisterStoppedAgent({ inspect: async () => ({ registered: false, pid: null }), bootout: unreachable });
+  assert.equal(unloaded, 1);
+});
+
+test("safe stop disables crash recovery before shutdown and preserves next-login startup after exit", async () => {
+  const calls = []; let pid = 100;
+  assert.equal(await stopInstalledAgent({ inspect: async () => ({ registered: true, pid }),
+    connection: async () => { calls.push("check"); return { busy: false }; },
+    disable: async () => calls.push("disable"), terminate: async () => { calls.push("term"); },
+    pause: async () => { calls.push("wait"); pid = null; }, unregister: async () => { assert.equal(pid, null); calls.push("unregister"); },
+    enable: async () => calls.push("enable"), remove: unreachable,
+  }), true);
+  assert.deepEqual(calls, ["check", "disable", "check", "term", "wait", "unregister", "enable"]);
+});
+
+test("stopping during launchd restart throttling removes the pending restart instead of falsely succeeding", async () => {
+  const calls = []; let registered = true;
+  assert.equal(await stopInstalledAgent({ inspect: async () => ({ registered, pid: null }), connection: unreachable, terminate: unreachable, pause: unreachable,
+    disable: async () => calls.push("disable"), unregister: async () => { registered = false; calls.push("unregister"); },
+    enable: async () => calls.push("enable"), remove: unreachable,
+  }), true);
+  assert.equal(registered, false); assert.deepEqual(calls, ["disable", "unregister", "enable"]);
+});
+
+test("permanent uninstall only removes startup after exit, retains browser data and can be enabled again", async () => {
+  const calls = []; let pid = 100, registered = true, enabled = true, installed = true;
+  const inspect = async () => ({ registered, pid });
+  assert.equal(await stopInstalledAgent({ inspect, connection: async () => ({ busy: false }),
+    disable: async () => { enabled = false; calls.push("disable"); }, terminate: async () => { pid = null; calls.push("term"); }, pause: unreachable,
+    unregister: async () => { assert.equal(pid, null); registered = false; calls.push("unregister"); }, enable: unreachable,
+    remove: async () => { assert.equal(registered, false); installed = false; calls.push("remove-startup"); }, permanent: true,
+  }), true);
+  assert.equal(enabled, false); assert.equal(installed, false);
+  assert.deepEqual(calls, ["disable", "term", "unregister", "remove-startup"]);
+  await startAgent({ inspect, prepare: async () => { installed = true; enabled = true; calls.push("install-enable"); },
+    bootstrap: async () => { assert.equal(enabled, true); assert.equal(installed, true); registered = true; pid = 200; }, ready: async () => true, pause: unreachable });
+  assert.equal(pid, 200); assert.equal(registered, true); assert.equal(enabled, true);
+});
+
+test("busy or unknown work blocks both signal and startup changes; timeout never unloads or force-kills", async () => {
+  for (const state of [null, { busy: true }]) {
+    await assert.rejects(stopInstalledAgent({ inspect: async () => ({ pid: 100 }), connection: async () => state,
+      disable: unreachable, terminate: unreachable, pause: unreachable, unregister: unreachable, enable: unreachable, remove: unreachable }), /正在同步|无法确认同步状态/);
+  }
+  let terms = 0, disables = 0;
+  assert.equal(await stopInstalledAgent({ inspect: async () => ({ pid: 100 }), connection: async () => ({ busy: false }),
+    disable: async () => { disables++; }, terminate: async () => { terms++; }, pause: async () => {},
+    unregister: unreachable, enable: unreachable, remove: unreachable, attempts: 2,
+  }), false);
+  assert.equal(disables, 1); assert.equal(terms, 1);
+});
+
+test("work that starts during stop preflight restores crash recovery without signaling the service", async () => {
+  let checks = 0; const calls = [];
+  await assert.rejects(stopInstalledAgent({ inspect: async () => ({ pid: 100 }), connection: async () => ({ busy: ++checks > 1 }),
+    disable: async () => calls.push("disable"), enable: async () => calls.push("enable"), terminate: unreachable, pause: unreachable, unregister: unreachable, remove: unreachable,
+  }), /正在同步/);
+  assert.deepEqual(calls, ["disable", "enable"]);
 });
 
 test("stop refuses active work or unknown state and never signals a stopped supervisor", async () => {
@@ -114,64 +191,21 @@ test("idle stop signals once and waits; a slow shutdown never escalates to a for
   assert.equal(signals, 1, "timeout must not send additional termination signals");
 });
 
-async function waitFor(check, message, timeout = 6000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) { if (await check()) return; await delay(15); }
-  assert.fail(message);
-}
-
-test("isolated supervisor waits for tunnel registration, redacts child logs and drains after repeated stop signals", async (t) => {
-  const project = await directory(t), serviceDir = join(project, "server/wechat"), localDir = join(project, ".wechat-sync-local");
-  await mkdir(serviceDir, { recursive: true }); await mkdir(join(localDir, "bin"), { recursive: true });
-  await copyFile(new URL("../server/wechat/local-start.mjs", import.meta.url), join(serviceDir, "local-start.mjs"));
-  await writeFile(join(localDir, "config.env"), `WECHAT_SYNC_TOKEN=${fixtureSecret}\nWECHAT_APP_SECRET=synthetic-app-secret\n`);
-  // Synthetic children deliberately emit their fake credentials. They open no
-  // ports, browser profiles, platform connections or actual Cloudflare tunnel.
-  await writeFile(join(serviceDir, "start.mjs"), `
-    import { writeFileSync } from "node:fs";
-    writeFileSync("service-observed.json", JSON.stringify({ token: process.env.WECHAT_SYNC_TOKEN, secret: process.env.WECHAT_APP_SECRET }));
-    console.log(process.env.WECHAT_SYNC_TOKEN); console.error(process.env.WECHAT_APP_SECRET);
-    console.log("公众号草稿服务已启动");
-    let stopping = false;
-    process.on("SIGTERM", () => { if (stopping) return; stopping = true; writeFileSync("service-stopping", "true"); setTimeout(() => { writeFileSync("service-drained", "true"); process.exit(0); }, 200); });
-    setInterval(() => {}, 1000); setTimeout(() => process.exit(2), 10000);
-  `);
-  await writeFile(join(localDir, "bin/cloudflared"), `#!${process.execPath}
-    const { existsSync, writeFileSync } = require("node:fs");
-    writeFileSync("tunnel-observed.json", JSON.stringify({ credentialKeys: Object.keys(process.env).filter((key) => key.startsWith("WECHAT_")), args: process.argv.slice(2) }));
-    console.error(${JSON.stringify(fixtureSecret)}); console.error("https://fixture-only.trycloudflare.com");
-    writeFileSync("tunnel-url-announced", "true");
-    let sent = false;
-    setInterval(() => { if (!sent && existsSync("release-tunnel")) { sent = true; console.error("Registered tunnel connection"); } }, 15);
-    process.on("SIGTERM", () => { writeFileSync("tunnel-stopped", "true"); process.exit(0); });
-    setTimeout(() => process.exit(2), 10000);
-  `, { mode: 0o755 });
-  const child = spawn(process.execPath, [join(serviceDir, "local-start.mjs")], {
-    cwd: project, env: { ...process.env, WECHAT_SYNC_TOKEN: "synthetic-inherited-token", WECHAT_APP_SECRET: "synthetic-inherited-secret" }, stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = ""; child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { output += chunk; });
-  const closed = new Promise((resolve, reject) => { child.on("close", (code, signal) => resolve({ code, signal })); child.on("error", reject); });
-  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await closed; });
-  const exists = (path) => stat(join(project, path)).then(() => true, () => false);
-  const status = () => readFile(join(localDir, "assistant-status.json"), "utf8").then(JSON.parse);
-  await waitFor(() => exists("tunnel-url-announced"), "fake tunnel did not start");
-  assert.deepEqual(await status(), { pid: child.pid, ready: false });
-  assert.doesNotMatch(output, /助手已就绪/);
-  assert.equal(await exists(".wechat-sync-local/tunnel-url.txt"), false);
-  const observed = JSON.parse(await readFile(join(project, "service-observed.json"), "utf8"));
-  assert.deepEqual(observed, { token: fixtureSecret, secret: "synthetic-app-secret" });
-  const tunnel = JSON.parse(await readFile(join(project, "tunnel-observed.json"), "utf8"));
-  assert.deepEqual(tunnel.credentialKeys, []);
-  assert.deepEqual(tunnel.args, ["tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:8788"]);
-  await writeFile(join(project, "release-tunnel"), "true");
-  await waitFor(async () => (await status().catch(() => null))?.ready && output.includes("助手已就绪"), "supervisor did not acknowledge the registered tunnel");
-  assert.equal(await readFile(join(localDir, "tunnel-url.txt"), "utf8"), "https://fixture-only.trycloudflare.com\n");
-  for (const file of ["config.env", "assistant-status.json", "tunnel-url.txt"]) assert.equal((await stat(join(localDir, file))).mode & 0o777, 0o600);
-  child.kill("SIGTERM"); await waitFor(() => exists("service-stopping"), "service never began graceful shutdown");
-  child.kill("SIGHUP"); child.kill("SIGTERM");
-  assert.deepEqual(await closed, { code: 0, signal: null });
-  assert.equal(await exists("service-drained"), true); assert.equal(await exists("tunnel-stopped"), true);
-  assert.deepEqual(await status(), { pid: child.pid, ready: false });
-  assert.doesNotMatch(output, /synthetic-|WECHAT_APP_SECRET|WECHAT_SYNC_TOKEN/);
-  assert.equal(output.includes(fixtureSecret), false);
+test("macOS system lock serializes controllers and releases after an abnormal synthetic child exit", { skip: process.platform !== "darwin" }, async (t) => {
+  const root = await directory(t), scriptPath = join(root, "fixture.mjs"), lockPath = join(root, "control.lock");
+  const first = join(root, "first"), second = join(root, "second");
+  await writeFile(scriptPath, `import { writeFileSync, existsSync } from "node:fs";
+    const prefix = process.argv[2]; writeFileSync(prefix + ".started", "true");
+    const timer = setInterval(() => { if (existsSync(prefix + ".release")) { clearInterval(timer); process.exit(2); } }, 10);
+    setTimeout(() => process.exit(3), 5000).unref();`);
+  const active = runWithControlLock({ lockPath, scriptPath, action: first });
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && !(await access(`${first}.started`).then(() => true, () => false))) await delay(10);
+  await access(`${first}.started`);
+  await assert.rejects(runWithControlLock({ lockPath, scriptPath, action: second }), /正在启动或停止/);
+  assert.equal(await access(`${second}.started`).then(() => true, () => false), false);
+  await writeFile(`${first}.release`, "true"); assert.equal(await active, 2);
+  await writeFile(`${second}.release`, "true");
+  assert.equal(await runWithControlLock({ lockPath, scriptPath, action: second }), 2);
+  await access(`${second}.started`);
 });
