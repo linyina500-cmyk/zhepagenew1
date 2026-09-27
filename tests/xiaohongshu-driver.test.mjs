@@ -487,7 +487,7 @@ test("login never returns a stale identity after closure, redirect, or a later m
   assert.equal(result.status, "needs_attention"); assert.equal(result.account, undefined);
 });
 
-test("login reopens a closed page and a closed browser with the same dedicated profile", async (t) => {
+test("login reopens the same dedicated profile with direct networking and browser protections", async (t) => {
   const profileDir = await mkdtemp(join(tmpdir(), "zhepage-xhs-reopen-"));
   const contexts = [], launches = [], navigations = [];
   const chromium = { async launchPersistentContext(path, options) {
@@ -523,7 +523,13 @@ test("login reopens a closed page and a closed browser with the same dedicated p
   await contexts[0].close();
   assert.equal((await driver.openLogin()).status, "login_required");
   assert.equal(launches.length, 2);
-  assert.ok(launches.every(({ path, options }) => path === profileDir && options.chromiumSandbox === true));
+  for (const { path, options } of launches) {
+    assert.equal(path, profileDir);
+    assert.deepEqual(options.args, ["--no-proxy-server"]);
+    assert.equal(options.chromiumSandbox, true);
+    assert.notEqual(options.ignoreHTTPSErrors, true);
+    assert.notEqual(options.bypassCSP, true);
+  }
   assert.deepEqual(navigations, Array(3).fill("https://creator.xiaohongshu.com/login"));
 });
 

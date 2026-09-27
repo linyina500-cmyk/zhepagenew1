@@ -164,7 +164,10 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
       try {
         await mkdir(profileDir, { recursive: true, mode: 0o700 });
         const browserType = chromium ?? (await import("playwright")).chromium;
-        context = await browserType.launchPersistentContext(profileDir, { channel: "chrome", headless: false, chromiumSandbox: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false, viewport: { width: 1440, height: 1000 } });
+        // Keep this dedicated session on one direct network path. System proxy
+        // egress can reach a CDN edge that returns HTTP 400 for valid draft images.
+        // This does not change system proxy settings, TLS checks, or the sandbox.
+        context = await browserType.launchPersistentContext(profileDir, { channel: "chrome", headless: false, chromiumSandbox: true, args: ["--no-proxy-server"], handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false, viewport: { width: 1440, height: 1000 } });
       } catch {
         throw new XhsDriverError("小红书专用窗口未能启动，请确认已安装 Google Chrome，再重新打开折页同步助手。", { status: 503, code: "browser_open_failed" });
       }
