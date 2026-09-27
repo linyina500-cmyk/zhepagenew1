@@ -221,12 +221,12 @@ test("a native draft handler exception never calls publish or a replacement hand
 async function browserFixture(t, { saveError = false, nativeSaveResult = "invoked", reverseReadback = false, reverseUpload = false, fingerprintResult, uploadDelay = false,
   initialDrafts = [], imageDraftCount, otherDraftCount = 4, autoOpenDrawer = true, onSave, onEdit, onDraftRead,
   accountError, accountCloseError = false, focusError = false, accountRedirect, loginRedirect, loginVisible = true,
-  onNavigate, onAccountNavigate, onAccountRead, timeoutMs = 300 } = {}) {
+  onNavigate, onVisibleRead, onAccountNavigate, onAccountRead, timeoutMs = 300 } = {}) {
   const profileDir = await mkdtemp(join(tmpdir(), "zhepage-xhs-driver-"));
   const calls = [];
   let currentAccount = { identifier: "test_account_123", name: "测试账号" };
   let url = "about:blank", state = { title: "", body: "", images: [], drafts: structuredClone(initialDrafts), blocked: false }, stored;
-  let drawerOpen = false, pendingImages = [], fingerprintReads = 0, draftReads = 0;
+  let drawerOpen = false, pendingImages = [], fingerprintReads = 0, draftReads = 0, visibleReads = 0, pageClosed = false;
   const control = { setState: (value) => { state = { ...state, ...value }; }, setAccount: (value) => { currentAccount = value; }, setDrawerOpen: (value) => { drawerOpen = value; } };
   const makeLocator = (kind, id, filters = {}) => ({
     filter(options) { return makeLocator(kind, id, { ...filters, ...options }); },
@@ -272,7 +272,7 @@ async function browserFixture(t, { saveError = false, nativeSaveResult = "invoke
     },
   });
   const page = {
-    url: () => url, isClosed: () => false, async bringToFront() { if (focusError) throw new Error("private browser focus error"); },
+    url: () => url, isClosed: () => pageClosed, async bringToFront() { if (focusError) throw new Error("private browser focus error"); },
     async goto(target, options) {
       calls.push(["goto", target, options]); url = target.endsWith("/login") ? loginRedirect ?? target : target;
       assert.equal(new URL(target).searchParams.has("draft_id"), false, "native local drafts must not use invented navigation URLs");
@@ -304,10 +304,12 @@ async function browserFixture(t, { saveError = false, nativeSaveResult = "invoke
         const value = fingerprintResult ? await fingerprintResult({ keys, readCount: ++fingerprintReads, ...control }) : keys;
         calls.push(["fingerprints", value]); return structuredClone(value);
       }
-      if (reader === readLoginEvidence) { calls.push(["login-read"]); return { loginVisible }; }
-      assert.equal(reader, readAccountEvidence);
-      calls.push(["visible-account-read"]);
-      return structuredClone(currentAccount);
+      assert.ok(reader === readLoginEvidence || reader === readAccountEvidence);
+      calls.push([reader === readLoginEvidence ? "login-read" : "visible-account-read"]);
+      const result = await onVisibleRead?.({ reader, readCount: ++visibleReads,
+        setUrl: (value) => { url = value; }, close: () => { pageClosed = true; }, ...control });
+      if (result !== undefined) return result;
+      return reader === readLoginEvidence ? { loginVisible } : structuredClone(currentAccount);
     },
     getByText(pattern) {
       calls.push(["drafts-find", pattern.source]);
@@ -376,7 +378,7 @@ test("login retries navigate explicitly after a timeout has already changed the 
   const f = await browserFixture(t, { timeoutMs: 60_000, onNavigate: ({ target, options, setUrl }) => {
     navigations++;
     assert.equal(target, "https://creator.xiaohongshu.com/login");
-    assert.deepEqual(options, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    assert.deepEqual(options, { waitUntil: "domcontentloaded", timeout: 30_000 });
     if (navigations === 1) {
       setUrl("https://creator.xiaohongshu.com/publish/publish?target=image");
       throw new Error("private browser navigation error");
@@ -425,6 +427,64 @@ test("an authenticated login redirect reads the visible homepage without navigat
   assert.equal(f.calls.filter(([kind]) => kind === "visible-account-read").length, 1);
   assert.equal(f.calls.filter(([kind]) => kind === "account-open" || kind === "account-close").length, 0);
   assert.deepEqual((await f.driver.checkConnection()).account, result.account, "fresh checks use the same account identity");
+});
+
+test("login waits through same-origin routes and context replacement in its visible window", async (t) => {
+  const home = "https://creator.xiaohongshu.com/new/home";
+  for (const scenario of [
+    { loginRedirect: "https://creator.xiaohongshu.com/new/initializing", onNavigate({ setUrl }) {
+      setTimeout(() => setUrl(home), 0);
+    } },
+    { onVisibleRead({ reader, setUrl }) {
+      if (reader === readLoginEvidence) { setUrl(home); return { loginVisible: true }; }
+    } },
+    { loginRedirect: home, onVisibleRead({ readCount }) {
+      if (readCount === 1) throw new Error("Execution context was destroyed, most likely because of a navigation");
+    } },
+    { loginRedirect: home, onNavigate() { throw new Error("Navigation is interrupted by another navigation"); } },
+  ]) {
+    const f = await browserFixture(t, { ...scenario, timeoutMs: 1000 });
+    const result = await f.driver.openLogin();
+    assert.equal(result.status, "connected"); assert.equal(result.account.name, "测试账号");
+    assert.equal(f.calls.filter(([kind]) => kind === "goto").length, 1);
+    assert.equal(f.calls.filter(([kind]) => kind === "account-open" || kind === "account-close").length, 0);
+  }
+});
+
+test("login shares a capped 30-second budget and accepts identity rendered after 15 seconds", async (t) => {
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const ready = await browserFixture(t, { timeoutMs: 60_000, loginRedirect: "https://creator.xiaohongshu.com/new/home",
+    onNavigate({ options }) { assert.equal(options.timeout, 30_000); now += 16_000; } });
+  assert.equal((await ready.driver.openLogin()).status, "connected");
+  for (const timeoutMs of [300, 60_000]) {
+    const budget = Math.min(timeoutMs, 30_000);
+    const expired = await browserFixture(t, { timeoutMs, onNavigate({ options }) {
+      assert.equal(options.timeout, budget); now += budget;
+    } });
+    assert.equal((await expired.driver.openLogin()).status, "needs_attention");
+    assert.equal(expired.calls.filter(([kind]) => kind === "login-read" || kind === "visible-account-read").length, 0);
+  }
+  for (const interrupted of [false, true]) {
+    const late = await browserFixture(t, { timeoutMs: 60_000, loginRedirect: "https://creator.xiaohongshu.com/new/home",
+      onVisibleRead() { now += 30_000; if (interrupted) throw new Error("Cannot find context with specified id"); } });
+    assert.equal((await late.driver.openLogin()).status, "needs_attention");
+    assert.equal(late.calls.filter(([kind]) => kind === "visible-account-read").length, 1);
+  }
+});
+
+test("login never returns a stale identity after closure, redirect, or a later missing account", async (t) => {
+  for (const stop of [({ close }) => close(), ({ setUrl }) => setUrl("https://example.test/")]) {
+    const f = await browserFixture(t, { loginRedirect: "https://creator.xiaohongshu.com/new/home", onVisibleRead: stop });
+    const result = await f.driver.openLogin();
+    assert.equal(result.status, "needs_attention"); assert.equal(result.account, undefined);
+    assert.equal(f.calls.filter(([kind]) => kind === "visible-account-read").length, 1);
+  }
+  const f = await browserFixture(t, { loginRedirect: "https://creator.xiaohongshu.com/new/home", timeoutMs: 20 });
+  assert.equal((await f.driver.openLogin()).status, "connected");
+  f.setAccount(null);
+  const result = await f.driver.openLogin();
+  assert.equal(result.status, "needs_attention"); assert.equal(result.account, undefined);
 });
 
 test("login reopens a closed page and a closed browser with the same dedicated profile", async (t) => {

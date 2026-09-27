@@ -206,13 +206,13 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
     }
     return state;
   };
+  const transientNavigation = (error) => error instanceof Error
+    && /Execution context was destroyed|Cannot find context with (?:specified )?id|interrupted by another navigation|net::ERR_ABORTED/iu.test(error.message);
   async function accountState() {
     await ensurePage();
     const currentUrl = new URL(page.url());
     if (currentUrl.origin !== ORIGIN) return { status: "needs_attention", message: "请将专用浏览器切回小红书创作服务平台" };
     let accountPage;
-    const transientNavigation = (error) => error instanceof Error
-      && /Execution context was destroyed|Cannot find context with (?:specified )?id|interrupted by another navigation|net::ERR_ABORTED/iu.test(error.message);
     try {
       // Read the current shared session afresh. Never navigate an editor that
       // may contain work, and never reuse a previous successful account read.
@@ -324,23 +324,41 @@ export function createXhsBrowserDriver({ profileDir, chromium, timeoutMs = 60_00
       if (state.images.length || state.title?.trim() || state.body?.trim() || state.blocked) {
         return { status: "needs_attention", reason: "editor_in_use", message: "小红书窗口中有未完成的编辑，请先保存或退出，再登录。原内容已保留。" };
       }
-      const budget = Math.min(timeoutMs, 15_000), deadline = Date.now() + budget;
+      const budget = Math.min(timeoutMs, 30_000), deadline = Date.now() + budget;
       try {
         // Explicit retries always navigate, even when a failed navigation has
         // already changed the address to the editor but left a blank page.
-        await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: budget });
+        try { await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: budget }); }
+        catch (error) { if (!transientNavigation(error)) throw error; }
         while (Date.now() < deadline) {
+          if (page.isClosed()) break;
           const url = new URL(page.url());
           if (url.origin !== ORIGIN) break;
-          if (url.pathname.startsWith("/login")) {
-            if ((await page.evaluate(readLoginEvidence)).loginVisible) return { status: "login_required", message: "请在小红书窗口扫码登录，完成后点击“我已登录”。" };
-          } else if (url.pathname === "/new/home") {
-            const account = await page.evaluate(readAccountEvidence);
-            if (account) return { status: "connected", account: {
-              id: createHash("sha256").update(`xiaohongshu-account:${account.identifier}`).digest("hex").slice(0, 20), name: account.name,
-            } };
-          } else break;
-          await new Promise((resolve) => setTimeout(resolve, Math.min(200, Math.max(0, deadline - Date.now()))));
+          try {
+            if (url.pathname.startsWith("/login")) {
+              const login = await page.evaluate(readLoginEvidence);
+              if (page.isClosed()) break;
+              const after = new URL(page.url());
+              if (Date.now() < deadline && after.origin === ORIGIN && after.pathname.startsWith("/login") && login.loginVisible) {
+                return { status: "login_required", message: "请在小红书窗口扫码登录，完成后点击“我已登录”。" };
+              }
+            } else if (url.pathname === "/new/home") {
+              const account = await page.evaluate(readAccountEvidence);
+              if (page.isClosed()) break;
+              const after = new URL(page.url());
+              if (Date.now() < deadline && after.origin === ORIGIN && after.pathname === "/new/home" && account) {
+                return { status: "connected", account: {
+                  id: createHash("sha256").update(`xiaohongshu-account:${account.identifier}`).digest("hex").slice(0, 20), name: account.name,
+                } };
+              }
+            }
+          } catch (error) {
+            if (!transientNavigation(error)) throw error;
+          }
+          if (page.isClosed() || new URL(page.url()).origin !== ORIGIN) break;
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)));
         }
       } catch { /* Return a controlled failure, never raw browser data. */ }
       return { status: "needs_attention", reason: "login_page_unavailable", message: "小红书登录页未正常加载。请检查专用窗口和网络，再点击“打开登录窗口”重试。" };
