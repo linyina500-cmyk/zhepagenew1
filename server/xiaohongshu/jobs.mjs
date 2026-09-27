@@ -1,13 +1,52 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { validDraftRef } from "./driver.mjs";
+import { validDraftRef, XhsDriverError } from "./driver.mjs";
 
 export const JOB_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 export const MAX_REQUEST_BYTES = 60 * 1024 * 1024 + 64 * 1024;
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const ACCOUNT_ID = /^[a-f0-9]{20}$/;
 const pending = new Set(["uploading", "creating", "needs_confirmation"]);
+const driverMessages = new Set([
+  "小红书专用窗口未能启动，请确认已安装 Google Chrome，再重新打开折页同步助手。",
+  "小红书页面暂时打不开，请确认网络正常后重试。",
+  "专用浏览器中有多个小红书页面，请保留一个后再连接",
+  "小红书窗口已关闭，请点击登录重新打开",
+  "小红书登录账号尚未确认或发生变化，请重新连接核对",
+  "未找到唯一草稿箱入口，请在专用浏览器核对",
+  "草稿箱总数尚未确认，不能判断本次是否新增草稿",
+  "草稿箱条目尚未完整读取，不能据此确认新增草稿",
+  "图文草稿列表尚未加载，请稍后核对",
+  "图文编辑页未正常加载，请检查专用窗口后重试",
+  "图片内容暂时无法核对，请检查专用窗口",
+  "未找到原草稿的编辑入口",
+  "专用浏览器编辑器中已有内容，已保留原内容",
+  "编辑器恢复了已有内容，请先保存或退出。原内容已保留。",
+  "请先处理小红书编辑器中的现有内容或提示",
+  "页面已离开小红书图文编辑器，请核对当前浏览器",
+  "无法唯一确认原生图片上传入口",
+  "小红书报告图片上传失败，请核对专用浏览器，不要重复创建",
+  "小红书图片处理结果尚未确认，请核对专用浏览器",
+  "编辑器图片数量发生变化，已停止上传",
+  "上传过程中图片或顺序发生变化，已停止",
+  "上传过程中已确认的图片顺序发生变化",
+  "上传期间文案发生变化，请核对浏览器",
+  "标题编辑区尚未确认",
+  "配文编辑区尚未确认",
+  "填写后的标题、配文或图片顺序未能核对一致",
+  "保存前内容发生变化，请人工核对",
+  "未找到唯一可用的暂存草稿按钮",
+  "暂存草稿按钮尚不可用",
+]);
+function failureMessage(error, phase) {
+  const label = { prepare: "导入内容时", save: "暂存草稿时", verify: "重新核对草稿时" }[phase];
+  // Driver and browser errors may contain private page data. Only exact,
+  // reviewed literals may cross this boundary, never arbitrary error text.
+  const message = error instanceof XhsDriverError ? error.message : null;
+  const detail = driverMessages.has(message) ? message : "结果尚未确认，请检查小红书专用窗口";
+  return `${label}：${detail}；本任务不会重复上传或保存。`;
+}
 
 export class RequestError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -144,7 +183,13 @@ export async function createXhsService({ dataDir, driver }) {
   async function bindConnection(openLogin = false) {
     const state = await (openLogin ? driver.openLogin() : driver.checkConnection());
     if (state?.status === "login_required") return { status: "login_required", message: "小红书专用窗口当前显示登录页，请在该窗口完成扫码登录" };
-    if (state?.status !== "connected") return { status: "needs_attention", message: "暂未从专用窗口确认稳定的小红书账号标识；若已登录，请勿重复扫码，需要核对当前页面与账号识别" };
+    if (state?.status !== "connected") {
+      const messages = {
+        login_page_unavailable: "小红书登录页未正常加载。请检查专用窗口和网络，再点击“打开登录窗口”重试。",
+        editor_in_use: "小红书窗口中有未完成的编辑，请先保存或退出，再登录。原内容已保留。",
+      };
+      return { status: "needs_attention", message: Object.hasOwn(messages, state?.reason) ? messages[state.reason] : "暂未从专用窗口确认稳定的小红书账号标识；若已登录，请勿重复扫码，需要核对当前页面与账号识别" };
+    }
     const account = state.account;
     if (!account || !ACCOUNT_ID.test(account.id) || typeof account.name !== "string" || !account.name.trim()) return { status: "needs_attention", message: "尚未确认小红书账号身份，当前不会上传图片" };
     let bound;
@@ -156,19 +201,18 @@ export async function createXhsService({ dataDir, driver }) {
   }
   async function verify(record) {
     if (!validDraftRef(record.draftRef, record.imageCount) || record.draftId !== record.draftRef.id) return keepUnknown(record, "暂存结果缺少可核对的草稿或图片标识，请在专用浏览器检查；不会重复保存");
-    const connection = await bindConnection();
-    if (connection.status !== "connected" || connection.account.id !== record.accountId) return keepUnknown(record, "请先恢复同一小红书账号的登录，再核对已有草稿");
-    const result = await driver.verifyDraft({ draftRef: record.draftRef, account: connection.account, title: record.title, body: record.body, images: record.images });
+    const result = await driver.verifyDraft({ draftRef: record.draftRef, account: { id: record.accountId, name: record.accountName }, title: record.title, body: record.body, images: record.images });
     record.status = result?.verified === true ? "saved" : "needs_confirmation";
-    record.message = result?.verified === true ? "已重新打开同一草稿，标题、配文和全部图片显示及顺序已核对" : "草稿内容或图片尚未通过核对，请在专用浏览器检查";
+    record.message = result?.verified === true ? "已重新打开同一草稿，标题、配文和全部图片显示及顺序已核对"
+      : result?.reason === "images_unavailable" ? "草稿已保存，但小红书图片暂时无法显示，请在专用窗口检查。原图已保留，请勿重复同步。"
+        : "草稿内容或图片尚未通过核对，请在专用浏览器检查";
     await write(record);
     return record;
   }
   async function run(record) {
+    let phase = "prepare";
     try {
-      const connection = await bindConnection();
-      if (connection.status !== "connected" || connection.account.id !== record.accountId) throw new Error("account changed");
-      record.prepared = await driver.prepare({ jobId: record.id, account: connection.account, title: record.title, body: record.body,
+      record.prepared = await driver.prepare({ jobId: record.id, account: { id: record.accountId, name: record.accountName }, title: record.title, body: record.body,
         images: record.images, onProgress: async (count) => {
           if (!Number.isInteger(count) || count < record.uploadedCount || count > record.imageCount) throw new Error("invalid progress");
           record.uploadedCount = count;
@@ -177,18 +221,20 @@ export async function createXhsService({ dataDir, driver }) {
         } });
       if (record.uploadedCount !== record.imageCount || !record.prepared || record.prepared.jobId !== record.id
         || !Array.isArray(record.prepared.images) || record.prepared.images.length !== record.imageCount) throw new Error("incomplete preparation");
+      phase = "save";
       record.status = "creating";
       record.message = "图片与配文已填入，正在暂存草稿";
       await write(record);
       const result = await driver.saveDraft({ prepared: record.prepared });
       record.draftRef = result?.draftRef;
       if (typeof result?.draftId === "string") record.draftId = result.draftId;
-      record.status = "needs_confirmation";
+      record.status = "creating";
       record.message = "暂存操作已结束，正在重新打开草稿核对";
       await write(record);
+      phase = "verify";
       await verify(record);
-    } catch {
-      await keepUnknown(record, "上传、暂存或回读结果尚未确认，请核对专用浏览器；本任务不会重复上传或保存");
+    } catch (error) {
+      await keepUnknown(record, failureMessage(error, phase));
     }
   }
   return {
@@ -245,7 +291,7 @@ export async function createXhsService({ dataDir, driver }) {
       if (active) throw new RequestError("小红书任务仍在处理中", 409);
       const record = await read(id);
       active = { id, promise: null };
-      active.promise = verify(record).catch(() => keepUnknown(record, "本次回读暂未确认，请检查专用浏览器；不会重复保存"));
+      active.promise = verify(record).catch((error) => keepUnknown(record, failureMessage(error, "verify")));
       try { return publicJob(await active.promise); } finally { active = null; }
     }),
     async idle() { await queue.catch(() => {}); await active?.promise; },

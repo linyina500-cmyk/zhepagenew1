@@ -18,6 +18,32 @@ const input = { id, accountId, content: { title: "小红书独立标题", body: 
 const signal = () => new AbortController().signal;
 const reply = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
+test("XHS login returns the validated platform state instead of an unconditional opened receipt", async () => {
+  for (const state of [
+    { status: "connected", account: { id: accountId, name: "测试账号" } },
+    { status: "login_required", message: "请在专用窗口扫码登录" },
+    { status: "needs_attention", message: "请先处理专用窗口中的页面提示" },
+  ]) {
+    const calls = [];
+    const client = createXhsClient("secret", async (url, options) => { calls.push([url, options.method]); return reply(state); });
+    assert.deepEqual(await client.openLogin(signal()), state);
+    assert.deepEqual(calls, [["/api/xiaohongshu/login", "POST"]]);
+  }
+  for (const value of [{}, { opened: true }, { status: "unknown" },
+    { status: "connected" }, { status: "connected", account: { id: "wrong", name: "账号" } },
+    { status: "connected", account: { id: accountId, name: " " } },
+    { status: "connected", account: { id: accountId, name: "x".repeat(101) } },
+    { status: "connected", account: { id: accountId, name: "账号\n另一个" } },
+    { status: "connected", account: { id: accountId, name: "账号" }, message: "失败" },
+    { status: "login_required", message: "" }, { status: "login_required", message: " " },
+    { status: "needs_attention", message: "x".repeat(501) }, { status: "needs_attention", message: "nul\0" },
+    { status: "needs_attention", message: "未登录", account: { id: accountId, name: "账号" } },
+  ]) {
+    await assert.rejects(createXhsClient("secret", async () => reply(value)).openLogin(signal()), /登录结果未能确认/u);
+  }
+  await assert.rejects(createXhsClient("secret", async () => reply({ error: "专用窗口暂时打不开" }, 503)).openLogin(signal()), /专用窗口暂时打不开/u);
+});
+
 test("XHS client sends complete originals in order and the exact account-bound multipart fields", async () => {
   const calls = [];
   const client = createXhsClient(" connection-secret ", async (url, options) => { calls.push({ url, options }); return reply({ job: job() }, 202); });
@@ -108,14 +134,37 @@ test("XHS acknowledge sends only confirm true and retains the unverified status"
   assert.equal(calls[1].url, `/api/xiaohongshu/jobs/${id}/verify`); assert.equal(calls[1].options.body, undefined);
 });
 
-test("XHS polling stops before another read after the total deadline", async (t) => {
+test("XHS polling continues beyond 90 seconds until the backend finishes, with a bounded read timeout", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
-  let calls = 0;
-  const client = createXhsClient("secret", async () => { calls++; return reply({ job: job() }); });
-  const waiting = client.waitForJob(job(), signal(), () => {});
-  t.mock.timers.tick(90_000);
-  assert.equal((await waiting).status, "uploading");
-  assert.equal(calls, 0, "deadline expiry must not begin another request with a fresh network timeout");
+  const calls = [], timeouts = [], progress = [], stages = ["uploading", "creating", "saved"];
+  const advanced = stages.map(() => Promise.withResolvers());
+  t.mock.method(AbortSignal, "timeout", (milliseconds) => { timeouts.push(milliseconds); return signal(); });
+  const client = createXhsClient("secret", async (url, options) => {
+    const status = stages[calls.length]; calls.push([url, options.method]);
+    return reply({ job: job({ status, uploadedCount: 2, ...(status === "saved" ? { draftId: "verified-draft" } : {}) }) });
+  });
+  const waiting = client.waitForJob(job(), signal(), (value) => {
+    progress.push(value.status); advanced[progress.length - 1].resolve();
+  });
+  for (const stage of advanced) { t.mock.timers.tick(100_000); await stage.promise; }
+  assert.equal((await waiting).status, "saved");
+  assert.equal(Date.now(), 300_000);
+  assert.deepEqual(progress, stages);
+  assert.deepEqual(calls, stages.map(() => [`/api/xiaohongshu/jobs/${id}`, "GET"]));
+  assert.deepEqual(timeouts, [15_000, 15_000, 15_000]);
+});
+
+test("a failed XHS status request stops polling without creating or retrying a task", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const calls = [];
+  const client = createXhsClient("secret", async (url, options) => {
+    calls.push([url, options.method]); throw new Error("本机连接已断开");
+  });
+  const waiting = client.waitForJob(job(), signal(), () => assert.fail("a failed read has no progress"));
+  t.mock.timers.tick(1000);
+  await assert.rejects(waiting, /本机连接已断开/u);
+  t.mock.timers.tick(100_000);
+  assert.deepEqual(calls, [[`/api/xiaohongshu/jobs/${id}`, "GET"]]);
 });
 
 test("aborting while XHS polling sleeps starts no read and terminal states do not poll", async (t) => {
@@ -124,6 +173,8 @@ test("aborting while XHS polling sleeps starts no read and terminal states do no
   const client = createXhsClient("secret", async () => { calls++; return reply({ job: job() }); });
   const waiting = client.waitForJob(job(), controller.signal, () => {});
   controller.abort(new Error("取消等待")); await assert.rejects(waiting, /取消等待/);
+  await assert.rejects(client.waitForJob(job(), controller.signal, () => {}), /取消等待/);
+  t.mock.timers.tick(100_000);
   for (const status of ["saved", "needs_confirmation", "failed"]) {
     const terminal = job({ status }); assert.equal(await client.waitForJob(terminal, signal(), () => {}), terminal);
   }
@@ -132,7 +183,8 @@ test("aborting while XHS polling sleeps starts no read and terminal states do no
 
 test("shared HTTP authorization happens before the XHS login side effect", async () => {
   let opened = 0, dispatched = 0;
-  const syncToken = "a".repeat(32), handler = createXhsHandler({ service: { async openLogin() { opened++; } } });
+  let state = { status: "login_required", message: "请在专用窗口扫码登录" };
+  const syncToken = "a".repeat(32), handler = createXhsHandler({ service: { async openLogin() { opened++; return state; } } });
   const server = createWechatServer({ accounts: {}, syncToken, handleXhs: async (...args) => { dispatched++; return handler(...args); } });
   async function issue(authorization) {
     const request = Readable.from([]); request.url = "/api/xiaohongshu/login"; request.method = "POST"; request.socket = { localPort: 8788 }; request.headers = { host: "127.0.0.1:8788", authorization };
@@ -143,6 +195,10 @@ test("shared HTTP authorization happens before the XHS login side effect", async
   }
   assert.equal((await issue(undefined)).status, 401); assert.equal((await issue("Bearer wrong")).status, 401);
   assert.equal(dispatched, 0); assert.equal(opened, 0);
-  const result = await issue(`Bearer ${syncToken}`);
-  assert.equal(result.status, 200); assert.deepEqual(result.body, { opened: true }); assert.equal(dispatched, 1); assert.equal(opened, 1);
+  for (const resultState of [state, { status: "needs_attention", message: "请检查专用窗口" }, { status: "connected", account: { id: accountId, name: "测试账号" } }]) {
+    state = resultState;
+    const result = await issue(`Bearer ${syncToken}`);
+    assert.equal(result.status, 200); assert.deepEqual(result.body, state); assert.equal(Object.hasOwn(result.body, "opened"), false);
+  }
+  assert.equal(dispatched, 3); assert.equal(opened, 3);
 });

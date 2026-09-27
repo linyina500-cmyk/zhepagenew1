@@ -635,7 +635,7 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
   const requests: { method: string; path: string; body: string }[] = [];
   const originals: { name: string; size: number; hash: string; width: number; height: number; signature: number[] }[] = [];
   const jobs = new Map<string, Record<string, unknown>>();
-  let loginOpened = false, createCount = 0;
+  let loginOpened = false, loginCount = 0, createCount = 0;
   const server = await startWechatTestServer(new URL(page.url()).origin, async (request, response) => {
     const path = new URL(request.url!, "http://test.local").pathname;
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -646,7 +646,13 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     expect(bytes.toString("utf8")).not.toContain(connectionToken);
     const reply = (status: number, json: unknown) => { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(json)); };
     if (path === "/api/wechat/connection") { reply(200, { deviceId }); return; }
-    if (path === "/api/xiaohongshu/login") { expect(request.method).toBe("POST"); loginOpened = true; reply(200, {}); return; }
+    if (path === "/api/xiaohongshu/login") {
+      expect(request.method).toBe("POST"); loginOpened = true; loginCount++;
+      reply(200, loginCount === 1 ? { status: "needs_attention", message: "专用窗口未显示登录页，请先检查其中提示。" }
+        : loginCount === 2 ? { status: "login_required", message: "请在专用窗口扫码，完成后点击“我已登录”。" }
+          : { status: "connected", account });
+      return;
+    }
     if (path === "/api/xiaohongshu/account") { expect(loginOpened).toBe(true); reply(200, { account }); return; }
     if (path === "/api/xiaohongshu/jobs") {
       expect(request.method).toBe("POST"); createCount++;
@@ -720,13 +726,21 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
     await dialog.getByRole("button", { name: "打开登录窗口", exact: true }).click();
     await expect.poll(() => server.failure() || loginOpened).toBe(true);
+    await expect(dialog.locator(".draft-sync-xhs .draft-sync-message")).toHaveText("专用窗口未显示登录页，请先检查其中提示。");
+    await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
+    await expect(dialog.locator(".draft-sync-xhs")).not.toContainText("已打开");
+    await dialog.getByRole("button", { name: "打开登录窗口", exact: true }).click();
+    await expect(dialog.locator(".draft-sync-xhs .draft-sync-message")).toHaveText("请在专用窗口扫码，完成后点击“我已登录”。");
     await captureConnectionSteps(page, dialog, "xiaohongshu-login");
-    await dialog.getByRole("button", { name: "我已登录", exact: true }).click();
+    await dialog.getByRole("button", { name: "打开登录窗口", exact: true }).click();
     await expect(dialog.getByText(account.name, { exact: true })).toBeVisible();
+    expect(requests.filter(({ path }) => path === "/api/xiaohongshu/account")).toHaveLength(0);
+    expect(loginCount).toBe(3);
     await captureConnectionSteps(page, dialog, "xiaohongshu-account-ready");
     await dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true }).click();
     await expect(dialog.getByRole("region", { name: "小红书同步结果", exact: true })).toContainText("模拟小红书草稿回读通过");
     expect(createCount).toBe(1);
+    expect(requests.filter(({ path }) => path === "/api/xiaohongshu/account")).toHaveLength(0);
     expect((await savedDraftSummary(page))?.receipts).toContainEqual(expect.objectContaining({ accountId: account.id, status: "saved", draftId: "mock-xhs-draft" }));
     await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toBeDisabled();
     const callsBeforeSwitch = requests.length;

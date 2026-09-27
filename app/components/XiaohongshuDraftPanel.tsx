@@ -34,6 +34,15 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChec
     if (busy) return;
     void runOperation(label, async (signal) => { setFeedback(""); await operation(signal); });
   }
+  function login() {
+    run("正在打开小红书专用窗口…", async (signal) => {
+      setAccount(null); setJob(null); setAllowNew(false); setChecked(false);
+      const state = await (await client(signal)).openLogin(signal);
+      signal.throwIfAborted();
+      if (state.status === "connected") setAccount(state.account);
+      else setFeedback(state.message);
+    });
+  }
   async function remember(value: XhsJob, previous: SyncReceipt, snapshot: LocalDraft, signal: AbortSignal) {
     signal.throwIfAborted(); setJob(value);
     await persistReceipt(snapshot, { ...previous, draftId: value.draftId, message: value.message,
@@ -44,8 +53,6 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChec
     const target = account;
     run("正在保存小红书草稿…", async (signal) => {
       const api = await client(signal);
-      const connected = await api.getAccount(signal);
-      if (connected.id !== target.id) throw new Error("专用窗口的账号已变化，请重新检查账号。");
       const previous: SyncReceipt = { platform: "xiaohongshu", accountId: target.id, jobId: crypto.randomUUID(), status: "needs_confirmation", message: "已保留任务编号，正在保存小红书草稿；中断后请先读取状态。" };
       const snapshot = await persistReceipt(draft, previous, signal);
       signal.throwIfAborted(); setAllowNew(false); setChecked(false); setJob(null); onSubmitted();
@@ -66,13 +73,14 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChec
       const api = await client(signal);
       const result = action === "verify" ? await api.verifyJob(previous.jobId!, target.id, signal)
         : action === "acknowledge" ? await api.acknowledgeJob(previous.jobId!, target.id, signal) : await api.getJob(previous.jobId!, target.id, signal);
-      await remember(result, previous, draft, signal); setChecked(false);
+      const latest = action === "read" ? await api.waitForJob(result, signal, setJob) : result;
+      await remember(latest, previous, draft, signal); setChecked(false);
     });
   }
   return <div className="draft-sync-xhs">
     <section className="draft-sync-service" aria-label="小红书本机连接"><h3>{account ? "小红书账号" : "登录小红书"}</h3>
       <p>{account ? "已确认账号，可以把图片存到草稿箱。" : "打开登录窗口扫码，完成后点击“我已登录”。"}</p>
-      <div className="draft-sync-confirm-actions"><button type="button" className={account ? undefined : "primary"} disabled={busy} onClick={() => run("正在打开小红书专用窗口…", async (signal) => { await (await client(signal)).openLogin(signal); signal.throwIfAborted(); setAccount(null); setFeedback("请在打开的窗口扫码，再回到这里点击“我已登录”。"); })}>{account ? "切换账号" : "打开登录窗口"}</button>
+      <div className="draft-sync-confirm-actions"><button type="button" className={account ? undefined : "primary"} disabled={busy} onClick={login}>{account ? "切换账号" : "打开登录窗口"}</button>
       <button type="button" disabled={busy} onClick={() => run("正在确认小红书账号…", async (signal) => { const value = await (await client(signal)).getAccount(signal); signal.throwIfAborted(); setAccount(value); setJob(null); setAllowNew(false); })}>{account ? "刷新账号" : "我已登录"}</button></div>
       {account && <p role="status">已连接：<strong>{account.name}</strong></p>}
     </section>
@@ -82,7 +90,7 @@ export default function XiaohongshuDraftPanel({ draft, contentReady, contentChec
       {pending && <><p>保存结果尚未确认。请在小红书窗口打开草稿，检查文字和全部图片。</p><label className="draft-sync-check"><input type="checkbox" disabled={busy} checked={checked} onChange={(event) => setChecked(event.target.checked)} /><span>我已检查草稿，并保存或退出了当前编辑</span></label><button type="button" disabled={busy || !checked} onClick={() => read("acknowledge")}>结束本次任务</button></>}
       {job?.acknowledged && <p>已结束本次任务。保存结果以小红书草稿箱为准。</p>}
     </section>}
-    {account && <section className="draft-sync-service"><h3>保存到小红书</h3><p>共 {draft.images.length} 张图片，按当前顺序存入草稿箱。</p>
+    {account && <section className="draft-sync-service"><h3>保存到小红书</h3><p>共 {draft.images.length} 张图片，按当前顺序保存。草稿保存在这台电脑的小红书专用窗口中。</p>
       {contentCheck}
       {receipt && !pending && <label className="draft-sync-check"><input type="checkbox" checked={allowNew} disabled={busy} onChange={(event) => setAllowNew(event.target.checked)} /><span>另存一份新草稿，保留上次内容</span></label>}
       <button type="button" className="primary" disabled={busy || !account || !contentReady || pending || Boolean(receipt && !allowNew)} onClick={submit}>同步到小红书草稿箱</button>

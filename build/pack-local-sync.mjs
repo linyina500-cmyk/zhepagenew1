@@ -10,7 +10,7 @@ const files = [
   "server/wechat/local-setup.mjs", "server/wechat/local-start.mjs", "server/wechat/local-control.mjs", "server/wechat/配置公众号.command",
   "server/wechat/折页同步助手.command", "server/wechat/停止折页同步助手.command", "server/wechat/停用折页自动启动.command", "server/wechat/本机使用说明.md", "server/wechat/README.md",
   "server/wechat/zhepage-wechat.service", "server/wechat/Caddyfile.example", "lib/wechat/api.mjs",
-  "server/xiaohongshu/driver.mjs", "server/xiaohongshu/jobs.mjs", "server/xiaohongshu/http.mjs", "server/xiaohongshu/README.md",
+  "server/xiaohongshu/driver.mjs", "server/xiaohongshu/image-evidence.mjs", "server/xiaohongshu/jobs.mjs", "server/xiaohongshu/http.mjs", "server/xiaohongshu/README.md",
 ];
 const staging = await mkdtemp(join(tmpdir(), "zhepage-local-package-"));
 try {

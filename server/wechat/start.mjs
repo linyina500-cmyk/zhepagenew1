@@ -61,6 +61,7 @@ function failed(error) {
 }
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
+process.on("SIGHUP", () => void shutdown());
 try {
   await listenLocalServers({ server, pairingServer, port, host: "127.0.0.1" });
   server.on("error", failed); pairingServer.on("error", failed);

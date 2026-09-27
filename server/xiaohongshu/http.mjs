@@ -12,7 +12,7 @@ export function createXhsHandler({ service }) {
       send(200, { account: await service.checkConnection() }); return true;
     }
     if (request.method === "POST" && url.pathname === "/api/xiaohongshu/login") {
-      await service.openLogin(); send(200, { opened: true }); return true;
+      send(200, await service.openLogin()); return true;
     }
     const match = /^\/api\/xiaohongshu\/jobs\/([^/]+)(\/verify|\/acknowledge)?$/.exec(url.pathname);
     if (match && JOB_ID.test(match[1])) {

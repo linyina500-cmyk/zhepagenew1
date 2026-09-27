@@ -1,6 +1,8 @@
 import type { DraftContent, DraftImage } from "../draftSync/types";
 import { localSyncFetch } from "../localSync/transport";
 export type XhsAccount = { id: string; name: string };
+export type XhsLoginState = { status: "connected"; account: XhsAccount }
+  | { status: "login_required" | "needs_attention"; message: string };
 export type XhsJob = {
   id: string; accountId: string; accountName: string; title: string;
   imageCount: number; uploadedCount: number; draftId?: string;
@@ -8,6 +10,22 @@ export type XhsJob = {
   message: string; acknowledged?: boolean;
 };
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+function parseLoginState(value: Record<string, unknown>): XhsLoginState {
+  if (value.status === "connected" && Object.keys(value).every((key) => ["status", "account"].includes(key))) {
+    const account = value.account;
+    if (record(account) && Object.keys(account).every((key) => ["id", "name"].includes(key))
+      && typeof account.id === "string" && /^[a-f0-9]{20}$/u.test(account.id)
+      && typeof account.name === "string" && account.name.trim() && account.name.length <= 100 && !/[\r\n\0]/u.test(account.name)) {
+      return { status: "connected", account: { id: account.id, name: account.name } };
+    }
+  }
+  if ((value.status === "login_required" || value.status === "needs_attention")
+    && Object.keys(value).every((key) => ["status", "message"].includes(key))
+    && typeof value.message === "string" && value.message.trim() && value.message.length <= 500 && !value.message.includes("\0")) {
+    return { status: value.status, message: value.message };
+  }
+  throw new Error("小红书登录结果未能确认，请检查专用窗口后重试。");
+}
 function parseJob(value: unknown, id: string, accountId: string): XhsJob {
   if (!record(value) || value.id !== id || value.accountId !== accountId || typeof value.accountName !== "string"
     || typeof value.title !== "string" || typeof value.message !== "string"
@@ -42,7 +60,7 @@ export function createXhsClient(token: string, fetcher: typeof fetch = localSync
       if (!record(value) || typeof value.id !== "string" || !value.id || typeof value.name !== "string" || !value.name) throw new Error("尚未识别到可核对的小红书账号，请在专用窗口完成登录。");
       return { id: value.id, name: value.name };
     },
-    async openLogin(signal: AbortSignal) { await request("/login", signal, "POST"); },
+    async openLogin(signal: AbortSignal): Promise<XhsLoginState> { return parseLoginState(await request("/login", signal, "POST")); },
     getJob,
     async createJob(input: { id: string; accountId: string; content: DraftContent; images: DraftImage[] }, signal: AbortSignal) {
       const body = new FormData();
@@ -61,18 +79,17 @@ export function createXhsClient(token: string, fetcher: typeof fetch = localSync
     async acknowledgeJob(id: string, accountId: string, signal: AbortSignal) {
       return parseJob((await request(`/jobs/${encodeURIComponent(id)}/acknowledge`, signal, "POST", JSON.stringify({ confirm: true }))).job, id, accountId);
     },
-    async waitForJob(initial: XhsJob, signal: AbortSignal, progress: (job: XhsJob) => void, timeoutMs = 90_000) {
+    async waitForJob(initial: XhsJob, signal: AbortSignal, progress: (job: XhsJob) => void) {
+      signal.throwIfAborted();
       let job = initial;
-      const deadline = Date.now() + timeoutMs;
-      while (["uploading", "creating"].includes(job.status) && Date.now() < deadline) {
+      while (["uploading", "creating"].includes(job.status)) {
         await new Promise<void>((resolve, reject) => {
           signal.throwIfAborted();
           const abort = () => { clearTimeout(timer); reject(signal.reason); };
-          const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, Math.min(1000, deadline - Date.now()));
+          const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 1000);
           signal.addEventListener("abort", abort, { once: true });
         });
-        if (Date.now() >= deadline) break;
-        job = await getJob(job.id, job.accountId, signal, Math.min(15_000, deadline - Date.now())); signal.throwIfAborted(); progress(job);
+        job = await getJob(job.id, job.accountId, signal); signal.throwIfAborted(); progress(job);
       }
       return job;
     },
