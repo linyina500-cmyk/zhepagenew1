@@ -32,7 +32,12 @@ export async function createWindowsControl({ pipePath, token, status, stop }) {
         if (request.action === "status") { socket.end(`${JSON.stringify({ ok: true, pid: process.pid, ready: state?.ready === true })}\n`); return; }
         if (!state || typeof state.busy !== "boolean") { socket.end('{"ok":false,"reason":"unknown"}\n'); return; }
         if (state.busy) { socket.end('{"ok":false,"reason":"busy"}\n'); return; }
-        socket.end('{"ok":true}\n', () => stop());
+        // Acceptance must not depend on the peer finishing its pipe read. On
+        // Windows the client can receive the ACK before end's callback runs.
+        // Start the graceful shutdown first; the owner keeps this pipe alive
+        // until its service has drained, which the controller checks below.
+        stop();
+        socket.end('{"ok":true}\n');
       } catch { socket.end('{"ok":false,"reason":"unknown"}\n'); }
     });
   });
@@ -44,8 +49,8 @@ export function windowsControlRequest({ pipePath, token, action, timeoutMs = 500
   return new Promise((resolve) => {
     const socket = createConnection(pipePath);
     let input = "", finished = false;
-    const finish = (result) => { if (finished) return; finished = true; socket.destroy(); resolve(result); };
-    socket.setTimeout(timeoutMs, () => finish(null));
+    const finish = (result) => { if (finished) return; finished = true; if (result === null) socket.destroy(); else socket.end(); resolve(result); };
+    socket.setTimeout(timeoutMs, () => { socket.destroy(); finish(null); });
     socket.on("error", () => finish(null));
     socket.on("connect", () => socket.write(`${JSON.stringify({ token, action })}\n`));
     socket.on("data", (chunk) => {

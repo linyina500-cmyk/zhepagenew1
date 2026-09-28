@@ -61,6 +61,26 @@ try {
   assert.deepEqual(architecture, { platform: process.platform, arch: process.arch });
   execFileSync(node, ["--input-type=module", "-e", "const {chromium}=await import('playwright');if(!chromium)throw Error('missing playwright')"], { cwd: directory, env });
   if (!structureOnly) {
+    // Launch the same installed Chrome channel, sandbox and direct-network
+    // flags as the production driver. Use an empty isolated profile and page:
+    // this exercises Windows/macOS browser launch without any platform account.
+    await run(node, ["--input-type=module", "-e", `
+      import { chromium } from "playwright";
+      import { mkdtemp, rm } from "node:fs/promises";
+      import { tmpdir } from "node:os";
+      import { join } from "node:path";
+      const profile = await mkdtemp(join(tmpdir(), "zhepage-browser-smoke-"));
+      let context;
+      try {
+        context = await chromium.launchPersistentContext(profile, {
+          channel: "chrome", headless: false, chromiumSandbox: true,
+          args: ["--no-proxy-server"], handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false,
+        });
+        const page = context.pages()[0] || await context.newPage();
+        await page.goto("about:blank");
+        if (await page.evaluate(() => document.readyState) !== "complete") throw Error("Chrome page was not ready");
+      } finally { if (context) await context.close(); await rm(profile, { recursive: true, force: true }); }
+    `]);
     assert.equal(await healthy(), false, "An existing helper is listening; stop it before this isolated smoke test");
     starter = spawn(node, ["server/wechat/local-control.mjs", "start", ...flags], { cwd: directory, env, windowsHide: true });
     starter.stdout.on("data", (chunk) => { output += chunk; }); starter.stderr.on("data", (chunk) => { output += chunk; });
@@ -68,6 +88,10 @@ try {
     starterClosed = new Promise((resolveClosed) => starter.once("close", (code) => resolveClosed(code)));
     started = true;
     await waitFor(healthy, "Fresh installation did not become ready");
+    // macOS start holds its controller lock until launchd readiness has been
+    // acknowledged. A listening API alone does not mean that command returned.
+    // Windows intentionally keeps the owner process running in its window.
+    if (process.platform === "darwin") assert.equal(await starterClosed, 0, `Startup process failed: ${output}`);
     const nonce = randomBytes(32).toString("hex");
     const paired = await fetch("http://127.0.0.1:8789/pair", { method: "POST", headers: { Origin: "https://feature-local-draft-sync.zhepagenew.pages.dev", "Content-Type": "application/json" }, body: JSON.stringify({ nonce }) });
     assert.equal(paired.status, 200);
@@ -84,7 +108,7 @@ try {
     stopped = true;
     if (process.platform === "darwin") await run(node, ["server/wechat/local-control.mjs", "uninstall", ...flags]);
   }
-  console.info(`Package ${platform}/${process.arch}: runtime, production dependencies, archive privacy${structureOnly ? "" : ", first start, pairing, authentication and graceful stop"} passed.`);
+  console.info(`Package ${platform}/${process.arch}: runtime, production dependencies, archive privacy${structureOnly ? "" : ", sandboxed Chrome launch, first start, pairing, authentication and graceful stop"} passed.`);
 } finally {
   if (started && !stopped && node) {
     try { await run(node, ["server/wechat/local-control.mjs", "stop", ...flags]); stopped = !await healthy(); if (stopped) await starterClosed; } catch { /* Preserve failed installation for diagnosis. */ }

@@ -15,7 +15,7 @@ async function fixture(t, status, stop) {
   const pipePath = process.platform === "win32" ? `\\\\.\\pipe\\zhepage-test-${randomUUID()}` : join(root, "control.sock");
   const server = await createWindowsControl({ pipePath, token, status, stop });
   t.after(async () => { await server.close(); await rm(root, { recursive: true, force: true }); });
-  return { pipePath, request: (action, secret = token) => windowsControlRequest({ pipePath, token: secret, action }) };
+  return { pipePath, close: () => server.close(), request: (action, secret = token) => windowsControlRequest({ pipePath, token: secret, action }) };
 }
 
 test("Windows first start launches once while repeat starts only check the same ready assistant", async () => {
@@ -69,4 +69,36 @@ test("Windows stop waits for the owner to finish draining and never escalates to
   assert.equal(await stopWindowsAssistant({ inspect: async () => ({ ok: true, pid: 42, ready: false }), requestStop: async () => { stops++; return { ok: true }; }, pause: async () => {}, attempts: 2 }), false);
   assert.equal(stops, 1);
   assert.equal(await stopWindowsAssistant({ inspect: async () => null, requestStop: never, pause: never }), true);
+});
+
+test("native stop acknowledges acceptance before the controller waits for explicit drain completion", { timeout: 5000 }, async (t) => {
+  const accepted = Promise.withResolvers(), drain = Promise.withResolvers(), drained = Promise.withResolvers(), waiting = Promise.withResolvers();
+  let completed = false, stops = 0;
+  const f = await fixture(t, async () => ({ ready: stops === 0, busy: false }), () => {
+    stops++; accepted.resolve();
+    void drain.promise.then(async () => { await f.close(); drained.resolve(); }).catch(drained.reject);
+  });
+  const operation = stopWindowsAssistant({ inspect: () => f.request("status"), requestStop: () => f.request("stop"),
+    pause: async () => { waiting.resolve(); await drained.promise; },
+  }).then((result) => { completed = true; return result; });
+  await accepted.promise;
+  await waiting.promise;
+  assert.equal(stops, 1);
+  assert.equal(completed, false, "an accepted stop is not yet a completed stop");
+  drain.resolve();
+  assert.equal(await operation, true);
+  assert.equal(completed, true);
+});
+
+test("an authenticated idle stop is not lost when its requesting client closes early", { timeout: 5000 }, async (t) => {
+  const checked = Promise.withResolvers(), release = Promise.withResolvers(), accepted = Promise.withResolvers();
+  const f = await fixture(t, async () => { checked.resolve(); await release.promise; return { ready: true, busy: false }; }, () => accepted.resolve());
+  const socket = createConnection(f.pipePath);
+  socket.on("error", () => {});
+  socket.on("connect", () => socket.write(`${JSON.stringify({ token, action: "stop" })}\n`));
+  await checked.promise;
+  const disconnected = new Promise((resolve) => socket.once("close", resolve));
+  socket.destroy(); await disconnected;
+  release.resolve();
+  await accepted.promise;
 });
