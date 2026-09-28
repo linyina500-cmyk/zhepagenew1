@@ -6,7 +6,7 @@ export const DRAFT_LIMITS = {
   wechat: { label: "公众号贴图", title: 20, body: 1000, topics: 10, images: 20, ratio: 4 / 5, sizeLabel: "4:5（1080 × 1350）" },
 } as const;
 export const MAX_IMAGE_BYTES = 10_000_000;
-export const MAX_TOTAL_IMAGE_BYTES = 60 * 1024 * 1024;
+export const MAX_TOTAL_IMAGE_BYTES = 40 * 1024 * 1024;
 export const countCharacters = (value: string) => Array.from(value).length;
 export const WECHAT_BODY_BYTES = 2048;
 export const countUtf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
@@ -29,7 +29,7 @@ export function validateDraft(platform: DraftPlatform, content: DraftContent, im
   if (platform === "wechat" && countUtf8Bytes(content.body) > WECHAT_BODY_BYTES) issues.push({ severity: "error", code: "body-bytes", message: `本工具的公众号贴图文案另设 ${WECHAT_BODY_BYTES} 字节上限，中文通常占 3 字节，请缩短后同步。内容不会自动截断。` });
   if (countHashtags(content.body) > limit.topics) issues.push({ severity: "error", code: "topics-long", message: `${limit.label}文案最多 ${limit.topics} 个话题，请减少 #话题 后同步` });
   if (!images.length || images.length > limit.images) issues.push({ severity: "error", code: "image-count", message: `${limit.label}本次同步需要 1–${limit.images} 张图片，当前 ${images.length} 张` });
-  if (images.reduce((sum, image) => sum + image.size, 0) > MAX_TOTAL_IMAGE_BYTES) issues.push({ severity: "error", code: "total-size", message: "本次图片总大小超过 60 MB，请减少图片或压缩后再同步" });
+  if (images.reduce((sum, image) => sum + image.size, 0) > MAX_TOTAL_IMAGE_BYTES) issues.push({ severity: "error", code: "total-size", message: "本次图片总大小超过 40 MiB，请减少图片或压缩后再同步" });
   for (const image of images) {
     const imageId = image.id;
     if (!["image/png", "image/jpeg"].includes(image.mime)) issues.push({ severity: "error", code: "image-type", imageId, message: `${image.name}：仅支持 PNG 或 JPEG` });

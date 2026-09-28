@@ -7,14 +7,17 @@ import ts from "typescript";
 import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const { WechatRequestError } = loadDomModule("lib/wechat/client.ts");
-const resetText = "重置本机连接";
-const confirmText = "确认清除本机连接";
+const resetText = "重置插件连接";
+const confirmText = "确认重置连接";
+const connectText = "检测插件";
 
-async function fixture(context, { empty = false } = {}) {
+async function fixture(context, { empty = false, initialConnection } = {}) {
   const dom = installDom(); globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const filename = fileURLToPath(new URL("../app/components/LocalSyncConnection.tsx", import.meta.url));
   const nativeRequire = createRequire(filename), React = nativeRequire("react"), { act } = React, { createRoot } = nativeRequire("react-dom/client");
+  let currentReady = false;
   const calls = [], events = []; let pairing = async () => ({ deviceId: "old-device", connectionToken: "paired-token" }), connection = async () => ({ deviceId: "old-device", busy: false }), disconnect = async () => {}, active;
+  if (initialConnection) connection = initialConnection;
   let currentBinding = { deviceId: "old-device", connectionToken: "old-token" }, currentAccounts = ["a", "b"].map((value) => ({ id: value.repeat(20), appId: `wx-${value}`, name: `公众号${value}` }));
   if (empty) { currentBinding = null; currentAccounts = []; }
   const client = { connectAccount: async (input) => { calls.push("connect-account"); return { id: "c".repeat(20), appId: input.appId, name: input.name }; }, getConnection: async () => { calls.push("connection"); return connection(); }, disconnectAccount: async (id) => { calls.push(`disconnect:${id}`); await disconnect(id); } };
@@ -40,19 +43,20 @@ async function fixture(context, { empty = false } = {}) {
   const Manager = loaded.exports.default, container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   function Host() {
     const [binding, setBinding] = React.useState(currentBinding), [accounts, setAccounts] = React.useState(currentAccounts), [busy, setBusy] = React.useState(false), [error, setError] = React.useState("");
-    return React.createElement(React.Fragment, null, React.createElement(Manager, { binding, accounts, busy, onChange(next, items) { currentBinding = next; currentAccounts = items; setBinding(next); setAccounts(items); },
+    return React.createElement(React.Fragment, null, React.createElement(Manager, { binding, accounts, busy, onReadyChange: (ready) => { currentReady = ready; }, onChange(next, items) { currentBinding = next; currentAccounts = items; setBinding(next); setAccounts(items); },
       runOperation: async (_label, operation) => { events.push("run"); active = new AbortController(); setBusy(true); setError(""); try { await operation(active.signal); } catch (error) { if (!active.signal.aborted) setError(error.message); } finally { setBusy(false); } },
     }), React.createElement("p", { role: "alert" }, error));
   }
   await act(async () => root.render(React.createElement(Host)));
+  const initialCalls = calls.splice(0);
   async function click(text) {
     const button = [...container.querySelectorAll("button")].find((node) => node.textContent === text);
     assert.ok(button, `visible action: ${text}`); assert.equal(button.disabled, false, `enabled action: ${text}`);
     await act(async () => button.click());
   }
   context.after(async () => { active?.abort(); await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = false; });
-  return { container, calls, events, click, act, set pairing(value) { pairing = value; }, get binding() { return currentBinding; }, get accounts() { return currentAccounts; }, set connection(value) { connection = value; }, set disconnect(value) { disconnect = value; },
-    acknowledgeStopped: () => act(async () => { container.querySelector('[aria-label="清除本机连接"] input[type="checkbox"]').click(); }),
+  return { container, calls, initialCalls, events, click, act, get ready() { return currentReady; }, set pairing(value) { pairing = value; }, get binding() { return currentBinding; }, get accounts() { return currentAccounts; }, set connection(value) { connection = value; }, set disconnect(value) { disconnect = value; },
+    acknowledgeStopped: () => act(async () => { container.querySelector('[aria-label="重置插件连接"] input[type="checkbox"]').click(); }),
     abort: () => active.abort(),
 
   };
@@ -70,7 +74,7 @@ test("recovery needs confirmation and disconnects every idle account before clea
 test("an unreachable old connection requires explicit shutdown acknowledgment and a fresh check", async (context) => {
   const f = await fixture(context); f.connection = async () => { throw new WechatRequestError("旧口令失效", 401); };
   await f.click(resetText); await f.click(confirmText);
-  assert.deepEqual(f.calls, ["connection"]); assert.match(f.container.textContent, /退出服务时清除/);
+  assert.deepEqual(f.calls, ["connection"]); assert.match(f.container.textContent, /先停用原插件或关闭原浏览器/);
   const confirm = [...f.container.querySelectorAll("button")].find((button) => button.textContent === confirmText);
   assert.equal(confirm.disabled, true); assert.equal(f.accounts.length, 2);
   await f.acknowledgeStopped(); await f.click(confirmText);
@@ -98,7 +102,7 @@ test("a task becoming busy during disconnect cannot be treated as an offline byp
   const f = await fixture(context); f.disconnect = async () => { throw new WechatRequestError("仍在处理", 409); };
   await f.click(resetText); await f.click(confirmText);
   assert.equal(f.calls.includes("clear-vault"), false); assert.match(f.container.textContent, /仍在处理任务/);
-  assert.equal(f.container.querySelector('[aria-label="清除本机连接"] input[type="checkbox"]'), null);
+  assert.equal(f.container.querySelector('[aria-label="重置插件连接"] input[type="checkbox"]'), null);
 });
 
 test("aborting a delayed recovery never performs a late local clear", async (context) => {
@@ -112,32 +116,35 @@ test("aborting a delayed recovery never performs a late local clear", async (con
 
 test("one-click connection starts once and preserves saved accounts", async (context) => {
   const f = await fixture(context), originalAccounts = [...f.accounts];
-  await f.click("连接这台电脑");
+  await f.click(connectText);
   assert.deepEqual(f.events.slice(0, 2), ["begin", "run"]);
   assert.deepEqual(f.calls, ["begin-connection", "connect-local", "save-binding", "close-connection"]);
   assert.deepEqual(f.binding, { deviceId: "old-device", connectionToken: "paired-token" });
   assert.deepEqual(f.accounts, originalAccounts);
-  assert.match(f.container.querySelector('[role="status"]').textContent, /连接/);
+  assert.equal(f.ready, true);
+  assert.match(f.container.querySelector('[role="status"]').textContent, /已连接/);
   assert.equal(f.container.querySelector('[role="alert"]').textContent, "");
 });
 
 test("the first connection has no credential or file fields", async (context) => {
   const f = await fixture(context, { empty: true });
-  const button = [...f.container.querySelectorAll("button")].find((node) => node.textContent === "连接这台电脑");
+  const button = [...f.container.querySelectorAll("button")].find((node) => node.textContent === connectText);
   assert.ok(button.classList.contains("primary"));
   assert.equal(f.container.querySelector("input"), null);
-  assert.match(f.container.textContent, /共用此连接/);
-  assert.match(f.container.textContent, /这台 Mac 上的 Chrome/);
-  assert.match(f.container.textContent, /安装一次.*随登录启动/);
-  assert.match(f.container.textContent, /无需上传文件或填写连接口令/);
-  assert.doesNotMatch(f.container.textContent, /config\.env|WECHAT_SYNC_TOKEN/);
-  assert.equal(f.container.querySelector(".draft-sync-connection-help").open, false);
+  assert.match(f.container.textContent, /小红书和公众号共用/);
+  assert.match(f.container.textContent, /Windows 和 Mac 使用同一份插件/);
+  assert.equal(f.container.querySelectorAll('.draft-sync-extension-download').length, 1);
+  assert.match(f.container.textContent, /加载已解压的扩展程序/);
+  assert.match(f.container.textContent, /无需安装电脑程序、上传配置文件或填写连接口令/);
+  assert.doesNotMatch(f.container.textContent, /config\.env|WECHAT_SYNC_TOKEN|本机助手|NativeMessaging/);
+  assert.equal(f.container.querySelector(".draft-sync-extension-guide").open, false);
+  assert.equal(f.container.querySelectorAll(".draft-sync-setup-steps > li").length, 3);
   assert.deepEqual(f.calls, []);
 });
 
 test("saved connection is compact and its settings stay collapsed", async (context) => {
   const f = await fixture(context);
-  assert.equal(f.container.querySelector(".draft-sync-connection-saved strong").textContent, "本机连接已保存");
+  assert.equal(f.container.querySelector(".draft-sync-connection-saved strong").textContent, "插件已连接");
   const settings = f.container.querySelector(".draft-sync-connection-saved details");
   assert.equal(settings.querySelector("summary").textContent, "连接设置");
   assert.equal(settings.open, false);
@@ -148,7 +155,7 @@ test("saved connection is compact and its settings stay collapsed", async (conte
 test("cancelled pairing cleans up without changing browser credentials", async (context) => {
   const f = await fixture(context); let finish;
   f.pairing = () => new Promise((resolve) => { finish = resolve; });
-  await f.click("连接这台电脑"); f.abort();
+  await f.click(connectText); f.abort();
   await f.act(async () => finish({ deviceId: "old-device", connectionToken: "late-token" }));
   assert.equal(f.calls.includes("save-binding"), false);
   assert.equal(f.calls.at(-1), "close-connection");
@@ -157,22 +164,72 @@ test("cancelled pairing cleans up without changing browser credentials", async (
 
 test("pairing failures clean up and surface a useful error without saving", async (context) => {
   const f = await fixture(context);
-  f.pairing = async () => { throw new Error("请先打开本机同步工具，再试一次。"); };
-  await f.click("连接这台电脑");
+  f.pairing = async () => { throw new Error("请先加载并启用折页插件，再试一次。"); };
+  await f.click(connectText);
   assert.equal(f.calls.includes("save-binding"), false);
   assert.equal(f.calls.at(-1), "close-connection");
-  assert.match(f.container.querySelector('[role="alert"]').textContent, /打开本机同步工具/);
+  assert.match(f.container.querySelector('[role="alert"]').textContent, /加载并启用折页插件/);
 });
 
 test("pairing errors appear inside the connection region and the button permits a retry", async (context) => {
   const f = await fixture(context, { empty: true });
-  f.pairing = async () => { throw new Error("若 Chrome 提示访问本机，请允许后重试。"); };
-  await f.click("连接这台电脑");
-  assert.match(f.container.querySelector('.draft-sync-connection [role="alert"]').textContent, /访问本机，请允许/);
+  f.pairing = async () => { throw new Error("未检测到折页插件，请确认已经加载并启用。"); };
+  await f.click(connectText);
+  assert.match(f.container.querySelector('.draft-sync-connection [role="alert"]').textContent, /已[经]?加载并启用/);
   assert.equal(f.calls.includes("save-binding"), false);
   f.pairing = async () => ({ deviceId: "old-device", connectionToken: "paired-token" });
-  await f.click("连接这台电脑");
+  await f.click(connectText);
   assert.equal(f.container.querySelector('.draft-sync-connection [role="alert"]'), null);
   assert.equal(f.binding.connectionToken, "paired-token");
   assert.equal(f.calls.filter((call) => call === "close-connection").length, 2);
+});
+
+
+test("saved credentials are checked without pairing or disclosing any account secret", async (context) => {
+  const f = await fixture(context);
+  assert.deepEqual(f.initialCalls, ["connection"]);
+  assert.equal(f.ready, true);
+  assert.equal(f.container.querySelector(".draft-sync-connection").dataset.connected, "true");
+});
+
+test("a new browser is offered one extension ZIP for Windows and Mac before detecting", async (context) => {
+  const f = await fixture(context, { empty: true });
+  assert.deepEqual(f.initialCalls, []);
+  assert.equal(f.ready, false);
+  const links = [...f.container.querySelectorAll(".draft-sync-extension-download")];
+  assert.equal(links.length, 1);
+  assert.ok(links[0].href.endsWith("/downloads/zhepage-draft-extension.zip"));
+  assert.ok(links[0].hasAttribute("download"));
+  assert.equal(f.container.querySelector(".draft-sync-connection-saved"), null);
+});
+
+test("an unavailable saved extension is not shown as connected and credentials are retained", async (context) => {
+  const f = await fixture(context, { initialConnection: async () => { throw new Error("offline"); } });
+  assert.equal(f.ready, false);
+  assert.equal(f.container.querySelector(".draft-sync-connection-saved"), null);
+  assert.match(f.container.textContent, /确认 Chrome 中已加载并启用折页插件/);
+  assert.equal(f.binding.connectionToken, "old-token");
+  assert.equal(f.accounts.length, 2);
+  assert.equal(f.calls.includes("clear-vault"), false);
+  assert.equal(f.container.querySelector(".draft-sync-extension-guide").open, false);
+});
+
+test("a mismatched extension never enables platform actions", async (context) => {
+  const f = await fixture(context, { initialConnection: async () => ({ deviceId: "different-computer" }) });
+  assert.equal(f.ready, false);
+  assert.match(f.container.textContent, /插件身份已变化/);
+  assert.match(f.container.textContent, /先重置连接，再重新添加公众号/);
+  assert.equal([...f.container.querySelectorAll("button")].some((button) => button.textContent === connectText), false);
+  assert.equal(f.binding.deviceId, "old-device");
+});
+
+test("returning from the extension settings rechecks availability", async (context) => {
+  const f = await fixture(context);
+  f.connection = async () => { throw new Error("stopped"); };
+  await f.act(async () => window.dispatchEvent(new window.Event("focus")));
+  assert.equal(f.ready, false);
+  assert.equal(f.container.querySelector(".draft-sync-connection-saved"), null);
+  f.connection = async () => ({ deviceId: "old-device" });
+  await f.act(async () => window.dispatchEvent(new window.Event("focus")));
+  assert.equal(f.ready, true);
 });

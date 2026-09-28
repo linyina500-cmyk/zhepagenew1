@@ -91,6 +91,18 @@
 .draft-sync-connection .primary { min-height: 44px; padding: 11px 24px; font-size: 13px; }
 .draft-sync-connection summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; }
 .draft-sync-connection-help { margin-top: 18px; }
+.draft-sync-connection-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.draft-sync-extension-download { display: inline-flex; flex-direction: column; justify-content: center; min-height: 44px; padding: 8px 16px; border: 1px solid #d9dce2; border-radius: 9px; color: var(--ink); background: #fff; font-size: 12px; font-weight: 700; text-decoration: none; }
+.draft-sync-extension-download:hover { border-color: var(--brown); background: #fffafa; }
+.draft-sync-extension-download:focus-visible { outline: 2px solid var(--brown); outline-offset: 3px; }
+.draft-sync-extension-download span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; font-weight: 400; }
+.draft-sync-connection-help > .draft-sync-extension-download { margin-top: 12px; }
+.draft-sync-setup-steps { display: grid; gap: 16px; margin: 16px 0 0; padding: 0 0 0 20px; font-size: 12px; }
+.draft-sync-setup-steps > li { padding-left: 4px; }
+.draft-sync-setup-steps > li::marker { color: var(--brown); font-weight: 700; }
+.draft-sync-setup-steps strong { color: var(--ink); font-size: 12px; }
+.draft-sync-setup-steps p { max-width: 70ch; margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.draft-sync-setup-steps code { padding: 2px 5px; border-radius: 4px; background: #edeae6; color: var(--ink); overflow-wrap: anywhere; }
 .draft-sync-connection-saved { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
 .draft-sync-connection:has(.draft-sync-connection-saved) { padding: 13px 16px; border-color: #dce7dd; background: #f7faf7; }
 .draft-sync-connection-saved > strong { display: flex; align-items: center; gap: 8px; color: #426c4d; font-size: 12px; }
@@ -122,6 +134,8 @@
   .draft-sync-columns { grid-template-columns: minmax(0, 1fr); gap: 26px; }
   .draft-sync-service { padding: 16px; }
   .draft-sync-connection { padding: 20px 16px; }
+  .draft-sync-connection-actions { align-items: stretch; }
+  .draft-sync-connection-actions > button, .draft-sync-connection-actions > a { flex: 1 1 auto; text-align: center; }
   .draft-sync-image-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .draft-sync-archive { padding: 13px; }
   .draft-sync-footer { flex-direction: column; align-items: stretch; padding: 12px 16px; gap: 11px; }

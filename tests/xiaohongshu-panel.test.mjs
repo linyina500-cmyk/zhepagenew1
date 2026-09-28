@@ -221,11 +221,11 @@ test("an account rejection from submission retains the receipt and cannot become
 });
 
 
-test("a changed local device stops login and account checks without sending platform content", async (t) => {
+test("a changed extension identity stops login and account checks without sending platform content", async (t) => {
   const f = await fixture(t, { wrongDevice: true });
   await f.click("打开登录窗口"); await f.click("我已登录");
   assert.equal(f.errors.length, 2);
-  assert.ok(f.errors.every((error) => /不是原来绑定的电脑/.test(error.message)));
+  assert.ok(f.errors.every((error) => /插件连接已变化/.test(error.message)));
   assert.deepEqual(f.calls, []); assert.deepEqual(f.saves, []);
   assert.equal(f.button("同步到小红书草稿箱"), undefined);
 });

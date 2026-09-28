@@ -1,16 +1,6 @@
 name: Local helper packages
 
 on:
-  pull_request:
-    paths:
-      - 'server/**'
-      - 'lib/wechat/api.mjs'
-      - 'build/pack-local-sync.mjs'
-      - 'build/test-local-sync-package.mjs'
-      - 'build/local-sync-package-readme.txt'
-      - 'tests/local-*.test.mjs'
-      - 'package-lock.json'
-      - '.github/workflows/helper-packages.yml'
   workflow_dispatch:
 
 permissions:

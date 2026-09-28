@@ -108,7 +108,7 @@ export function createWechatClient(password: string, fetcher: typeof fetch = loc
   }
   return {
     async getConnection(signal: AbortSignal): Promise<{ deviceId: string; busy?: boolean }> {
-      const unavailable = "暂时连不上本机助手。请先打开折页同步助手，再在连接设置中点击连接这台电脑。";
+      const unavailable = "尚未检测到折页插件。请在 Chrome 扩展页加载并启用插件，再回到这里检测。";
       try {
         const data = await request("/connection", signal);
         signal.throwIfAborted();
@@ -119,7 +119,7 @@ export function createWechatClient(password: string, fetcher: typeof fetch = loc
         if (error instanceof LocalSyncBrowserError) throw error;
         if (error instanceof Error && error.name === "AbortError") throw error;
         if (error instanceof WechatRequestError) {
-          if (error.status === 401) throw new WechatRequestError("连接信息已失效，请在连接设置中重新连接这台电脑。", error.status);
+          if (error.status === 401) throw new WechatRequestError("连接信息已失效，请在连接设置中重新检测插件。", error.status);
           if (error.status === 502 || error.status === 503) throw new WechatRequestError(unavailable, error.status);
           throw error;
         }
@@ -178,7 +178,7 @@ export function createWechatClient(password: string, fetcher: typeof fetch = loc
       }
       return publication;
     },
-    async waitForJob(initial: WechatJob, signal: AbortSignal, onProgress: (job: WechatJob) => void, timeoutMs = 90_000) {
+    async waitForJob(initial: WechatJob, signal: AbortSignal, onProgress: (job: WechatJob) => void, timeoutMs = 720_000) {
       let job = initial;
       const deadline = Date.now() + timeoutMs;
       while (!terminal(job) && Date.now() < deadline) {

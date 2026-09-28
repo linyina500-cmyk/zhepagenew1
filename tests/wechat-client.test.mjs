@@ -27,7 +27,7 @@ test("connection checks are read-only and credentials stay in the Authorization 
 
 test("connection failures explain how to reconnect and retain HTTP status for recovery", async () => {
   for (const status of [401, 502, 503]) {
-    const expected = status === 401 ? "连接信息已失效，请在连接设置中重新连接这台电脑。" : "暂时连不上本机助手。请先打开折页同步助手，再在连接设置中点击连接这台电脑。";
+    const expected = status === 401 ? "连接信息已失效，请在连接设置中重新检测插件。" : "尚未检测到折页插件。请在 Chrome 扩展页加载并启用插件，再回到这里检测。";
     for (const response of [() => reply({ error: "连接口令错误或服务回应不完整" }, status), () => new Response("upstream unavailable", { status })]) {
       let calls = 0;
       const client = createWechatClient("pass", async () => { calls++; return response(); });
@@ -45,7 +45,7 @@ test("network and malformed connection responses direct users back to the local 
     ...[null, [], {}, { deviceId: "" }, { deviceId: "device", busy: "yes" }].map((value) => async () => reply(value)),
   ];
   for (const fetcher of responses) {
-    await assert.rejects(createWechatClient("pass", fetcher).getConnection(signal()), (error) => error.message === "暂时连不上本机助手。请先打开折页同步助手，再在连接设置中点击连接这台电脑。");
+    await assert.rejects(createWechatClient("pass", fetcher).getConnection(signal()), (error) => error.message === "尚未检测到折页插件。请在 Chrome 扩展页加载并启用插件，再回到这里检测。");
   }
 });
 
@@ -75,7 +75,7 @@ test("connection cancellation preserves its reason without a reconnect warning",
 test("unsupported browser instructions survive connection error handling unchanged", async () => {
   const failure = new LocalSyncBrowserError();
   const client = createWechatClient("pass", async () => { throw failure; });
-  await assert.rejects(client.getConnection(signal()), (error) => error === failure && /这台 Mac 上的 Chrome/.test(error.message));
+  await assert.rejects(client.getConnection(signal()), (error) => error === failure && /Windows 或 Mac 电脑的 Chrome/.test(error.message));
 });
 
 test("create sends complete original images in order and exact independent copy once", async () => {

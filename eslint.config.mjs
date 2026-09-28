@@ -15,6 +15,7 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  { files: ["browser-extension/**/*.mjs"], languageOptions: { globals: globals.webextensions } },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   react.configs.flat.recommended,

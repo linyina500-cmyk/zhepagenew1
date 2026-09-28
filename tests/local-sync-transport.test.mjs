@@ -1,68 +1,51 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-import { loadDomModule } from "./helpers/load-dom-module.mjs";
-const { localSyncFetch, LocalSyncBrowserError, assertLocalSyncBrowser } = loadDomModule("lib/localSync/transport.ts");
-
-function browser(t, userAgent, platform = "MacIntel", maxTouchPoints = 0) {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { userAgent, platform, maxTouchPoints } });
-  t.after(() => { if (previous) Object.defineProperty(globalThis, "navigator", previous); else delete globalThis.navigator; });
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { loadDomModule } from './helpers/load-dom-module.mjs';
+import { decodeBody } from '../browser-extension/protocol.mjs';
+const { localSyncFetch, LocalSyncBrowserError, assertLocalSyncBrowser, DRAFT_EXTENSION_ID } = loadDomModule('lib/localSync/transport.ts');
+function chromeFixture(t, handler) {
+  const old = globalThis.chrome;
+  globalThis.chrome = { runtime: { sendMessage: handler } };
+  t.after(() => { globalThis.chrome = old; });
+  t.mock.method(globalThis, 'fetch', () => assert.fail('extension transport must not call network or localhost'));
 }
-
-test("Safari and iOS stop with a browser instruction before any local request", async (t) => {
-  for (const [name, agent, platform, touches] of [
-    ["Safari", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15", "MacIntel", 0],
-    ["iPhone Chrome", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/130.0 Mobile/15E148 Safari/604.1", "iPhone", 5],
-    ["iPad desktop mode", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15", "MacIntel", 5],
-  ]) {
-    await t.test(name, (t) => {
-      browser(t, agent, platform, touches);
-      t.mock.method(globalThis, "fetch", () => assert.fail("unsupported browser reached network"));
-      assert.throws(assertLocalSyncBrowser, LocalSyncBrowserError);
-      for (const path of ["/api/wechat/connection", "/api/xiaohongshu/account"]) {
-        assert.throws(() => localSyncFetch(path), (error) => error instanceof LocalSyncBrowserError && error.message === "请使用这台 Mac 上的 Chrome 浏览器连接本机助手，当前浏览器不支持此连接。");
-      }
-    });
+function browser(t, agent, platform='MacIntel', maxTouchPoints=0) {
+  const old=Object.getOwnPropertyDescriptor(globalThis,'navigator');
+  Object.defineProperty(globalThis,'navigator',{ configurable:true,value:{userAgent:agent,platform,maxTouchPoints} });
+  t.after(()=> {if(old)Object.defineProperty(globalThis,'navigator',old);else delete globalThis.navigator;});
+}
+test('unsupported browsers explain the desktop Chrome requirement before any operation', async t => {
+  for (const agent of ['Android Chrome/140.0 Mobile','iPhone CriOS/130.0','AppleWebKit/605 Safari/605','Firefox/130']) {
+    await t.test(agent,t=> {browser(t,agent);assert.throws(assertLocalSyncBrowser,LocalSyncBrowserError);});
   }
 });
-
-test("desktop Chrome, Chromium, Edge and Firefox keep their local connection", async (t) => {
-  for (const agent of [
-    "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chromium/140.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Edg/140.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh) Gecko/20100101 Firefox/130.0",
-  ]) {
-    await t.test(agent, async (t) => {
-      browser(t, agent);
-      let calls = 0;
-      t.mock.method(globalThis, "fetch", async () => { calls++; return new Response("{}"); });
-      assert.doesNotThrow(assertLocalSyncBrowser);
-      await localSyncFetch("/api/wechat/connection");
-      assert.equal(calls, 1);
-    });
+test('Windows and Mac Chromium are supported', async t => {
+  for(const agent of ['Windows Chrome/140.0','Macintosh Chrome/140.0','Windows Edg/140.0','Macintosh Chromium/140.0']) {
+    await t.test(agent,t=> {browser(t,agent);assert.doesNotThrow(assertLocalSyncBrowser);});
   }
 });
-test("both platforms send credentials and complete bodies only to this computer", async (t) => {
-  const calls = [];
-  t.mock.method(globalThis, "fetch", async (...args) => { calls.push(args); return new Response("{}"); });
-  for (const path of ["/api/wechat/accounts/abcd/jobs", "/api/xiaohongshu/jobs/fixture/verify"]) {
-    const body = new FormData(); body.append("images", new Blob(["full image bytes"]), "1.png");
-    const signal = new AbortController().signal;
-    await localSyncFetch(path, { method: "POST", headers: { Authorization: "Bearer synthetic-token" }, body, signal });
-    const [url, options] = calls.at(-1);
-    assert.equal(url, `http://127.0.0.1:8788${path}`);
-    assert.equal(options.body, body); assert.equal(options.signal, signal);
-    assert.equal(options.headers.Authorization, "Bearer synthetic-token");
-    assert.equal(options.redirect, "error"); assert.equal(options.credentials, "omit");
-    assert.equal(options.mode, "cors"); assert.equal(options.cache, "no-store");
-    assert.equal(options.targetAddressSpace, "loopback");
-  }
-  assert.equal(calls.length, 2);
+test('images preserve exact bytes, order, names, and fields through JSON extension messaging', async t => {
+  const calls=[];
+  chromeFixture(t,(id,message,callback)=>{calls.push({id,message});callback({status:202,body:{accepted:true}});});
+  const form=new FormData();form.append('title','标题');form.append('body','两行\n正文');
+  for (const name of ['2.png','1.png']) form.append('images',new Blob([new Uint8Array([0,255,24,128])],{type:'image/png'}),name);
+  const response=await localSyncFetch('/api/xiaohongshu/jobs',{method:'POST',headers:{Authorization:'Bearer '+ 'b'.repeat(64)},body:form});
+  assert.equal(response.status,202);assert.deepEqual(await response.json(),{accepted:true});
+  assert.equal(calls[0].id,DRAFT_EXTENSION_ID);assert.equal(calls[0].message.token,'b'.repeat(64));
+  const restored=decodeBody(JSON.parse(JSON.stringify(calls[0].message.body)));
+  assert.equal(restored.get('body'),'两行\n正文');assert.deepEqual(restored.getAll('images').map(x=>x.name),['2.png','1.png']);
+  assert.deepEqual([...new Uint8Array(await restored.get('images').arrayBuffer())],[0,255,24,128]);
 });
-test("untrusted destinations and credentials in URLs cannot reach fetch", (t) => {
-  t.mock.method(globalThis, "fetch", () => assert.fail("invalid address reached network"));
-  for (const input of ["https://example.com/api/wechat/connection", "//example.com/api/wechat/connection", "/api/wechat/connection?token=secret", "/api/wechat/../pair", "/pair", new URL("http://127.0.0.1:8788/api/wechat/connection")]) {
-    assert.throws(() => localSyncFetch(input), /地址无效/);
-  }
+test('invalid routes cannot reach extension or network',t=>{
+  chromeFixture(t,()=>assert.fail('invalid route reached extension'));
+  for(const path of ['https://example.com/api/wechat/connection','/api/wechat/../pair','/api/wechat/connection?token=secret','/pair']) assert.throws(()=>localSyncFetch(path),/地址无效/);
+});
+test('missing extension and runtime failure get setup instructions',async t=>{
+  chromeFixture(t,(_id,_message,callback)=>{globalThis.chrome.runtime.lastError={message:'No receiver'};callback();delete globalThis.chrome.runtime.lastError;});
+  await assert.rejects(localSyncFetch('/api/wechat/connection'),/Chrome 扩展页/);
+});
+test('abort releases a pending extension request and never resends writes',async t=>{
+  let count=0;chromeFixture(t,()=>{count++;});const controller=new AbortController();
+  const pending=localSyncFetch('/api/wechat/accounts/connect',{method:'POST',body:'{}',signal:controller.signal});
+  await new Promise(r=>setImmediate(r));controller.abort();await assert.rejects(pending,{name:'AbortError'});assert.equal(count,1);
 });

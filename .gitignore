@@ -15,3 +15,4 @@ test-results/
 .wechat-sync-data/
 .wechat-sync-local/
 dist-wechat/
+dist-extension/

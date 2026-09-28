@@ -74,6 +74,7 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
   const [binding, setBinding] = useState<Binding | null>(null);
   const [accounts, setAccounts] = useState<LocalWechatAccount[]>([]);
   const [connectionLoading, setConnectionLoading] = useState(true);
+  const [connectionReady, setConnectionReady] = useState(false);
   const [connectionError, setConnectionError] = useState("");
 
   const feedback = feedbackByPlatform[platform];
@@ -384,15 +385,15 @@ export default function DraftSyncDialog({ open, openerRef, title, sourceFormat, 
         {draft && <div className="draft-sync-destination">
           {connectionLoading && !binding ? <p className="draft-sync-small" role="status">正在恢复这台电脑的连接…</p> : <>
             {connectionError && <p className="draft-sync-message error" role="alert">{connectionError}</p>}
-            <LocalSyncConnection binding={binding} accounts={accounts} busy={anyBusy || connectionLoading} runOperation={runOperation} onChange={changeConnection} />
+            <LocalSyncConnection binding={binding} accounts={accounts} busy={anyBusy || connectionLoading} runOperation={runOperation} onChange={changeConnection} onReadyChange={setConnectionReady} />
             {binding && PLATFORMS.map((target) => {
               const prepared = preparedByPlatform[target];
               const snapshot = { ...draft, images: prepared.images || draft.images };
               const ready = sourceReady && Boolean(prepared.images) && !prepared.preparing && !prepared.error && (!draft.risk || confirmedRisk[target] === draft.risk.notes[target]) && !validateDraft(target, draft.content[target], snapshot.images.map(imageMetadata)).some((issue) => issue.severity === "error");
-              const props = { draft: snapshot, binding, contentReady: ready, contentCheck: platformContentCheck(target), contentChanged: contentChanged[target], busy: Boolean(connectionLoading || operations.local || operations[target]),
+              const props = { draft: snapshot, binding, contentReady: ready, contentCheck: platformContentCheck(target), contentChanged: contentChanged[target], busy: Boolean(!connectionReady || connectionLoading || operations.local || operations[target]),
                 runOperation: (label: string, operation: (signal: AbortSignal) => Promise<void>) => runOperation(label, operation, target, target),
                 persistReceipt: persistWechatReceipt, onSubmitted: () => { setContentChanged((current) => ({ ...current, [target]: false })); } };
-              return <div key={target} hidden={platform !== target}>
+              return <div key={`${target}:${binding.deviceId}`} hidden={platform !== target || !connectionReady}>
                 {target === "wechat" ? <WechatDraftPanel {...props} view="browser" accounts={accounts} onAccountsChange={changeConnection} /> : <XiaohongshuDraftPanel {...props} />}
               </div>;
             })}

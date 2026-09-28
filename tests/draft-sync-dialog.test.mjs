@@ -17,16 +17,21 @@ async function fixture(t, options = {}) {
   const React = native("react"), { act } = React, { createRoot } = native("react-dom/client");
   let saved = null, saveOverride, closed = 0, collectError = null, collectCalls = 0;
   const panels = {};
-  const saves = [], batches = [], panelRenders = [], bindingReads = [], accountReads = [];
+  const saves = [], batches = [], panelRenders = [], bindingReads = [], accountReads = [], uploads = [];
   const binding = { deviceId: "fixture-device", connectionToken: "fixture-private-token" };
   const accounts = [{ id: "a".repeat(20), name: "已保存的公众号", appId: "wx-existing" }];
   const Panel = (platform) => function TestPanel(props) { panels[platform] = props; panelRenders.push(props); return React.createElement("p", { "data-testid": "platform-panel" }, "平台操作测试边界"); };
   const XhsPanel = Panel("xiaohongshu"), WechatPanel = Panel("wechat");
   // eslint-disable-next-line react/prop-types -- Test boundary for the typed connection component.
-  function Connection(props) { return React.createElement("section", { "data-testid": "shared-connection" }, props.binding ? "本机连接已保存" : React.createElement("button", { onClick: () => props.onChange(binding, accounts) }, "连接这台电脑")); }
+  function Connection(props) { const { binding: savedBinding, onReadyChange } = props; React.useEffect(() => { onReadyChange(Boolean(savedBinding)); }, [savedBinding, onReadyChange]); return React.createElement("section", { "data-testid": "shared-connection" }, props.binding ? "本机连接已保存" : React.createElement("button", { onClick: () => props.onChange(binding, accounts) }, "连接这台电脑")); }
   const require = (specifier) => {
-    if (specifier === "./WechatDraftPanel") return { default: WechatPanel, __esModule: true };
-    if (specifier === "./XiaohongshuDraftPanel") return { default: XhsPanel, __esModule: true };
+    if (specifier === "./WechatDraftPanel") return options.realPanels ? loadComponent("WechatDraftPanel.tsx") : { default: WechatPanel, __esModule: true };
+    if (specifier === "./XiaohongshuDraftPanel") return options.realPanels ? loadComponent("XiaohongshuDraftPanel.tsx") : { default: XhsPanel, __esModule: true };
+    if (specifier === "./WechatAccountManager") return { default: () => null, __esModule: true };
+    if (specifier === "../../lib/wechat/client") return { createWechatClient: () => ({ getConnection: async () => ({ deviceId: binding.deviceId }), createJob: async (input) => { uploads.push(input); throw new Error("Unexpected upload"); } }) };
+    if (specifier === "../../lib/xiaohongshu/client") return { createXhsClient: () => ({ getAccount: async () => ({ id: "b".repeat(20), name: "测试小红书" }), createJob: async (input) => { uploads.push(input); throw new Error("Unexpected upload"); } }) };
+    if (specifier === "../../lib/wechat/contentIdentity") return loadDomModule("lib/wechat/contentIdentity.ts");
+    if (specifier === "../../lib/wechat/features") return loadDomModule("lib/wechat/features.ts");
     if (specifier === "../hooks/usePlatformImages") return { usePlatformImages: (source, target, note, confirmed) => {
       const images = React.useMemo(() => source ? source.map((image, index) => ({ ...image, height: target === "wechat" ? 1350 : 1440, blob: index === source.length - 1 && note && confirmed ? new Blob([image.blob, note.title + note.text], { type: "image/png" }) : target === "wechat" ? new Blob([image.blob, "wechat adapted"], { type: "image/png" }) : image.blob })) : null, [source, target, note, confirmed]);
       return { images, preparing: false, error: "" };
@@ -44,13 +49,17 @@ async function fixture(t, options = {}) {
     };
     return native(specifier);
   };
-  const { outputText } = ts.transpileModule(readFileSync(filename, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } });
-  const loaded = { exports: {} }; new Function("require", "module", "exports", outputText)(require, loaded, loaded.exports);
+  function loadComponent(component) {
+    const { outputText } = ts.transpileModule(readFileSync(new URL(`../app/components/${component}`, import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } });
+    const loaded = { exports: {} }; new Function("require", "module", "exports", outputText)(require, loaded, loaded.exports);
+    return loaded.exports;
+  }
+  const loaded = { exports: loadComponent("DraftSyncDialog.tsx") };
   const container = document.createElement("div"), opener = document.createElement("button"); document.body.append(opener, container);
   const root = createRoot(container);
   const props = {
     open: true, openerRef: { current: opener }, title: "用户完整文章", sourceFormat: "xiaohongshu", canCollect: true,
-    collectAssets: async () => { collectCalls++; if (collectError) throw collectError; const images = Array.from({ length: 3 }, (_, i) => ({ id: crypto.randomUUID(), name: `第${i + 1}页.png`, width: 1080, height: 1440, blob: new Blob([`full page ${batches.length}:${i}`], { type: "image/png" }) })); if (options.risk) images.at(-1).riskTemplate = { svg: "<svg/>" }; batches.push(images); return images; },
+    collectAssets: async () => { collectCalls++; if (collectError) throw collectError; const images = options.images ?? Array.from({ length: 3 }, (_, i) => ({ id: crypto.randomUUID(), name: `第${i + 1}页.png`, width: 1080, height: 1440, blob: new Blob([`full page ${batches.length}:${i}`], { type: "image/png" }) })); if (options.risk) images.at(-1).riskTemplate = { svg: "<svg/>" }; batches.push(images); return images; },
     ...(options.risk ? { riskNote: { enabled: true, title: "提示", text: "投资有风险" } } : {}),
     onClose: () => { closed++; root.render(null); }, onReturnToEditor: () => root.render(null),
   };
@@ -66,7 +75,7 @@ async function fixture(t, options = {}) {
   }
   t.after(async () => { await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = oldAct; });
   await act(async () => root.render(React.createElement(loaded.exports.default, props)));
-  return { container, opener, act, click, change, batches, saves, binding, accounts, panelRenders, bindingReads, accountReads, get saved() { return saved; }, panels, get panel() { return panels[container.querySelector(".draft-sync-platforms button[aria-pressed=true]")?.textContent.startsWith("小红书") ? "xiaohongshu" : "wechat"]; }, get closed() { return closed; }, set saveOverride(value) { saveOverride = value; }, set collectError(value) { collectError = value; }, get collectCalls() { return collectCalls; }, reopen: (change = {}) => act(async () => root.render(React.createElement(loaded.exports.default, Object.assign(props, change)))) };
+  return { container, opener, act, click, change, batches, saves, uploads, binding, accounts, panelRenders, bindingReads, accountReads, get saved() { return saved; }, panels, get panel() { return panels[container.querySelector(".draft-sync-platforms button[aria-pressed=true]")?.textContent.startsWith("小红书") ? "xiaohongshu" : "wechat"]; }, get closed() { return closed; }, set saveOverride(value) { saveOverride = value; }, set collectError(value) { collectError = value; }, get collectCalls() { return collectCalls; }, reopen: (change = {}) => act(async () => root.render(React.createElement(loaded.exports.default, Object.assign(props, change)))) };
 }
 const pending = (platform, id) => ({ platform, accountId: id, jobId: crypto.randomUUID(), status: "needs_confirmation", message: "结果待核对" });
 
@@ -208,6 +217,23 @@ test("oversize title is explained beside its input without silent truncation", a
   await f.change("#draft-platform-title", "短标题");
   assert.equal(input.getAttribute("aria-invalid"), "false");
   assert.equal(f.panel.contentReady, true);
+});
+
+test("images over 40 MiB cannot submit or create pending receipts in either actual platform panel", async (t) => {
+  const blob = new Blob([new Uint8Array(9 * 1024 * 1024)], { type: "image/png" });
+  const images = Array.from({ length: 5 }, (_, index) => ({ id: `large-${index}`, name: `${index}.png`, width: 1080, height: 1440, blob }));
+  const f = await fixture(t, { realPanels: true, images });
+  await f.click("我已登录");
+  for (const [index, label] of [[0, "同步到小红书草稿箱"], [1, "同步到草稿箱"]]) {
+    await f.click(f.container.querySelectorAll(".draft-sync-platforms button")[index]);
+    const button = [...f.container.querySelectorAll("button")].find((element) => element.textContent === label);
+    assert.ok(button); assert.equal(button.disabled, true);
+    assert.match(button.closest(index ? ".draft-sync-wechat" : ".draft-sync-xhs").textContent, /图片总大小超过 40 MiB/);
+    await f.act(async () => button.click());
+  }
+  assert.deepEqual(f.uploads, []);
+  assert.deepEqual(f.saves, [], "validation must stop before a pending receipt is persisted");
+  assert.equal(f.saved, null);
 });
 
 test("risk copy and confirmation are separate per platform and edits regenerate only that final page", async (t) => {

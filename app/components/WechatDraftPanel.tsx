@@ -24,6 +24,7 @@ const publicationLabels: Record<WechatPublication["status"], string> = { submitt
 const message = (error: unknown) => error instanceof Error ? error.message : "结果暂未确认，请读取状态并核对公众号后台。";
 const publicationText = (publication: WechatPublication) => publication.status === "published" ? "这份内容已发表，请通过文章链接或公众号后台查看。" : publication.message;
 const savedDraftText = "已同步到草稿箱。请按下方提示到公众号后台检查封面。";
+const historicPublicationText = "这份内容曾提交发表，请到公众号后台核对。当前仅支持同步草稿，不会再次提交。";
 function receiptFor(job: WechatJob, previous: SyncReceipt): SyncReceipt {
   const confirmed = previous.status === "confirmed_by_user" && job.status === "saved";
   return { ...previous, draftId: job.draftId, status: confirmed ? "confirmed_by_user" : job.status === "saved" ? "saved" : job.status === "failed" ? "failed" : "needs_confirmation", message: confirmed ? previous.message : job.message };
@@ -69,11 +70,11 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
     setConfirmation(null);
   }
   async function clientForDevice(signal: AbortSignal) {
-    if (!binding) throw new Error("请先连接本机服务并添加公众号。");
+    if (!binding) throw new Error("请先检测浏览器插件并添加公众号。");
     const client = createWechatClient(binding.connectionToken);
     const connection = await client.getConnection(signal);
     signal.throwIfAborted();
-    if (connection.deviceId !== binding.deviceId) throw new Error("连接设备已改变，请先清除本机公众号账号，再连接新设备。");
+    if (connection.deviceId !== binding.deviceId) throw new Error("插件身份已变化，请先重置插件连接，再重新添加公众号。");
     return { client, binding };
   }
   async function connectAccount(client: ReturnType<typeof createWechatClient>, target: Binding, account: LocalWechatAccount, signal: AbortSignal) {
@@ -98,9 +99,10 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
         let activeJob: WechatJob | undefined;
         result(account.id, { text: "正在连接…", error: false, publication: undefined });
         try {
+          if (!WECHAT_PUBLICATION_ENABLED && previous?.publicationAttempted) throw new Error(historicPublicationText);
           await connectAccount(client, targetBinding, account, signal);
           if (previous?.jobId) {
-            const priorPublication = await client.getPublication(previous.jobId, account.id, signal);
+            const priorPublication = WECHAT_PUBLICATION_ENABLED ? await client.getPublication(previous.jobId, account.id, signal) : null;
             signal.throwIfAborted();
             if (priorPublication) {
               result(account.id, { publication: priorPublication, text: publicationText(priorPublication) });
@@ -165,9 +167,10 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
     void runOperation(verify ? "正在核对公众号草稿…" : "正在读取公众号任务状态…", async (signal) => {
       result(account.id, { text: verify ? "正在核对草稿…" : "正在读取状态…", error: false });
       try {
+        if (!WECHAT_PUBLICATION_ENABLED && previous.publicationAttempted) throw new Error(historicPublicationText);
         const { client, binding: target } = await clientForDevice(signal);
         await connectAccount(client, target, account, signal);
-        const existing = await client.getPublication(previous.jobId!, account.id, signal);
+        const existing = WECHAT_PUBLICATION_ENABLED ? await client.getPublication(previous.jobId!, account.id, signal) : null;
         signal.throwIfAborted();
         if (existing) {
           const publication = existing.publishId && ["submitting", "publishing", "needs_confirmation"].includes(existing.status) ? await client.refreshPublication(previous.jobId!, account.id, signal) : existing;

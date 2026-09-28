@@ -80,10 +80,10 @@ async function confirmPlatformImages(dialog: Locator, platform: "xiaohongshu" | 
   await expect(dialog.locator(".draft-sync-steps")).toHaveCount(0);
 }
 
-async function connectLocalDevice(page: Page, dialog: Locator) {
+async function detectExtension(page: Page, dialog: Locator) {
   const pagesBefore = page.context().pages().length;
-  await dialog.getByRole("button", { name: "连接这台电脑", exact: true }).click();
-  await expect(dialog.locator(".draft-sync-connection")).toContainText("本机连接已保存");
+  await dialog.getByRole("button", { name: "检测插件", exact: true }).click();
+  await expect(dialog.locator(".draft-sync-connection")).toContainText("插件已连接");
   expect(page.context().pages()).toHaveLength(pagesBefore);
   await expect(dialog.getByLabel("本机连接口令", { exact: true })).toHaveCount(0);
   await expect(dialog.locator('.draft-sync-connection input[type="file"]')).toHaveCount(0);
@@ -387,22 +387,22 @@ test("mobile draft controls stay usable and a denied local save never reports su
 });
 
 test("WeChat batches real PNG drafts in one view with every publication entry disabled", async ({ page, browserName }) => {
-  test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; sync is supported in Chrome/Firefox and its Safari guidance is tested separately.");
+  test.skip(browserName !== "chromium", "The extension requires Chrome; Firefox and Safari retain editing and export coverage.");
   test.setTimeout(240_000);
   const requests: string[] = [];
   const accounts = [1, 2].map((number) => { const appId = `wx-browser-account-${number}`; return { appId, id: createHash("sha256").update(appId).digest("hex").slice(0, 20), name: `贴图测试公众号${number}`, appSecret: `browser-private-secret-${number}` }; });
   const jobs = new Map<string, Record<string, unknown>>();
   const publications = new Map<string, Record<string, unknown>>();
   const connectedAccounts = new Set<string>();
-  let helperUnavailable = false;
+  let extensionUnavailable = false;
   const uploads: { id: string; accountId: string; title: string; body: string; images: { name: string; size: number; signature: number[]; hash: string; width: number; height: number }[] }[] = [];
   let confirmedImages: Awaited<ReturnType<typeof imageManifest>> = [];
   const server = await startWechatTestServer(new URL(page.url()).origin, async (request, response) => {
     const path = new URL(request.url!, "http://test.local").pathname;
     const reply = (status: number, json: unknown) => { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(json)); };
     requests.push(`${request.method} ${path}`);
-    expect(request.headers.authorization).toBe("Bearer browser-test-password-0123456789abcdef");
-    if (path === "/api/wechat/connection") { reply(helperUnavailable ? 503 : 200, helperUnavailable ? { error: "测试助手暂时不可用" } : { deviceId: "11111111111111111111111111111111" }); return; }
+    expect(request.headers.authorization).toBe(`Bearer ${"a".repeat(64)}`);
+    if (path === "/api/wechat/connection") { reply(extensionUnavailable ? 503 : 200, extensionUnavailable ? { error: "测试插件暂时不可用" } : { deviceId: "11111111111111111111111111111111" }); return; }
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const bytes = Buffer.concat(chunks);
@@ -417,11 +417,8 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     expect(scoped).not.toBeNull();
     const [, accountId, jobId, suffix] = scoped;
     const account = accounts.find((item) => item.id === accountId)!;
-    expect(connectedAccounts.has(accountId), "saved browser credentials must restore the helper's account before any read").toBe(true);
-    if (suffix === "/publication") {
-      expect(request.method, "this page must not send any publication POST").toBe("GET");
-      reply(200, { publication: publications.get(jobId) || null }); return;
-    }
+    expect(connectedAccounts.has(accountId), "saved browser credentials must restore the extension account before any read").toBe(true);
+    expect(suffix, "the draft-only extension rejects every publication endpoint").not.toContain("publication");
     if (jobId) { expect(jobs.get(jobId)?.accountId).toBe(accountId); reply(200, { job: jobs.get(jobId) }); return; }
     expect(request.method).toBe("POST");
     const form = await new Response(new Uint8Array(bytes), { headers: { "content-type": request.headers["content-type"]! } }).formData();
@@ -438,7 +435,7 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     expect(stored?.content.wechat.body).toBe("多张海报完整同步。\n\n这一行也保留。\n");
     const job = { id: upload.id, accountId, accountName: account.name, title: upload.title, imageCount: images.length, uploadedCount: images.length, status: "saved", message: "模拟官方草稿读回核对通过", draftId: `mock-draft-${accountId}`, createdAt: "2026-09-22T00:00:00Z", updatedAt: "2026-09-22T00:00:00Z" };
     jobs.set(upload.id, job); reply(202, { job });
-  }, { connectionToken: "browser-test-password-0123456789abcdef", deviceId: "11111111111111111111111111111111" });
+  }, { connectionToken: "a".repeat(64), deviceId: "11111111111111111111111111111111" });
   try {
     await server.mount(page);
     await page.goto(server.origin);
@@ -452,7 +449,7 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     // Accounts are on the same page while content is being edited.
     // Validation keeps syncing disabled until the visible issues are resolved.
     expect(requests).toEqual([]);
-    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: "检测插件", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "同步到草稿箱", exact: true })).toHaveCount(0);
     await expect(dialog.getByLabel("本机连接口令", { exact: true })).toHaveCount(0);
     for (const viewport of [{ width: 1110, height: 770 }, { width: 390, height: 844 }]) {
@@ -462,7 +459,7 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     }
     await page.setViewportSize({ width: 1110, height: 770 });
     expect(requests).toEqual([]);
-    await connectLocalDevice(page, dialog);
+    await detectExtension(page, dialog);
     expect(requests).toEqual(["GET /api/wechat/connection"]);
     for (const account of accounts) {
       const settings = dialog.locator(".draft-sync-wechat-settings");
@@ -481,8 +478,8 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     await expect(dialog.getByLabel("小红书标题", { exact: true })).toHaveAttribute("aria-invalid", "false");
     await expect(dialog.locator("#draft-title-help")).not.toContainText("标题超出");
     await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
-    await expect(dialog.locator(".draft-sync-connection")).toContainText("本机连接已保存");
-    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeHidden();
+    await expect(dialog.locator(".draft-sync-connection")).toContainText("插件已连接");
+    await expect(dialog.getByRole("button", { name: "检测插件", exact: true })).toBeHidden();
     await choosePlatform(dialog, "wechat");
     expect(requests).toHaveLength(callsBeforeSwitch);
     await expect(dialog.locator(".draft-sync-wechat-account-row")).toHaveCount(2);
@@ -557,7 +554,7 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
       for (const image of upload.images) { expect(image.size).toBeGreaterThan(0); expect(image.signature).toEqual([137, 80, 78, 71, 13, 10, 26, 10]); expect([image.width, image.height]).toEqual([1080, 1350]); }
     }
     expect((await savedDraftSummary(page))?.receipts).toHaveLength(2);
-    // Restarted helpers hold no account credentials. Rechecking must restore
+    // A restarted extension has no active account session. Rechecking must restore
     // this account and visibly report completion even for an unchanged result.
     connectedAccounts.clear();
     const firstResult = dialog.getByRole("article", { name: `${accounts[0].name} 的结果` });
@@ -565,10 +562,10 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     await expect(firstResult).toContainText("已重新核对：模拟官方草稿读回核对通过");
     expect(requests).toContain(`POST /api/wechat/accounts/${accounts[0].id}/jobs/${uploads.find((upload) => upload.accountId === accounts[0].id)!.id}/verify`);
     expect(connectedAccounts.has(accounts[0].id)).toBe(true);
-    helperUnavailable = true;
+    extensionUnavailable = true;
     await archiveAction(firstResult, "重新核对草稿");
-    await expect(firstResult.locator(".draft-sync-message.error")).toContainText("请先打开折页同步助手");
-    helperUnavailable = false;
+    await expect(firstResult.locator(".draft-sync-message.error")).toContainText("尚未检测到折页插件");
+    extensionUnavailable = false;
     await archiveAction(firstResult, "重新核对草稿");
     await expect(firstResult).toContainText("已重新核对：模拟官方草稿读回核对通过");
     await expect(firstResult.locator(".draft-sync-message.error")).toHaveCount(0);
@@ -584,11 +581,11 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     });
     expect(protectedVault).toMatchObject({ extractable: false, blocked: true });
     expect(protectedVault.serialized).not.toContain("browser-private-secret");
-    expect(protectedVault.serialized).not.toContain("browser-test-password-0123456789abcdef");
+    expect(protectedVault.serialized).not.toContain("a".repeat(64));
     await expect(dialog.getByRole("button", { name: /立即发布|确认立即发布/ })).toHaveCount(0);
     await expect(dialog.getByRole("region", { name: "确认立即发布", exact: true })).toHaveCount(0);
     // The retained publication transport must never be used from this page.
-    expect(requests.filter((request) => request.startsWith("POST ") && request.endsWith("/publication"))).toEqual([]);
+    expect(requests.filter((request) => request.includes("/publication"))).toEqual([]);
     expect(publications.size).toBe(0);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await dialog.evaluate((element) => {
@@ -600,7 +597,7 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     await archiveAction(dialog, "继续本机存档"); await choosePlatform(dialog, "wechat");
     await confirmPlatformImages(dialog, "wechat");
     await expect(dialog.getByRole("article", { name: `${accounts[0].name} 的结果` })).toBeVisible();
-    expect(requests).toHaveLength(callsBeforeReload);
+    expect(requests.slice(callsBeforeReload)).toEqual(["GET /api/wechat/connection"]);
     await dialog.getByRole("button", { name: `刷新 ${accounts[0].name} 状态`, exact: true }).click();
     await expect(dialog.getByRole("article", { name: `${accounts[0].name} 的结果` })).toContainText("草稿已保存");
     expect(publications.size).toBe(0); expect(uploads).toHaveLength(2); expect(server.failure()).toBeUndefined();
@@ -621,16 +618,16 @@ test("WeChat batches real PNG drafts in one view with every publication entry di
     await choosePlatform(dialog, "wechat");
     for (const account of accounts) await expect(dialog.getByRole("article", { name: `${account.name} 的结果` }).getByRole("checkbox")).toBeChecked();
     await confirmRisk(dialog, "wechat");
-    expect(requests).toHaveLength(callsBeforeReopen);
+    expect(requests.slice(callsBeforeReopen)).toEqual(["GET /api/wechat/connection"]);
     expect(uploads).toHaveLength(2);
     expect(publications.size).toBe(0);
   } finally { await server.close(); }
 });
 
 test("a fresh browser connects once and saves the confirmed XHS preview with risk on its existing last page", async ({ page, browserName }) => {
-  test.skip(browserName === "webkit", "WebKit blocks HTTPS to HTTP loopback; sync is supported in Chrome/Firefox and its Safari guidance is tested separately.");
+  test.skip(browserName !== "chromium", "The extension requires Chrome; Firefox and Safari retain editing and export coverage.");
   test.setTimeout(240_000);
-  const connectionToken = "xhs-browser-private-connection-token", deviceId = "22222222222222222222222222222222";
+  const connectionToken = "b".repeat(64), deviceId = "22222222222222222222222222222222";
   const account = { id: "0123456789abcdefabcd", name: "小红书测试账号" };
   const requests: { method: string; path: string; body: string }[] = [];
   const originals: { name: string; size: number; hash: string; width: number; height: number; signature: number[] }[] = [];
@@ -648,8 +645,8 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     if (path === "/api/wechat/connection") { reply(200, { deviceId }); return; }
     if (path === "/api/xiaohongshu/login") {
       expect(request.method).toBe("POST"); loginOpened = true; loginCount++;
-      reply(200, loginCount === 1 ? { status: "needs_attention", message: "专用窗口未显示登录页，请先检查其中提示。" }
-        : loginCount === 2 ? { status: "login_required", message: "请在专用窗口扫码，完成后点击“我已登录”。" }
+      reply(200, loginCount === 1 ? { status: "needs_attention", message: "小红书窗口未显示登录页，请先检查其中提示。" }
+        : loginCount === 2 ? { status: "login_required", message: "请在小红书窗口扫码，完成后点击“我已登录”。" }
           : { status: "connected", account });
       return;
     }
@@ -719,18 +716,18 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
     expect(requests).toEqual([]);
     await captureConnectionSteps(page, dialog, "xiaohongshu-first-connection");
-    await connectLocalDevice(page, dialog);
+    await detectExtension(page, dialog);
     expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual(["GET /api/wechat/connection"]);
     await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "我已登录", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
     await dialog.getByRole("button", { name: "打开登录窗口", exact: true }).click();
     await expect.poll(() => server.failure() || loginOpened).toBe(true);
-    await expect(dialog.locator(".draft-sync-xhs .draft-sync-message")).toHaveText("专用窗口未显示登录页，请先检查其中提示。");
+    await expect(dialog.locator(".draft-sync-xhs .draft-sync-message")).toHaveText("小红书窗口未显示登录页，请先检查其中提示。");
     await expect(dialog.getByRole("button", { name: "同步到小红书草稿箱", exact: true })).toHaveCount(0);
     await expect(dialog.locator(".draft-sync-xhs")).not.toContainText("已打开");
     await dialog.getByRole("button", { name: "打开登录窗口", exact: true }).click();
-    await expect(dialog.locator(".draft-sync-xhs .draft-sync-message")).toHaveText("请在专用窗口扫码，完成后点击“我已登录”。");
+    await expect(dialog.locator(".draft-sync-xhs .draft-sync-message")).toHaveText("请在小红书窗口扫码，完成后点击“我已登录”。");
     await captureConnectionSteps(page, dialog, "xiaohongshu-login");
     await dialog.getByRole("button", { name: "打开登录窗口", exact: true }).click();
     await expect(dialog.getByText(account.name, { exact: true })).toBeVisible();
@@ -751,9 +748,9 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     await expect(dialog.getByLabel("我已确认公众号贴图的风险提示", { exact: true })).not.toBeChecked();
     await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("这是公众号自己的超长标题不得影响小红书同步结果和账号");
     await expect(dialog.locator("#draft-title-help")).toContainText("标题超出");
-    await expect(dialog.getByText("本机连接已保存", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("插件已连接", { exact: true })).toBeVisible();
     await expect(dialog.getByLabel("公众号名称", { exact: true })).toBeVisible();
-    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeHidden();
+    await expect(dialog.getByRole("button", { name: "检测插件", exact: true })).toBeHidden();
     expect(requests).toHaveLength(callsBeforeSwitch);
     await choosePlatform(dialog, "xiaohongshu");
     await expect(dialog.getByRole("button", { name: "刷新账号", exact: true })).toBeEnabled();
@@ -774,7 +771,7 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     await archiveAction(dialog, "继续本机存档");
     await expect(dialog.getByLabel("我已核对图片，沿用当前尺寸和比例", { exact: true })).toHaveCount(0);
     await confirmPlatformImages(dialog, "xiaohongshu");
-    await expect(dialog.getByText("本机连接已保存", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("插件已连接", { exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "打开登录窗口", exact: true })).toBeEnabled();
     await dialog.getByRole("button", { name: "我已登录", exact: true }).click();
     await dialog.getByRole("button", { name: "读取小红书同步状态", exact: true }).click();
@@ -789,39 +786,39 @@ test("a fresh browser connects once and saves the confirmed XHS preview with ris
     await expect(dialog.getByRole("button", { name: "刷新账号", exact: true })).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "我已登录", exact: true })).toHaveCount(0);
     await confirmRisk(dialog, "xiaohongshu");
-    expect(requests).toHaveLength(callsBeforeReopen);
+    expect(requests.slice(callsBeforeReopen)).toEqual([{ method: "GET", path: "/api/wechat/connection", body: "" }]);
     expect(createCount).toBe(1);
     expect(server.failure()).toBeUndefined();
   } finally { await server.close(); }
 });
 
-test("an unavailable helper shows recovery inside the editor without opening a refused localhost page", async ({ page, context, browserName }) => {
-  test.skip(browserName === "webkit", "WebKit rejects the transport before it can test an offline helper; Safari guidance has its own case.");
+test("an unavailable extension shows recovery inside the editor without opening another page", async ({ page, context, browserName }) => {
+  test.skip(browserName !== "chromium", "Missing-extension guidance is tested in Chrome; unsupported-browser guidance has its own case.");
   test.setTimeout(180_000);
   const server = await startWechatTestServer(new URL(page.url()).origin, async () => { throw new Error("A stopped fixture must not receive API work"); },
-    { deviceId: "a".repeat(32), connectionToken: "offline-fixture-private-connection-token-".repeat(2) });
+    { deviceId: "a".repeat(32), connectionToken: "c".repeat(64) });
   try {
     await server.mount(page); await page.goto(server.origin);
     const dialog = await prepareRealImages(page);
     await confirmPlatformImages(dialog, "xiaohongshu");
     await server.close();
     const pagesBefore = context.pages().length;
-    await dialog.getByRole("button", { name: "连接这台电脑", exact: true }).click();
-    await expect(dialog.getByRole("alert").first()).toContainText("本机助手");
-    await expect(dialog.getByText("本机连接已保存", { exact: true })).toHaveCount(0);
-    await expect(dialog.getByRole("button", { name: "连接这台电脑", exact: true })).toBeEnabled();
+    await dialog.getByRole("button", { name: "检测插件", exact: true }).click();
+    await expect(dialog.getByRole("alert").first()).toContainText("尚未检测到折页插件");
+    await expect(dialog.getByText("插件已连接", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "检测插件", exact: true })).toBeEnabled();
     expect(context.pages()).toHaveLength(pagesBefore);
     expect(new URL(page.url()).origin).toBe(server.origin);
-    await captureConnectionSteps(page, dialog, "local-assistant-offline");
+    await captureConnectionSteps(page, dialog, "extension-unavailable");
     expect(server.failure()).toBeUndefined();
   } finally { await server.close(); }
 });
 
 
-test("Safari explains which browser to use immediately without attempting local pairing or opening a window", async ({ page, context, browserName }) => {
-  test.skip(browserName !== "webkit", "This case verifies the real WebKit mixed-content boundary and Safari-specific product guidance.");
+test("Safari and Firefox keep editing available while explaining that synchronization requires Chrome", async ({ page, context, browserName }) => {
+  test.skip(browserName === "chromium", "This case verifies actual Firefox and Safari browser detection.");
   const server = await startWechatTestServer(new URL(page.url()).origin, async () => { throw new Error("Unsupported browsers must not start platform API work"); },
-    { deviceId: "a".repeat(32), connectionToken: "safari-fixture-private-connection-token-".repeat(2) });
+    { deviceId: "a".repeat(32), connectionToken: "d".repeat(64) });
   const localRequests: string[] = [];
   page.on("request", (request) => { if (/^http:\/\/127\.0\.0\.1:878[89]\//.test(request.url())) localRequests.push(request.url()); });
   try {
@@ -829,9 +826,9 @@ test("Safari explains which browser to use immediately without attempting local 
     const dialog = await prepareRealImages(page);
     await confirmPlatformImages(dialog, "xiaohongshu");
     const pagesBefore = context.pages().length;
-    await dialog.getByRole("button", { name: "连接这台电脑", exact: true }).click();
-    await expect(dialog.getByRole("alert").first()).toContainText("请使用这台 Mac 上的 Chrome", { timeout: 2_000 });
-    await expect(dialog.getByText("本机连接已保存", { exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "检测插件", exact: true }).click();
+    await expect(dialog.getByRole("alert").first()).toContainText("请在 Windows 或 Mac 电脑的 Chrome", { timeout: 2_000 });
+    await expect(dialog.getByText("插件已连接", { exact: true })).toHaveCount(0);
     expect(localRequests).toEqual([]);
     expect(context.pages()).toHaveLength(pagesBefore);
     expect(new URL(page.url()).origin).toBe(server.origin);

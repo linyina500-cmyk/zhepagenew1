@@ -19,7 +19,7 @@ async function fixture(context, options = {}) {
   const binding = { deviceId: "local-test-device", connectionToken: "test-token" };
   let saved = { schemaVersion: 1, id: "local-draft", updatedAt: new Date().toISOString(), sourceFormat: "wechat", images: [1, 2].map((id) => ({ id: String(id), name: `${id}.png`, blob: new Blob([`original-${id}`], { type: "image/png" }), width: 1080, height: 1440 })), content: { wechat: { title: "测试标题", body: "测试配文" }, xiaohongshu: { title: "", body: "" } }, selectedAccountIds: [], receipts: options.receipts ?? [] };
   let busy = false, active, renderDraft, renderReady, mounted = true, persistFailure = false, createOverride, publicationOverride, connectionOverride, verifyOverride, failAccount;
-  const creates = [], publications = [], connects = [], verifies = [], jobs = new Map(), published = new Map(options.previousPublications ?? []);
+  const creates = [], publications = [], publicationReads = [], connects = [], verifies = [], jobs = new Map(), published = new Map(options.previousPublications ?? []);
   const client = {
     getConnection: async () => connectionOverride ? connectionOverride() : ({ deviceId: binding.deviceId }),
     connectAccount: async (input) => { connects.push(input); const account = accounts.find((item) => item.appId === input.appId); if (account.id === failAccount) throw new Error("此账号连接失败"); return account; },
@@ -36,7 +36,11 @@ async function fixture(context, options = {}) {
     },
     waitForJob: async (job) => job,
     verifyJob: async (id) => { verifies.push(id); return verifyOverride ? verifyOverride(id) : jobs.get(id); },
-    getPublication: async (id) => published.get(id) || null,
+    getPublication: async (id) => {
+      publicationReads.push(id);
+      assert.equal(options.publicationEnabled, true, "draft-only extension does not expose publication endpoints");
+      return published.get(id) || null;
+    },
     refreshPublication: async (id) => published.get(id),
     submitPublication: async (id, accountId) => {
       assert.equal(saved.receipts.find((receipt) => receipt.accountId === accountId && receipt.jobId === id).publicationAttempted, true, "publication intent must persist before submission");
@@ -86,7 +90,7 @@ async function fixture(context, options = {}) {
     await act(async () => { summary.click(); });
   }
   context.after(async () => { active?.abort(); mounted = false; await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = false; });
-  return { container, creates, publications, connects, verifies, jobs, published, click, select, openMore, settle, act, get saved() { return saved; },
+  return { container, creates, publications, publicationReads, connects, verifies, jobs, published, click, select, openMore, settle, act, get saved() { return saved; },
     set persistFailure(value) { persistFailure = value; }, set createOverride(value) { createOverride = value; }, set publicationOverride(value) { publicationOverride = value; }, set failAccount(value) { failAccount = value; },
     set connectionOverride(value) { connectionOverride = value; }, set verifyOverride(value) { verifyOverride = value; },
     close: async () => { active?.abort(); mounted = false; await act(async () => root.render(null)); },
@@ -134,6 +138,12 @@ test("default release offers draft sync only and selects a sole visible account 
   assert.equal(f.container.querySelectorAll('a[href="https://mp.weixin.qq.com/"]').length, 1);
   await f.click("刷新状态");
   assert.equal(f.publications.length, 0); assert.equal(f.creates.length, 1);
+  await f.openMore(); await f.click("重新核对草稿");
+  await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 1, "unchanged content reuses the saved draft");
+  await f.changeContent(); await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 2, "changed content can create its new draft without publication APIs");
+  assert.deepEqual(f.publicationReads, []);
 });
 
 test("changing draft identity preserves chosen accounts but clears earlier account results", async (context) => {
@@ -176,7 +186,7 @@ test("a mismatched draft exposes recheck directly while retaining the same job w
   assert.deepEqual(f.verifies, [id, id]);
 });
 
-test("disabled publication entry still reads an older publication and never resubmits it", async (context) => {
+test("draft-only release retains historical publication intent without querying unsupported APIs or resubmitting", async (context) => {
   const id = "old-published-job";
   const f = await fixture(context, {
     accounts: [accounts[0]],
@@ -184,8 +194,12 @@ test("disabled publication entry still reads an older publication and never resu
     previousPublications: [[id, { jobId: id, status: "published", articleId: "old-article", urls: ["https://mp.weixin.qq.com/s/old-test"], message: "已发表" }]],
   });
   await f.click("刷新状态");
-  assert.match(f.container.textContent, /这份内容已发表/);
-  assert.ok(f.container.querySelector('a[href="https://mp.weixin.qq.com/s/old-test"]'));
+  assert.match(f.container.textContent, /这份内容曾提交发表，请到公众号后台核对/);
+  await f.click("同步到草稿箱");
+  await f.changeContent(); await f.click("同步到草稿箱");
+  assert.equal(f.saved.receipts[0].publicationAttempted, true);
+  assert.equal(f.saved.receipts[0].jobId, id);
+  assert.deepEqual(f.publicationReads, []); assert.deepEqual(f.connects, []);
   assert.equal(f.publications.length, 0); assert.equal(f.creates.length, 0);
   assert.equal([...f.container.querySelectorAll("button")].some((button) => /立即发布/u.test(button.textContent)), false);
 });

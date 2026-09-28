@@ -3,7 +3,7 @@ import test from "node:test";
 import { loadDomModule } from "./helpers/load-dom-module.mjs";
 
 const { normalizeLocalDraft, encodeLocalDraft, decodeLocalDraft, saveLocalDraft, loadLocalDraft } = loadDomModule("lib/draftSync/localDraftStore.ts");
-const { countCharacters, countHashtags, DRAFT_LIMITS, validateDraft, readDraftImage } = loadDomModule("lib/draftSync/validation.ts");
+const { countCharacters, countHashtags, DRAFT_LIMITS, MAX_TOTAL_IMAGE_BYTES, validateDraft, readDraftImage } = loadDomModule("lib/draftSync/validation.ts");
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGMQPNj5HwAEnQJbj/CYfgAAAABJRU5ErkJggg==", "base64");
 const jpeg = Buffer.from("/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAT/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAgf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCgAkgf/9k=", "base64");
 const metadata = { id: "image-1", name: "poster.png", width: 1080, height: 1440, size: png.length, mime: "image/png" };
@@ -208,6 +208,17 @@ test("both platforms accept ten body topics and block eleven before submission",
     assert.ok(repeated.some((issue) => issue.code === "topics-long"));
     const adjacent = validateDraft(platform, { title: "标题", body: Array(11).fill("#连续话题#").join("") }, [metadata]);
     assert.ok(adjacent.some((issue) => issue.code === "topics-long"));
+  }
+});
+
+test("both platforms accept exactly 40 MiB and block one byte more before submission", () => {
+  assert.equal(MAX_TOTAL_IMAGE_BYTES, 40 * 1024 * 1024);
+  const images = Array.from({ length: 5 }, (_, index) => ({ ...metadata, id: `image-${index}`, size: 8 * 1024 * 1024 }));
+  for (const platform of ["xiaohongshu", "wechat"]) {
+    assert.equal(validateDraft(platform, { title: "标题", body: "" }, images).some((issue) => issue.severity === "error"), false);
+    const tooLarge = images.map((image, index) => ({ ...image, size: image.size + Number(index === 0) }));
+    const issues = validateDraft(platform, { title: "标题", body: "" }, tooLarge);
+    assert.ok(issues.some((issue) => issue.code === "total-size" && issue.severity === "error" && issue.message.includes("40 MiB")));
   }
 });
 
