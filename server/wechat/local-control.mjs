@@ -5,19 +5,20 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { promisify, parseEnv } from "node:util";
 import { fileURLToPath } from "node:url";
+import { localPaths, projectRoot } from "./local-paths.mjs";
+import { ensureLocalConfig } from "./local-setup.mjs";
+import { startWindowsAssistant, stopWindowsAssistant, windowsControlRequest } from "./local-windows.mjs";
 
 const execute = promisify(execFile);
-const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
-const privateDir = resolve(projectRoot, ".wechat-sync-local");
-const label = `com.zhepage.sync.${createHash("sha256").update(projectRoot).digest("hex").slice(0, 12)}`;
+const { privateDir, label, installed, pipePath } = localPaths();
 
-export function agentPlist({ label, nodePath, supervisorPath, workDir, logPath }) {
+export function agentPlist({ label, nodePath, supervisorPath, workDir, logPath, installed = false }) {
   const xml = (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>${xml(label)}</string>
-<key>ProgramArguments</key><array><string>${xml(nodePath)}</string><string>${xml(supervisorPath)}</string></array>
+<key>ProgramArguments</key><array><string>${xml(nodePath)}</string><string>${xml(supervisorPath)}</string>${installed ? "<string>--installed</string>" : ""}</array>
 <key>WorkingDirectory</key><string>${xml(workDir)}</string>
 <key>StandardOutPath</key><string>${xml(logPath)}</string>
 <key>StandardErrorPath</key><string>${xml(logPath)}</string>
@@ -109,7 +110,7 @@ export async function stopAgent({ inspect, connection, terminate, pause, attempt
 }
 
 async function main(action) {
-  if (process.platform !== "darwin") throw new Error("此后台启动入口适用于 Mac。");
+  if (!["darwin", "win32"].includes(process.platform)) throw new Error("本机助手支持 Windows 和 Mac。");
   if (!["start", "stop", "status", "uninstall"].includes(action)) throw new Error("请选择启动、停止、查看状态或停用自动启动。");
   const directory = await lstat(privateDir);
   const configPath = resolve(privateDir, "config.env");
@@ -118,8 +119,33 @@ async function main(action) {
   await chmod(privateDir, 0o700); await chmod(configPath, 0o600);
   const config = parseEnv(await readFile(configPath, "utf8"));
   const token = config.WECHAT_SYNC_TOKEN;
-  if (typeof token !== "string" || token.length < 32 || token.length > 256 || /\s/u.test(token)) throw new Error("本机助手尚未准备好，请先完成首次配置。");
+  if (typeof token !== "string" || token.length < 32 || token.length > 256 || /\s/u.test(token)) throw new Error("已保存的本机连接配置无效，原有资料未改变，请联系维护人员。");
   const deviceId = createHash("sha256").update(`zhepage-device:${token}`).digest("hex").slice(0, 32);
+  const connection = async () => {
+    try {
+      const response = await fetch("http://127.0.0.1:8788/api/wechat/connection", { headers: { Authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(1500) });
+      const value = await response.json();
+      return response.ok && value.deviceId === deviceId && typeof value.busy === "boolean" ? value : null;
+    } catch { return null; }
+  };
+  const ready = (pid) => assistantReady({ pid, statusPath: resolve(privateDir, "assistant-status.json"), connection });
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 1000));
+  if (process.platform === "win32") {
+    const inspect = () => windowsControlRequest({ pipePath, token, action: "status" });
+    if (action === "status") {
+      const state = await inspect();
+      console.info(state?.ready && await ready(state.pid) ? "折页同步助手正在运行。同步时请保持助手窗口打开。" : "折页同步助手尚未运行或正在启动，请双击打开助手。");
+      return;
+    }
+    if (["stop", "uninstall"].includes(action)) {
+      const stopped = await stopWindowsAssistant({ inspect, requestStop: () => windowsControlRequest({ pipePath, token, action: "stop" }), pause });
+      console.info(stopped ? "助手已停止。账号连接和本机草稿均已保留；需要使用时重新双击打开助手。" : "助手正在安全停止，请等待当前处理结束；不会强制中断草稿任务。");
+      return;
+    }
+    console.info("正在打开折页同步助手。同步时请保持这个窗口打开；结束后可双击“停止助手”。");
+    await startWindowsAssistant({ inspect, ready, pause, launch: () => import("./local-start.mjs") });
+    return;
+  }
   const domain = `gui/${process.getuid()}`, target = `${domain}/${label}`;
   const agentsDir = resolve(homedir(), "Library/LaunchAgents");
   const plistPath = resolve(agentsDir, `${label}.plist`), logPath = resolve(privateDir, "assistant.log");
@@ -137,15 +163,6 @@ async function main(action) {
   const enable = async () => { if (!(await run(["enable", target])).ok) throw new Error("无法启用助手的登录自动启动，请稍后重试。"); };
   const disable = async () => { if (!(await run(["disable", target])).ok) throw new Error("未能停用自动启动，请稍后重试。"); };
   const remove = async () => { await unlink(plistPath).catch((error) => { if (error.code !== "ENOENT") throw error; }); };
-  const connection = async () => {
-    try {
-      const response = await fetch("http://127.0.0.1:8788/api/wechat/connection", { headers: { Authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(1500) });
-      const value = await response.json();
-      return response.ok && value.deviceId === deviceId && typeof value.busy === "boolean" ? value : null;
-    } catch { return null; }
-  };
-  const ready = (pid) => assistantReady({ pid, statusPath: resolve(privateDir, "assistant-status.json"), connection });
-  const pause = () => new Promise((resolve) => setTimeout(resolve, 1000));
   if (action === "status") {
     const { pid } = await inspect();
     console.info(pid && await ready(pid) ? "折页同步助手正在后台运行。" : "折页同步助手尚未运行或正在启动。");
@@ -176,7 +193,7 @@ async function main(action) {
         if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error("助手运行文件路径无效。");
       }
       await writeFile(logPath, "", { flag: "a", mode: 0o600 }); await chmod(logPath, 0o600);
-      await writeFile(plistPath, agentPlist({ label, nodePath: process.execPath, supervisorPath: resolve(projectRoot, "server/wechat/local-start.mjs"), workDir: projectRoot, logPath }), { mode: 0o600 });
+      await writeFile(plistPath, agentPlist({ label, nodePath: process.execPath, supervisorPath: resolve(projectRoot, "server/wechat/local-start.mjs"), workDir: projectRoot, logPath, installed }), { mode: 0o600 });
       await chmod(plistPath, 0o600);
       await enable();
     },
@@ -195,12 +212,12 @@ async function main(action) {
   console.info("暂时停止请打开“停止折页同步助手.command”；不再需要自动启动时打开“停用折页自动启动.command”。");
 }
 
-export async function runWithControlLock({ lockPath, scriptPath, action, nodePath = process.execPath }) {
+export async function runWithControlLock({ lockPath, scriptPath, action, nodePath = process.execPath, installed = false }) {
   await access("/usr/bin/lockf");
   // The kernel releases this lock even after a crash, while -k keeps one inode
   // for all callers. Never unlink the lock file to bypass an active operation.
   const status = await new Promise((resolve, reject) => {
-    const child = spawn("/usr/bin/lockf", ["-s", "-k", "-t", "0", lockPath, nodePath, scriptPath, action, "--locked"], { stdio: "inherit" });
+    const child = spawn("/usr/bin/lockf", ["-s", "-k", "-t", "0", lockPath, nodePath, scriptPath, action, "--locked", ...(installed ? ["--installed"] : [])], { stdio: "inherit" });
     child.on("error", reject); child.on("close", (code) => resolve(code));
   });
   if (status === 75) throw new Error("助手正在启动或停止，请等当前操作完成后再试。");
@@ -208,8 +225,13 @@ export async function runWithControlLock({ lockPath, scriptPath, action, nodePat
 }
 
 async function command(action) {
-  if (process.argv[3] === "--locked" || action === "status") return main(action);
-  if (process.platform !== "darwin") throw new Error("此后台启动入口适用于 Mac。");
+  if (!["darwin", "win32"].includes(process.platform)) throw new Error("本机助手支持 Windows 和 Mac。");
+  if (!["start", "stop", "status", "uninstall"].includes(action)) throw new Error("请选择启动、停止、查看状态或停用自动启动。");
+  if (action === "start") await ensureLocalConfig();
+  else if (!(await lstat(privateDir).catch((error) => { if (error.code === "ENOENT") return null; throw error; }))) {
+    console.info("这台电脑尚未启动过助手。双击打开助手即可自动准备，无需填写配置。"); return;
+  }
+  if (process.argv.includes("--locked") || action === "status" || process.platform === "win32") return main(action);
   const directory = await lstat(privateDir);
   if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("助手私密配置文件夹无效。");
   await chmod(privateDir, 0o700);
@@ -217,14 +239,14 @@ async function command(action) {
   const lock = await lstat(lockPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
   if (lock && (!lock.isFile() || lock.isSymbolicLink())) throw new Error("助手控制文件无效。");
   await writeFile(lockPath, "", { flag: "a", mode: 0o600 }); await chmod(lockPath, 0o600);
-  const status = await runWithControlLock({ lockPath, scriptPath: fileURLToPath(import.meta.url), action });
+  const status = await runWithControlLock({ lockPath, scriptPath: fileURLToPath(import.meta.url), action, installed });
   if (status !== 0) process.exitCode = 1;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   command(process.argv[2] || "start").catch((error) => {
     // Filesystem and process diagnostics may expose environment details.
-    console.error(error.code ? "助手未能启动，请确认已完成首次配置且安装文件夹可用。" : error.message);
+    console.error(error.code ? "助手未能启动，请确认已完整解压到可写的文件夹，再重新打开助手。" : error.message);
     process.exitCode = 1;
   });
 }

@@ -62,6 +62,13 @@ function failed(error) {
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 process.on("SIGHUP", () => void shutdown());
+// Windows does not deliver POSIX termination signals to child processes.
+// Only this process's parent IPC channel can request a graceful shutdown.
+if (process.send) {
+  process.on("message", (message) => { if (message?.type === "zhepage-shutdown") void shutdown(); });
+  process.on("disconnect", () => void shutdown());
+  process.channel?.unref();
+}
 try {
   await listenLocalServers({ server, pairingServer, port, host: "127.0.0.1" });
   server.on("error", failed); pairingServer.on("error", failed);

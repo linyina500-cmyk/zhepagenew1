@@ -15,7 +15,7 @@ async function waitFor(check, message, timeout = 6000) {
 async function fixture(t) {
   const project = await mkdtemp(join(tmpdir(), "zhepage-supervisor-")), serviceDir = join(project, "server/wechat"), localDir = join(project, ".wechat-sync-local");
   await mkdir(serviceDir, { recursive: true }); await mkdir(join(localDir, "bin"), { recursive: true });
-  await copyFile(new URL("../server/wechat/local-start.mjs", import.meta.url), join(serviceDir, "local-start.mjs"));
+  for (const file of ["local-start.mjs", "local-paths.mjs", "local-windows.mjs"]) await copyFile(new URL(`../server/wechat/${file}`, import.meta.url), join(serviceDir, file));
   await writeFile(join(localDir, "config.env"), `WECHAT_SYNC_TOKEN=${fixtureSecret}\nWECHAT_APP_SECRET=synthetic-app-secret\n`);
   // The synthetic child never opens a port or browser. Readiness is released
   // explicitly, and both output streams deliberately contain fake credentials.
@@ -37,7 +37,10 @@ async function fixture(t) {
         setTimeout(() => console.log("ount page_needs_attention"), 5);
       }
     }, 15);
-    process.on("SIGTERM", () => { if (stopping) return; stopping = true; writeFileSync("service-stopping", "true"); setTimeout(() => { writeFileSync("service-drained", "true"); process.exit(0); }, 200); });
+    function stop() { if (stopping) return; stopping = true; writeFileSync("service-stopping", "true"); setTimeout(() => { writeFileSync("service-drained", "true"); process.exit(0); }, 200); }
+    process.on("SIGTERM", stop);
+    process.on("message", (message) => { if (message?.type === "zhepage-shutdown") stop(); });
+    process.channel?.unref();
     setTimeout(() => process.exit(2), 10000);
   `);
   await writeFile(join(localDir, "bin/cloudflared"), `#!${process.execPath}\nrequire("node:fs").writeFileSync("unexpected-tunnel", "started"); process.exit(9);\n`, { mode: 0o755 });
