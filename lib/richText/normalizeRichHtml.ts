@@ -1,4 +1,4 @@
-import { meaningfulContentNode as meaningfulNode } from "./contentNodes";
+import { meaningfulContentNode as meaningfulNode, normalizeContentSpacing } from "./contentNodes";
 
 export const RICH_LAYOUT_CLASS = "imported-composite-visual";
 export const INLINE_RUN_CLASS = "imported-inline-run";
@@ -176,6 +176,7 @@ export function markRichLayoutGroups(root: ParentNode) {
 
 export function normalizeRichHtmlDocument(documentNode: Document) {
   normalizeTables(documentNode.body, documentNode);
+  normalizeContentSpacing(documentNode.body);
   wrapDirectInlineRuns(documentNode.body, documentNode);
   markRichLayoutGroups(documentNode.body);
   return documentNode;

@@ -1,4 +1,5 @@
 import { TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE, tableHeader } from "./splitTable";
+import { normalizeContentSpacing } from "../richText/contentNodes";
 
 const INLINE_SEMANTIC_SELECTORS = ["strong", "b", "em", "i", "u", "s", "strike", "span[style]", "mark"];
 const BLOCK_TEXT_TAGS = new Set([
@@ -10,6 +11,7 @@ const BLOCK_TEXT_SELECTOR = [...BLOCK_TEXT_TAGS].map((tag) => tag.toLowerCase())
 
 function semanticDocument(html: string) {
   const parsed = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
+  normalizeContentSpacing(parsed.body);
   parsed.querySelectorAll(".manual-page-break").forEach((element) => element.remove());
   return parsed;
 }
@@ -63,7 +65,7 @@ function semanticMedia(parsed: Document) {
     if (current.nodeType === Node.TEXT_NODE) precedingText += current.textContent || "";
     else {
       const element = current as Element;
-      if (element.matches("img,hr,.manual-empty-line")) {
+      if (element.matches("img,hr,br,.manual-empty-line")) {
         const attributes = element.tagName === "IMG"
           ? JSON.stringify([...element.attributes].map(({ name, value }) => [name, value]).sort(([left], [right]) => left.localeCompare(right)))
           : "";
@@ -153,7 +155,7 @@ export function assertPaginationSemantics(sourceHtml: string, pages: string[]) {
     throw new Error(`分页保真检查失败：正文在第 ${differenceAt + 1} 字附近异常（源文 ${sourceText.length} 字 / 分页 ${outputText.length} 字）`);
   }
   if (semanticMedia(source) !== semanticMedia(output)) {
-    throw new Error("分页保真检查失败：图片、分隔线或手动空行的内容与位置发生变化");
+    throw new Error("分页保真检查失败：图片、分隔线、空行或换行的内容与位置发生变化");
   }
   INLINE_SEMANTIC_SELECTORS.forEach((selector) => {
     if (semanticBuckets(source, selector) !== semanticBuckets(output, selector)) {

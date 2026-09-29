@@ -1,5 +1,5 @@
 import { INLINE_RUN_CLASS, RICH_LAYOUT_CLASS, normalizeRichHtmlDocument, richTextHtmlLimitMessage, richTextLimitMessage } from "./normalizeRichHtml";
-import { meaningfulContentNode, VISUAL_CONTENT_SELECTOR } from "./contentNodes";
+import { meaningfulContentNode, normalizeContentSpacing, VISUAL_CONTENT_SELECTOR } from "./contentNodes";
 
 const MAX_ARTICLE_DOCUMENT_BYTES = 6 * 1024 * 1024;
 
@@ -52,6 +52,7 @@ function sanitizeHtml(rawHtml: string, preserveStyles: boolean, baseUrl = window
   const documentNode = new DOMParser().parseFromString(rawHtml, "text/html");
   const inputLimit = richTextLimitMessage(rawHtml, documentNode.body);
   if (inputLimit) throw new Error(inputLimit);
+  normalizeContentSpacing(documentNode.body);
   documentNode.querySelectorAll(SAFE_ELEMENTS).forEach((element) => element.remove());
   documentNode.querySelectorAll("*").forEach((element) => {
     const originalStyle = element.getAttribute("style") || "";

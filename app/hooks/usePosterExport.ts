@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { withTimeout } from "../../lib/async/withTimeout";
+import type { DraftImage } from "../../lib/draftSync/types";
+import { prepareEditableRiskSnapshot, riskTemplateFromDataUrl } from "../../lib/draftSync/riskPage";
 import { preparePosterSnapshot } from "../../lib/export/preparePosterSnapshot";
 
 export type ExportVersion = { inputKey: string; paginationVersion: number };
@@ -69,6 +71,7 @@ export function usePosterExport({
   setShowAllPreviewPages, onNotice: setNotice,
 }: PosterExportOptions) {
   const [exporting, setExporting] = useState(false);
+  const exportingRef = useRef(false);
   const htmlToImageModuleRef = useRef<Promise<typeof import("html-to-image")> | null>(null);
   const jsZipModuleRef = useRef<Promise<{ default: typeof import("jszip") }> | null>(null);
   const fontEmbedCssRef = useRef<{ key: string; promise: Promise<string> } | null>(null);
@@ -76,6 +79,18 @@ export function usePosterExport({
   useEffect(() => {
     fontEmbedCssRef.current = null;
   }, [fontKey]);
+
+  function beginExport() {
+    if (exportingRef.current) return false;
+    exportingRef.current = true;
+    setExporting(true);
+    return true;
+  }
+
+  function finishExport() {
+    exportingRef.current = false;
+    setExporting(false);
+  }
 
   async function getHtmlToImageModule() {
     htmlToImageModuleRef.current ||= import("html-to-image");
@@ -114,7 +129,7 @@ export function usePosterExport({
     return current;
   }
 
-  async function renderPage(index: number, version: ExportVersion) {
+  async function renderPage(index: number, version: ExportVersion, editableRisk = false) {
     requireCurrentExport(version);
     await withTimeout(waitForFonts(), 20000, "字体加载超时，请刷新页面后重试");
     requireCurrentExport(version);
@@ -134,7 +149,7 @@ export function usePosterExport({
     const controller = new AbortController();
     const renderTimer = window.setTimeout(() => controller.abort(), 90000);
     try {
-      const blob = await withTimeout(imageModule.toBlob(snapshot.node, {
+      const imageOptions: Parameters<typeof imageModule.toBlob>[1] = {
         width: format.width,
         height: format.height,
         pixelRatio: 1,
@@ -146,10 +161,23 @@ export function usePosterExport({
         backgroundColor: paperColor,
         filter: (capturedNode) => !(capturedNode instanceof HTMLElement && capturedNode.classList.contains("page-export")),
         style: { transform: "none", transformOrigin: "top left" },
-      }), 95000, `第 ${index + 1} 页转换超时`);
+      };
+      const blob = await withTimeout(imageModule.toBlob(snapshot.node, imageOptions), 95000, `第 ${index + 1} 页转换超时`);
       requireCurrentExport(version);
       if (!blob) throw new Error(`第 ${index + 1} 页图片生成失败`);
-      return blob;
+      let riskTemplate: DraftImage["riskTemplate"];
+      if (editableRisk) {
+        prepareEditableRiskSnapshot(snapshot.node);
+        for (const link of snapshot.node.querySelectorAll<HTMLAnchorElement>("a")) {
+          const style = getComputedStyle(link);
+          for (const property of ["color", "text-decoration", "text-decoration-line", "text-decoration-color", "text-decoration-style"]) link.style.setProperty(property, style.getPropertyValue(property));
+          link.removeAttribute("href"); link.removeAttribute("target"); link.removeAttribute("rel");
+        }
+        const svg = await withTimeout(imageModule.toSvg(snapshot.node, imageOptions), 95000, "末页模板准备超时，请重试");
+        requireCurrentExport(version);
+        riskTemplate = riskTemplateFromDataUrl(svg, format.width, format.height);
+      }
+      return { blob, ...(riskTemplate ? { riskTemplate } : {}) };
     } finally {
       window.clearTimeout(renderTimer);
       snapshot.dispose();
@@ -157,11 +185,11 @@ export function usePosterExport({
   }
 
   async function exportOne(index: number) {
-    setExporting(true);
+    if (!beginExport()) return;
     setNotice({ tone: "neutral", text: `正在导出第 ${index + 1} 页…` });
     try {
       const version = requireCurrentExport();
-      const blob = await renderPage(index, version);
+      const { blob } = await renderPage(index, version);
       requireCurrentExport(version);
       const platform = formatExportLabel(formatKey);
       const downloadUrl = URL.createObjectURL(blob);
@@ -171,12 +199,12 @@ export function usePosterExport({
     } catch (error) {
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "导出失败，请刷新页面后重试" });
     } finally {
-      setExporting(false);
+      finishExport();
     }
   }
 
   async function exportAll() {
-    setExporting(true);
+    if (!beginExport()) return;
     try {
       const version = requireCurrentExport();
       jsZipModuleRef.current ||= import("jszip");
@@ -185,7 +213,7 @@ export function usePosterExport({
       const zip = new JSZip();
       for (let index = 0; index < totalPages; index += 1) {
         setNotice({ tone: "neutral", text: index === 0 ? "正在准备导出字体（首次约需数秒）…" : `正在打包 ${index + 1} / ${totalPages}…` });
-        const blob = await renderPage(index, version);
+        const { blob } = await renderPage(index, version);
         const platform = formatExportLabel(formatKey);
         zip.file(`折页-${platform}-${String(index + 1).padStart(2, "0")}.png`, blob);
       }
@@ -200,9 +228,33 @@ export function usePosterExport({
       jsZipModuleRef.current = null;
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "批量导出失败，请尝试单张导出" });
     } finally {
-      setExporting(false);
+      finishExport();
     }
   }
 
-  return { exporting, exportOne, exportAll };
+  async function collectAssets(options?: { editableRisk?: boolean }): Promise<DraftImage[]> {
+    if (!beginExport()) throw new Error("图片正在处理中，请等待当前任务完成");
+    try {
+      const version = requireCurrentExport();
+      if (!totalPages) throw new Error("请先完成排版，再准备草稿图片");
+      const images: DraftImage[] = [];
+      for (let index = 0; index < totalPages; index += 1) {
+        setNotice({ tone: "neutral", text: `正在准备草稿图片 ${index + 1} / ${totalPages}…` });
+        const image = await renderPage(index, version, Boolean(options?.editableRisk && index === totalPages - 1));
+        requireCurrentExport(version);
+        images.push({
+          id: crypto.randomUUID(),
+          name: `折页-${formatExportLabel(formatKey)}-${String(index + 1).padStart(2, "0")}.png`,
+          ...image, width: format.width, height: format.height,
+        });
+      }
+      requireCurrentExport(version);
+      setNotice({ tone: "success", text: `${images.length} 张草稿图片已准备好` });
+      return images;
+    } finally {
+      finishExport();
+    }
+  }
+
+  return { exporting, exportOne, exportAll, collectAssets };
 }
