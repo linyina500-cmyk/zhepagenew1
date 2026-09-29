@@ -85,13 +85,16 @@ function creatorFixture() {
 }
 
 const scratch = await mkdtemp(join(tmpdir(), "zhepage-xhs-extension-"));
-let context, server;
+let context, server, homeRequests = 0;
 try {
   const bundle = await packBrowserExtension(join(scratch, "package"));
   await promisify(execFile)("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(scratch, "key.pem"), "-out", join(scratch, "cert.pem"), "-days", "1", "-subj", "/CN=fixture.invalid"]);
   server = createServer({ key: await readFile(join(scratch, "key.pem")), cert: await readFile(join(scratch, "cert.pem")) }, (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    if (req.headers.host === "creator.xiaohongshu.com") return res.end(`<html><head><meta charset="utf-8"></head><body><script>(${creatorFixture.toString()})()</script></body></html>`);
+    if (req.headers.host === "creator.xiaohongshu.com") {
+      if (new URL(req.url, "https://creator.xiaohongshu.com").pathname === "/new/home") homeRequests++;
+      return res.end(`<html><head><meta charset="utf-8"></head><body><script>(${creatorFixture.toString()})()</script></body></html>`);
+    }
     if (req.headers.host === "feature-local-draft-sync.zhepagenew.pages.dev") return res.end('<html><head><meta charset="utf-8"></head><body>折页扩展测试</body></html>');
     res.writeHead(403); res.end();
   });
@@ -118,12 +121,29 @@ try {
   }
   assert.equal(login.status, 200); assert.equal(login.body.status, "connected");
   const account = login.body.account;
-  const images = await page.evaluate(() => ["#bb3322", "#2266cc"].map((color) => {
-    const canvas = document.createElement("canvas"); canvas.width = 4; canvas.height = 6;
-    const ctx = canvas.getContext("2d"); ctx.fillStyle = color; ctx.fillRect(0, 0, 4, 6); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, 1, 1);
+  // Observe the real tabs API after the explicit login window has opened.
+  // Six uploads must refresh one inactive account-check page, not repeatedly
+  // create/close tabs or activate the editor at each image boundary.
+  const initialWorker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
+  await initialWorker.evaluate(() => {
+    const trace = { created: [], removed: [], activated: [] };
+    globalThis.__xhsTabTrace = trace;
+    chrome.tabs.onCreated.addListener((tab) => { trace.created.push({ id: tab.id, url: tab.pendingUrl || tab.url || "", active: tab.active }); });
+    chrome.tabs.onUpdated.addListener((id, change, tab) => {
+      const created = trace.created.find((entry) => entry.id === id);
+      if (created && (!created.url || created.url === "about:blank")) created.url = change.url || tab.pendingUrl || tab.url || created.url;
+    });
+    chrome.tabs.onRemoved.addListener((id) => { trace.removed.push(id); });
+    chrome.tabs.onActivated.addListener(({ tabId }) => { trace.activated.push(tabId); });
+  });
+  const homeRequestsBeforeTask = homeRequests;
+  const images = await page.evaluate(() => ["#bb3322", "#2266cc", "#448855", "#ddaa33", "#8844aa", "#22aaaa"].map((color, index) => {
+    const canvas = document.createElement("canvas"); canvas.width = 6; canvas.height = 8;
+    const ctx = canvas.getContext("2d"); ctx.fillStyle = color; ctx.fillRect(0, 0, 6, 8); ctx.fillStyle = "#fff"; ctx.fillRect(index, index, 1, 1);
     return canvas.toDataURL("image/png").split(",")[1];
   }));
-  const jobId = randomUUID(), title = "两张图片测试", body = "第一段\n\n第二段";
+  assert.equal(images.length, 6); assert.equal(new Set(images).size, 6);
+  const jobId = randomUUID(), title = "六张图片测试", body = "第一段\n\n第二段";
   const form = { kind: "form", entries: [
     { key: "id", value: jobId }, { key: "expectedAccountId", value: account.id }, { key: "title", value: title }, { key: "body", value: body },
     ...images.map((data, index) => ({ key: "images", file: { name: `poster-${index + 1}.png`, type: "image/png", data } })),
@@ -138,7 +158,20 @@ try {
   }
   if (result.body.job?.status !== "saved") console.info(JSON.stringify(await Promise.all(context.pages().map(async (page) => ({ url: page.url(), content: (await page.content()).slice(0, 2500) })))));
   assert.equal(result.body.job?.status, "saved", JSON.stringify(result));
-  assert.equal(result.body.job.uploadedCount, 2); assert.ok(result.body.job.draftId);
+  assert.equal(result.body.job.uploadedCount, images.length); assert.ok(result.body.job.draftId);
+  assert.ok(homeRequests - homeRequestsBeforeTask >= images.length + 5,
+    "submission, preparation, every image, save and both verification boundaries must read fresh HOME documents");
+  const tabEvidence = await initialWorker.evaluate(() => globalThis.__xhsTabTrace);
+  const homeTabs = tabEvidence.created.filter((tab) => new URL(tab.url).pathname === "/new/home");
+  const editorTabs = tabEvidence.created.filter((tab) => new URL(tab.url).pathname === "/publish/publish");
+  assert.equal(homeTabs.length, 1, JSON.stringify(tabEvidence));
+  assert.equal(homeTabs[0].active, false, "account checking must open one inactive HOME tab");
+  assert.equal(tabEvidence.removed.filter((id) => id === homeTabs[0].id).length, 0, "keep the account-check page for subsequent checks");
+  assert.equal(tabEvidence.activated.filter((id) => id === homeTabs[0].id).length, 0, "account checking must never steal focus");
+  assert.equal(editorTabs.length, 1, "six images share one sync editor");
+  assert.equal(tabEvidence.activated.filter((id) => id === editorTabs[0].id).length, 1, "activate the editor only when it is first opened");
+  const retainedHome = await initialWorker.evaluate((id) => chrome.tabs.get(id), homeTabs[0].id);
+  assert.equal(new URL(retainedHome.url).pathname, "/new/home"); assert.equal(retainedHome.active, false);
   assert.equal(await original.locator("#title").inputValue(), "原有未保存标题");
   const evidence = await original.evaluate(() => ({ count: localStorage.getItem("fixture-save-count"), published: localStorage.getItem("fixture-publish-count"), drafts: JSON.parse(localStorage.getItem("fixture-drafts") || "[]") }));
   assert.equal(evidence.count, "1"); assert.equal(evidence.published, null); assert.equal(evidence.drafts.length, 1);
@@ -146,6 +179,9 @@ try {
   assert.deepEqual(evidence.drafts[0].sources.map((source) => source.split(",")[1]), images);
   assert.equal((await request("/api/xiaohongshu/jobs", "POST", form)).body.job.status, "saved");
   assert.equal(await original.evaluate(() => localStorage.getItem("fixture-save-count")), "1");
+  assert.equal((await request("/api/xiaohongshu/account")).body.account.id, account.id);
+  const afterNextCheck = await initialWorker.evaluate(() => globalThis.__xhsTabTrace);
+  assert.deepEqual(afterNextCheck, tabEvidence, "a later account check must reuse HOME without creating, removing or activating tabs");
   await context.close(); context = await launch();
   const preserved = await context.newPage();
   await preserved.goto("https://creator.xiaohongshu.com/publish/publish?target=image&existing=1");
@@ -160,7 +196,7 @@ try {
   assert.equal(await preserved.locator("#title").inputValue(), "原有未保存标题");
   assert.equal(await preserved.evaluate(() => localStorage.getItem("fixture-save-count")), "1");
   assert.equal(await preserved.evaluate(() => localStorage.getItem("fixture-publish-count")), null);
-  console.info("MV3 Xiaohongshu fixture passed: isolated script serialization, native editing events, two DataTransfer uploads, canvas fingerprints, MAIN draft save, reopen verification, idempotency, untouched user editor and known-draft recovery after real browser restart.");
+  console.info("MV3 Xiaohongshu fixture passed: six distinct DataTransfer uploads preserve exact bytes and order; one retained inactive HOME page refreshes all account boundaries; the editor activates once; MAIN saves once, reopen verification and idempotency pass, user editors stay untouched, and known drafts recover after real browser restart.");
 } finally {
   await context?.close(); server?.closeAllConnections(); await new Promise((resolve) => server ? server.close(resolve) : resolve()); await rm(scratch, { recursive: true, force: true });
 }

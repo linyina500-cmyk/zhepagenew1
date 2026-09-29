@@ -6,6 +6,15 @@ const HOME = `${XHS_ORIGIN}/new/home`;
 const EDITOR = `${XHS_ORIGIN}/publish/publish?from=menu_left&target=image`;
 const IMAGE_KEY = /^pixels:[1-9]\d*x[1-9]\d*:[a-f0-9]{64}$/u;
 const SESSION_OWNERS = "zhepage:xhs:owned-tabs";
+const ACCOUNT_TAB = "zhepage:xhs:account-tab";
+function refreshAccountPage() {
+  if (location.origin !== "https://creator.xiaohongshu.com" || location.pathname !== "/new/home") return false;
+  location.reload();
+  return true;
+}
+function readAccountLocation() {
+  return { origin: location.origin, pathname: location.pathname, readyState: document.readyState };
+}
 export class XhsError extends Error {
   constructor(message, status = 409) { super(message); this.name = "XhsError"; this.status = status; }
 }
@@ -36,43 +45,65 @@ export function createXhsBrowser({ store, chromeApi = globalThis.chrome, timeout
     if (!tab.url || new URL(tab.url).origin !== XHS_ORIGIN) throw new XhsError("小红书标签页未正常加载，请检查网络和登录状态。");
     return tab;
   }
-  async function close(ref) {
-    // Only close a tab created by this extension in this browser session.
-    try {
-      await owned(ref); await chromeApi.tabs.remove(ref.id);
-      const owners = (await chromeApi.storage.session.get(SESSION_OWNERS))[SESSION_OWNERS] || {};
-      if (owners[ref.id] === ref.owner) { delete owners[ref.id]; await chromeApi.storage.session.set({ [SESSION_OWNERS]: owners }); }
-    } catch { /* Preserve unrelated/replaced tabs. */ }
-  }
-  async function inject(ref, func, arg, world = "ISOLATED") {
+  async function injectFrame(ref, func, arg, world = "ISOLATED", documentId) {
     await owned(ref);
     try {
-      const results = await chromeApi.scripting.executeScript({ target: { tabId: ref.id, frameIds: [0] }, world, func, args: arg === undefined ? [] : [arg] });
-      if (results.length !== 1 || results[0].frameId !== 0 || results[0].error) throw new Error("missing frame result");
-      return results[0].result;
+      const target = documentId ? { tabId: ref.id, documentIds: [documentId] } : { tabId: ref.id, frameIds: [0] };
+      const results = await chromeApi.scripting.executeScript({ target, world, func, args: arg === undefined ? [] : [arg] });
+      if (results.length !== 1 || results[0].frameId !== 0 || results[0].error || (documentId && results[0].documentId !== documentId)) throw new Error("missing frame result");
+      return results[0];
     } catch { throw new XhsError("小红书页面未能完成操作，请检查同步标签页；本次不会重复上传或保存。"); }
   }
-  async function readAccount(ref) {
+  async function inject(ref, func, arg, world = "ISOLATED") {
+    return (await injectFrame(ref, func, arg, world)).result;
+  }
+  async function readAccount(ref, previousDocumentId) {
     const deadline = Date.now() + Math.min(timeoutMs, 30_000);
     while (Date.now() < deadline) {
       try {
         const tab = await owned(ref), url = new URL(tab.url);
+        if (tab.status !== "complete" || tab.pendingUrl) { await pause(250); continue; }
         if (url.pathname.startsWith("/login")) {
-          const login = await inject(ref, readLoginEvidence);
-          if (login?.loginVisible) return { status: "login_required", message: "请在打开的小红书标签页扫码，完成后点击“我已登录”。" };
+          const frame = await injectFrame(ref, readLoginEvidence);
+          if ((!previousDocumentId || (frame.documentId && frame.documentId !== previousDocumentId)) && frame.result?.loginVisible) return { status: "login_required", message: "请在打开的小红书标签页扫码，完成后点击“我已登录”。" };
         } else if (url.pathname === "/new/home") {
-          const value = await inject(ref, readAccountEvidence);
-          const after = new URL((await owned(ref)).url);
-          if (value && after.pathname === "/new/home") return { status: "connected", account: { id: (await hexHash(`xiaohongshu-account:${value.identifier}`)).slice(0, 20), name: value.name } };
+          const frame = await injectFrame(ref, readAccountEvidence), value = frame.result;
+          if (frame.documentId && frame.documentId !== previousDocumentId && value) {
+            const id = (await hexHash(`xiaohongshu-account:${value.identifier}`)).slice(0, 20);
+            const current = await injectFrame(ref, readAccountLocation), after = await owned(ref);
+            if (current.documentId === frame.documentId && current.result?.origin === XHS_ORIGIN && current.result.pathname === "/new/home" && current.result.readyState === "complete" && after.status === "complete" && !after.pendingUrl && new URL(after.url).pathname === "/new/home") return { status: "connected", account: { id, name: value.name } };
+          }
         }
       } catch { /* Read-only navigation races can be retried within the deadline. */ }
       await pause(250);
     }
     return { status: "needs_attention", message: "小红书页面尚未正常加载，请检查刚打开的标签页后重试。当前没有上传图片。" };
   }
+  async function accountPage(ref) {
+    const tab = await owned(ref);
+    const pending = tab.pendingUrl ? new URL(tab.pendingUrl) : null;
+    if (new URL(tab.url).pathname !== "/new/home" || (pending && (pending.origin !== XHS_ORIGIN || pending.pathname !== "/new/home"))) throw new XhsError("账号核对页已被用于其他操作，请重新核对账号。原页面已保留。");
+    return tab;
+  }
   async function accountState() {
-    const ref = await newTab(HOME);
-    try { return await readAccount(ref); } finally { await close(ref); }
+    let ref = (await chromeApi.storage.session.get(ACCOUNT_TAB))[ACCOUNT_TAB];
+    try { await accountPage(ref); } catch { ref = null; }
+    if (!ref) {
+      // Keep one inactive, extension-owned check page for the browser session.
+      // Never reuse a login tab or an editor the user may be working in.
+      ref = await newTab(HOME);
+      await chromeApi.storage.session.set({ [ACCOUNT_TAB]: ref });
+      return readAccount(ref);
+    }
+    const previous = await injectFrame(ref, readAccountEvidence);
+    if (!previous.documentId) throw new XhsError("账号核对页暂时无法刷新，请重新核对账号。");
+    await accountPage(ref);
+    // Bind the refresh to the checked document and guard its live route, so a
+    // navigation to the user's editor cannot make us reload that editor.
+    const refreshed = await injectFrame(ref, refreshAccountPage, undefined, "ISOLATED", previous.documentId);
+    if (refreshed.result !== true) throw new XhsError("账号核对页已被用于其他操作，请重新核对账号。原页面已保留。");
+    // Requesting reload does not mean the replacement document has loaded.
+    return readAccount(ref, previous.documentId);
   }
   async function requireAccount(account) {
     const state = await accountState();
