@@ -60,13 +60,26 @@ test("publication copy and QR updates persist, keep the card whole, and appear i
   const png = await readFile(file);
   expect(png.readUInt32BE(16)).toBe(1080);
   expect(png.readUInt32BE(20)).toBe(1440);
-  const pixel = await page.evaluate(async ({ base64, x, y }) => {
+  const pixels = await page.evaluate(async ({ base64, x, y }) => {
     const image = new Image(); image.src = `data:image/png;base64,${base64}`; await image.decode();
     const canvas = document.createElement("canvas"); canvas.width = 1080; canvas.height = 1440;
     const context = canvas.getContext("2d")!; context.drawImage(image, 0, 0);
-    return [...context.getImageData(x, y, 1, 1).data];
+    const qr = [...context.getImageData(x, y, 1, 1).data];
+    const background = document.querySelector<HTMLImageElement>(".poster-grid .lead-card-background")!;
+    const box = background.getBoundingClientRect(), poster = background.closest(".poster-page")!.getBoundingClientRect();
+    const rect = { x: (box.left - poster.left) * 1080 / poster.width, y: (box.top - poster.top) * 1440 / poster.height, width: box.width * 1080 / poster.width, height: box.height * 1440 / poster.height };
+    const points = [[.025, .6], [.5, .975], [.96, .5]].map(([px, py]) => ({ x: Math.round(rect.x + rect.width * px), y: Math.round(rect.y + rect.height * py) }));
+    const actual = points.map((point) => [...context.getImageData(point.x, point.y, 1, 1).data]);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(background, rect.x, rect.y, rect.width, rect.height);
+    const expected = points.map((point) => [...context.getImageData(point.x, point.y, 1, 1).data]);
+    return { qr, actual, expected };
   }, { base64: png.toString("base64"), x: marker.x, y: marker.y });
-  expect(pixel).toEqual([17, 193, 137, 255]);
+  expect(pixels.qr).toEqual([17, 193, 137, 255]);
+  for (let index = 0; index < pixels.actual.length; index++) {
+    const difference = pixels.actual[index].map((value, channel) => Math.abs(value - pixels.expected[index][channel]));
+    expect(Math.max(...difference), `Exported golden background at sample ${index}`).toBeLessThanOrEqual(12);
+  }
   await testInfo.attach("edited publication PNG", { path: file, contentType: "image/png" });
   await page.setViewportSize({ width: 390, height: 844 });
   await expectPreviewReady(page);

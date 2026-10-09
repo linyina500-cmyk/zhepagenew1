@@ -52,6 +52,7 @@ export function createLeadCardHtml(publicationName: string, guide: string, qrDat
     : '<div class="lead-card-qr-placeholder"><span aria-hidden="true">▦</span><span>上传你的二维码</span></div>';
   const guideText = escapeHtml(guide).replace(/即可领取！$/, "<span>即可领取！</span>");
   return `<aside class="lead-magnet-card" aria-label="PDF 刊物领取卡">
+    <img class="lead-card-background" src="/publication-background.png" alt="" aria-hidden="true">
     ${copy("lead-card-intro", details.intro, 46, 2.82, 4.15)}
     ${copy("lead-card-title", heading, 89, 6.5, 7.8)}
     ${copy("lead-card-summary", details.summary, 78, 2.65, 3.55)}

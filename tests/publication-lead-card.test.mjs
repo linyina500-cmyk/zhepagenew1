@@ -72,7 +72,7 @@ test("editable copy remains literal text instead of creating HTML elements or at
     assert.equal(textAt(card, selector), details[key]);
   }
   assert.equal(card.querySelectorAll("script, iframe, [onerror], [onload]").length, 0);
-  assert.equal(card.querySelectorAll("img").length, 2, "Only the built-in icon and cover image should exist");
+  assert.equal(card.querySelectorAll("img").length, 3, "Only the built-in background, icon and cover image should exist");
   assert.ok(card.querySelector("img.lead-card-cover-image"));
 });
 
