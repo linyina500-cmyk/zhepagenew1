@@ -136,7 +136,8 @@ export default function LocalSyncConnection({ binding, accounts, busy, runOperat
       <ExtensionGuide />
       <details className="draft-sync-connection-help"><summary>连接帮助</summary>
         <p className="draft-sync-small">请在加载了插件的同一个 <a href="https://www.google.com/chrome/" target="_blank" rel="noreferrer">Chrome 浏览器</a>中打开折页。若未检测到，检查扩展页中的折页插件是否已启用，再回到这里重试。</p>
-        <p className="draft-sync-small">换电脑或浏览器后，需要重新加载插件、登录小红书或添加公众号，账号密钥不会自动迁移。</p>
+        <p className="draft-sync-small">已在预览站装过旧版插件？请下载新版并覆盖原插件文件夹，在 Chrome 扩展页点「重新加载」，再刷新折页。</p>
+        <p className="draft-sync-small">换电脑或浏览器后，需要重新加载插件、登录小红书或添加公众号。从预览站切到主站也需重新检测插件、添加公众号，账号密钥不会自动迁移。</p>
         {!(binding && verified?.changed && accounts.length) && resetButton}
       </details>
     </>}

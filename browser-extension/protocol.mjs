@@ -1,4 +1,4 @@
-export const ALLOWED_ORIGINS = new Set(["https://feature-local-draft-sync.zhepagenew.pages.dev"]);
+export const ALLOWED_ORIGINS = new Set(["https://zhepagenew.pages.dev", "https://feature-local-draft-sync.zhepagenew.pages.dev"]);
 export const PROTOCOL = 1;
 export class ProtocolError extends Error {
   constructor(message, status = 400) { super(message); this.name = "ProtocolError"; this.status = status; }

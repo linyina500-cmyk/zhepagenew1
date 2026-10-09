@@ -93,7 +93,11 @@ test("bold edits reach the real export snapshot while independent imported text 
           const walker = doc.createTreeWalker(doc, NodeFilter.SHOW_TEXT);
           for (let node = walker.nextNode(); node; node = walker.nextNode()) {
             for (const text of ["取消粗体", "新增粗体"]) {
-              if (node.textContent?.includes(text)) summary[text] = (node.parentElement as HTMLElement).style.fontWeight;
+              if (node.textContent?.includes(text)) {
+                const weight = (node.parentElement as HTMLElement).style.fontWeight;
+                // Firefox serializes the computed 400 weight as "normal".
+                summary[text] = weight === "normal" ? "400" : weight === "bold" ? "700" : weight;
+              }
             }
           }
           if (Object.keys(summary).length) state.boldExportWeights!.push(summary);

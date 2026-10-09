@@ -27,11 +27,22 @@ function assertEmbeddedCss(css: string) {
   // CSP is a second boundary: no network resource is allowed during measurement.
   const decoded = css.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/\\([0-9a-f]{1,6})\s?|\\([^\r\n])/giu, (_, hex: string, character: string) => hex ? String.fromCodePoint(Math.min(parseInt(hex, 16), 0x10ffff)) : character);
   if (/@import|@namespace|expression\s*\(|-moz-binding|javascript\s*:|\b(?:image|image-set|cross-fade|paint)\s*\(/iu.test(decoded)) throw invalid();
-  const remaining = decoded.replace(/url\(\s*(["']?)(.*?)\1\s*\)/giu, (_, _quote: string, value: string) => {
-    if (!embedded.test(value.trim())) throw invalid();
-    return "";
-  });
-  if (/url\s*\(/iu.test(remaining)) throw invalid();
+  // Embedded CJK fonts can make this CSS tens of megabytes long. A lazy
+  // capture followed by a quote backreference overflows Firefox's regex stack.
+  // Scan each URL's delimiters directly, including malformed trailing tokens.
+  const urls = /url\s*\(/giu;
+  for (let match = urls.exec(decoded); match; match = urls.exec(decoded)) {
+    if (match[0].length !== 4) throw invalid();
+    let start = urls.lastIndex;
+    while (/\s/u.test(decoded[start] || "")) start++;
+    const quote = decoded[start] === '"' || decoded[start] === "'" ? decoded[start++] : "";
+    const end = decoded.indexOf(quote || ")", start);
+    if (end < 0 || !embedded.test(decoded.slice(start, end).trim())) throw invalid();
+    let closing = quote ? end + 1 : end;
+    while (/\s/u.test(decoded[closing] || "")) closing++;
+    if (decoded[closing] !== ")") throw invalid();
+    urls.lastIndex = closing + 1;
+  }
 }
 
 /** Validate while detached, before either the HTML or its styles can load. */

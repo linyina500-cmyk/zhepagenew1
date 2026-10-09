@@ -116,6 +116,23 @@ test("embedded raster and font resources with decoration CSS are accepted", (t) 
   assert.equal(parseRiskTemplate(svg, 1080, 1440).poster.localName, "article");
 });
 
+test("large embedded font CSS preserves URL validation through its final resource", (t) => {
+  fixture(t);
+  const font = `data:font/woff2;base64,${"A".repeat(4 * 1024 * 1024)}`;
+  const stylesheet = `@font-face{font-family:embedded;src:url("${font}")} .test{background:url('data:image/png;base64,ZmFrZQ==')}`;
+  const svg = template().replace(".test::after", `${stylesheet} .test::after`);
+  assert.equal(parseRiskTemplate(svg, 1080, 1440).poster.localName, "article");
+  for (const trailing of [
+    'url("https://evil.test/image")',
+    'url(data:image/png;base64,ZmFrZQ==',
+    'url("data:image/png;base64,ZmFrZQ==\')',
+    'url("data:image/png;base64,ZmFrZQ==" unexpected)',
+    'url ("data:image/png;base64,ZmFrZQ==")',
+  ]) {
+    assert.throws(() => parseRiskTemplate(svg.replace(".test::after", `.trailing{background:${trailing}} .test::after`), 1080, 1440), /模板不完整|外部资源/);
+  }
+});
+
 test("cancellation during font preparation or PNG encoding cleans up staged DOM and canvas", async (t) => {
   for (const stage of ["fonts", "png"]) await t.test(stage, async (t) => {
     const f = fixture(t, stage === "fonts" ? { fonts: new Promise(() => {}) } : { pendingPng: true }), controller = new AbortController();

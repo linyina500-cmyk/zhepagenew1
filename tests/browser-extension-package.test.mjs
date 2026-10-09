@@ -10,14 +10,20 @@ test('portable ZIP loads directly from its extracted root and contains no native
   try {
     const packed=await packBrowserExtension(temp),zip=await JSZip.loadAsync(await readFile(packed.archive));
     const manifest=JSON.parse(await zip.file('manifest.json').async('string'));
-    assert.equal(manifest.manifest_version,3);assert.ok(zip.file(manifest.background.service_worker));
+    assert.equal(manifest.manifest_version,3);assert.equal(manifest.version,'1.0.2');assert.ok(zip.file(manifest.background.service_worker));
     assert.deepEqual(manifest.permissions,['scripting','storage']);
     assert.ok(!manifest.permissions.includes('nativeMessaging'));assert.ok(!manifest.permissions.includes('proxy'));
     const allowed=/^(?:manifest\.json|开始使用\.txt|browser-extension\/[a-z-]+\.mjs|lib\/wechat\/api\.mjs)$/;
     for(const [name,file]of Object.entries(zip.files))if(!file.dir)assert.match(name,allowed);
     assert.equal(Object.keys(zip.files).some(name=>/config\.env|\.exe$|node_modules|profile|cookie|\.pem$/.test(name)),false);
     const transport=await readFile(new URL('../lib/localSync/transport.ts',import.meta.url),'utf8');assert.ok(transport.includes(packed.id));
-    assert.deepEqual(manifest.externally_connectable.matches,['https://feature-local-draft-sync.zhepagenew.pages.dev/*']);
+    assert.equal(packed.id,'embegpbimagclbddlgcnbafnficdpjmi','updating the package must retain the installed extension identity');
+    assert.deepEqual(manifest.externally_connectable.matches,['https://zhepagenew.pages.dev/*','https://feature-local-draft-sync.zhepagenew.pages.dev/*']);
+    const instructions=await zip.file('开始使用.txt').async('string');
+    assert.match(instructions,/主站 https:\/\/zhepagenew\.pages\.dev\//u);
+    assert.match(instructions,/预览站 https:\/\/feature-local-draft-sync\.zhepagenew\.pages\.dev\//u);
+    assert.match(instructions,/两站不会自动迁移账号密钥/u);
+    assert.match(await zip.file(manifest.background.service_worker).async('string'),/tabs\.create\(\{ url: "https:\/\/zhepagenew\.pages\.dev\/" \}\)/u);
     assert.ok(packed.bytes<1024*1024);
   } finally{await rm(temp,{recursive:true,force:true});}
 });

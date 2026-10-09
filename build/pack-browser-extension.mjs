@@ -27,7 +27,7 @@ export async function packBrowserExtension(outputRoot = path.join(root, "dist-ex
     zip.file(file, contents, { date: new Date("2026-01-01T00:00:00Z") });
   }
   const manifestText = JSON.stringify(manifest, null, 2) + "\n";
-  const instructions = "折页草稿同步插件\n\nWindows 和 Mac 共用此文件夹，无需安装电脑程序。\n1. 将整个文件夹放在固定位置。\n2. 在 Chrome 地址栏输入 chrome://extensions/，开启开发者模式，点击加载已解压的扩展程序，选择此文件夹（内含 manifest.json）。\n3. 回到折页，点击检测插件。同步期间保持浏览器和折页网页开启。\n\n更新插件：先等待当前同步完成，将新版文件覆盖原插件文件夹；在 chrome://extensions/ 点击折页插件的重新加载，再刷新折页网页。无需删除插件。\n\n插件仅保存草稿，不发表。小红书登录当前 Chrome 账号，草稿留在当前浏览器。公众号使用官方接口，需要账号权限和当前网络 IP 白名单。账号密钥不会上传折页网站，不会跨设备同步。公众号封面请在后台重新选择并确认保存。\n";
+  const instructions = "折页草稿同步插件\n\nWindows 和 Mac 共用此文件夹，无需安装电脑程序。\n1. 将整个文件夹放在固定位置。\n2. 在 Chrome 地址栏输入 chrome://extensions/，开启开发者模式，点击加载已解压的扩展程序，选择此文件夹（内含 manifest.json）。\n3. 打开主站 https://zhepagenew.pages.dev/，点击检测插件。同步期间保持浏览器和折页网页开启。\n\n更新插件：先等待当前同步完成，将新版文件覆盖原插件文件夹；在 chrome://extensions/ 点击折页插件的重新加载，再刷新折页网页。无需删除插件。1.0.2 起同时支持主站和预览站 https://feature-local-draft-sync.zhepagenew.pages.dev/。\n\n公众号资料只保存在当前电脑、当前浏览器、当前网址。首次从预览站切到主站，需重新检测插件并添加公众号；两站不会自动迁移账号密钥。\n\n插件仅保存草稿，不发表。小红书登录当前 Chrome 账号，草稿留在当前浏览器。公众号使用官方接口，需要账号权限和当前网络 IP 白名单。账号密钥不会上传折页网站，不会跨设备同步。公众号封面请在后台重新选择并确认保存。\n";
   for (const [name, content] of [["manifest.json", manifestText], ["开始使用.txt", instructions]]) {
     await writeFile(path.join(directory, name), content);
     zip.file(name, content, { date: new Date("2026-01-01T00:00:00Z") });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "折页 · 草稿同步",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "将折页图片和配文保存到小红书或公众号草稿箱。账号资料仅在当前浏览器使用。",
   "minimum_chrome_version": "120",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuQ/98FaiofUoIKpAl7AJfgUMTC+FOjuxxIo2lGZ9OwRstUeQoL8wWr3hMUWo5bZCm+VRbsaiZYd+XOyWLFI5a7+REPlJ6+8kWKI0SRQlAe1si9N4y52WQZCNbBiCzdrIptL4srJGkSHU5aOE+7aqZBHR1vuLaD4LL3auCR88tDOo5lzTbZIhUST61XyQY9YNdhQWWOnkEPJjKhNp/WuYss1mGRb5P8F/iQPgMuyPWVaDHFTmg3qHkz+MHbZ8GrnkLBDog7AkjHhajFkDevAF+rnS8pyIomjGJrMlM5Ag0+1YtbDoErdgQWkGoUM60UrIlefCS1GFyyEj4n6tKflTuwIDAQAB",
@@ -22,6 +22,7 @@
   },
   "externally_connectable": {
     "matches": [
+      "https://zhepagenew.pages.dev/*",
       "https://feature-local-draft-sync.zhepagenew.pages.dev/*"
     ]
   },

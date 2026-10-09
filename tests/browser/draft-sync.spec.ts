@@ -330,6 +330,50 @@ test("risk confirmation regenerates only the existing last page, preserving body
   expect(await imageManifest(dialog)).toEqual(confirmedByPlatform.get("wechat"));
 });
 
+test("publication card and QR survive editable last-page export and risk confirmation", async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.evaluate(() => localStorage.setItem("zhepage-workspace-v2", JSON.stringify({
+    version: 2, title: "刊物末页兼容性", firstPageContent: false, autoStructure: false,
+    formatKey: "xiaohongshu", showRiskNote: true, bottomReserve: 180,
+    articleHtml: '<p>正文与刊物完整保留。</p><div class="lead-card-placeholder">PDF 刊物领取卡</div>',
+    publicationName: "智能制造产业观察与关键方向",
+  })));
+  await page.reload();
+  await expectPreviewReady(page);
+  await page.locator("#qr-upload").setInputFiles({ name: "publication-qr.png", mimeType: "image/png", buffer: makePng(17, 193, 137) });
+  await expectPreviewReady(page);
+  const posters = page.locator(".poster-grid .content-page");
+  await expect(posters).toHaveCount(1);
+  await expect(posters.locator(".lead-magnet-card")).toHaveCount(1);
+  const bodyBottomRatio = await posters.evaluate((poster) => {
+    const pageBox = poster.getBoundingClientRect(), riskBox = poster.querySelector(".risk-note")!.getBoundingClientRect();
+    return (riskBox.top - pageBox.top) / pageBox.height - 0.01;
+  });
+  const qrPoint = await posters.locator(".lead-card-qr").evaluate((image) => {
+    const box = image.getBoundingClientRect(), poster = image.closest(".poster-page")!.getBoundingClientRect();
+    return { x: Math.round((box.left + box.width / 2 - poster.left) * 1080 / poster.width), y: Math.round((box.top + box.height / 2 - poster.top) * 1440 / poster.height) };
+  });
+  const dialog = await openDraftDialog(page);
+  await expect(sourceCards(dialog)).toHaveCount(1, { timeout: 110_000 });
+  const before = await imageManifest(dialog), bodyBefore = await lastPageBodyHash(dialog, bodyBottomRatio);
+  await editRisk(dialog);
+  await dialog.getByLabel("风险提示标题", { exact: true }).fill("刊物阅读提示");
+  await dialog.getByLabel("风险提示内容", { exact: true }).fill("资料仅供参考，请独立判断。\n不构成投资建议。");
+  await confirmRisk(dialog, "xiaohongshu");
+  const after = await imageManifest(dialog);
+  expect(after).toHaveLength(1);
+  expect(after[0]).toMatchObject({ name: before[0].name, width: 1080, height: 1440 });
+  expect(after[0].hash).not.toBe(before[0].hash);
+  expect(await lastPageBodyHash(dialog, bodyBottomRatio), "Updating the risk must retain every body, publication and QR pixel").toBe(bodyBefore);
+  const qrPixel = await riskCard(dialog).locator("img").evaluate((node, point) => {
+    const image = node as HTMLImageElement, canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d")!; context.drawImage(image, 0, 0);
+    return [...context.getImageData(point.x, point.y, 1, 1).data];
+  }, qrPoint);
+  expect(qrPixel).toEqual([17, 193, 137, 255]);
+});
+
 test("mobile draft controls stay usable and a denied local save never reports success", async ({ page }) => {
   test.setTimeout(180_000);
   await page.setViewportSize({ width: 390, height: 844 });

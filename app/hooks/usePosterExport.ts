@@ -5,6 +5,7 @@ import { withTimeout } from "../../lib/async/withTimeout";
 import type { DraftImage } from "../../lib/draftSync/types";
 import { prepareEditableRiskSnapshot, riskTemplateFromDataUrl } from "../../lib/draftSync/riskPage";
 import { preparePosterSnapshot } from "../../lib/export/preparePosterSnapshot";
+import { usedFontFamilies } from "../../lib/export/usedFontFamilies";
 
 export type ExportVersion = { inputKey: string; paginationVersion: number };
 type ExportNotice = { tone: "neutral" | "success" | "error"; text: string };
@@ -103,7 +104,7 @@ export function usePosterExport({
   }
 
   async function getPosterFontEmbedCss(node: HTMLElement, imageModule: typeof import("html-to-image")) {
-    const key = fontKey;
+    const key = JSON.stringify([fontKey, usedFontFamilies(node)]);
     if (fontEmbedCssRef.current?.key !== key) {
       fontEmbedCssRef.current = {
         key,

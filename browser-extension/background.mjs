@@ -29,4 +29,4 @@ chrome.runtime.onMessageExternal.addListener((message, sender, respond) => {
   })().then(respond, (error) => respond(safeError(error)));
   return true;
 });
-chrome.action.onClicked.addListener(() => { void chrome.tabs.create({ url: "https://feature-local-draft-sync.zhepagenew.pages.dev/" }); });
+chrome.action.onClicked.addListener(() => { void chrome.tabs.create({ url: "https://zhepagenew.pages.dev/" }); });
