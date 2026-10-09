@@ -98,7 +98,18 @@ for (const preserveStyles of [true, false]) {
           const range = document.createRange(); range.selectNodeContents(element);
           const text = range.getBoundingClientRect();
           return text.left < bounds.left - 1 || text.right > bounds.right + 1 || text.top < cardBox.top || text.bottom > cardBox.bottom;
-        }).map((element) => element.className);
+        }).map((element) => {
+          const range = document.createRange(); range.selectNodeContents(element);
+          const bounds = element.getBoundingClientRect(), text = range.getBoundingClientRect();
+          const lettering = element.firstElementChild instanceof HTMLElement ? element.firstElementChild : element;
+          const style = getComputedStyle(lettering);
+          return {
+            className: element.className, fontSize: style.fontSize, fontFamily: style.fontFamily,
+            fontWeight: style.fontWeight, transform: style.transform, fonts: document.fonts.status,
+            box: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+            text: [text.left, text.top, text.right, text.bottom], cardWidth: cardBox.width,
+          };
+        });
       });
       expect(overflow, `Complete visible titles for ${JSON.stringify(title)}`).toEqual([]);
     }

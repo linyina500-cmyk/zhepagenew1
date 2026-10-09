@@ -357,6 +357,7 @@ test("publication card and QR survive editable last-page export and risk confirm
   const dialog = await openDraftDialog(page);
   await expect(sourceCards(dialog)).toHaveCount(originalPageCount, { timeout: 110_000 });
   const before = await imageManifest(dialog), bodyBefore = await lastPageBodyHash(dialog, bodyBottomRatio);
+  const beforePixels = await riskCard(dialog).locator("img").evaluate(async (node) => Array.from(new Uint8Array(await (await fetch((node as HTMLImageElement).src)).arrayBuffer())));
   await editRisk(dialog);
   await dialog.getByLabel("风险提示标题", { exact: true }).fill("刊物阅读提示");
   await dialog.getByLabel("风险提示内容", { exact: true }).fill("资料仅供参考，请独立判断。\n不构成投资建议。");
@@ -366,7 +367,14 @@ test("publication card and QR survive editable last-page export and risk confirm
   expect(after.slice(0, -1)).toEqual(before.slice(0, -1));
   expect(after.at(-1)).toMatchObject({ name: before.at(-1)!.name, width: 1080, height: 1440 });
   expect(after.at(-1)!.hash).not.toBe(before.at(-1)!.hash);
-  expect(await lastPageBodyHash(dialog, bodyBottomRatio), "Updating the risk must retain every body, publication and QR pixel").toBe(bodyBefore);
+  const bodyAfter = await lastPageBodyHash(dialog, bodyBottomRatio);
+  if (bodyAfter !== bodyBefore) {
+    const afterPixels = await riskCard(dialog).locator("img").evaluate(async (node) => Array.from(new Uint8Array(await (await fetch((node as HTMLImageElement).src)).arrayBuffer())));
+    await test.info().attach("publication-before-risk", { body: Buffer.from(beforePixels), contentType: "image/png" });
+    await test.info().attach("publication-after-risk", { body: Buffer.from(afterPixels), contentType: "image/png" });
+    console.info("Publication risk crop", JSON.stringify({ bodyBottomRatio, qrPoint }));
+  }
+  expect(bodyAfter, "Updating the risk must retain every body, publication and QR pixel").toBe(bodyBefore);
   const qrPixel = await riskCard(dialog).locator("img").evaluate((node, point) => {
     const image = node as HTMLImageElement, canvas = document.createElement("canvas");
     canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;

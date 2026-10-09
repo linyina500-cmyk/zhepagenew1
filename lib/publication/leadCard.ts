@@ -31,7 +31,13 @@ function fittedSize(text: string, width: number, maximum: number, height: number
 }
 
 function copy(className: string, text: string, width: number, maximum: number, height: number) {
-  return `<div class="${className}" style="font-size:${fittedSize(text, width, maximum, height)}cqw">${escapeHtml(text)}</div>`;
+  const size = fittedSize(text, width, maximum, height);
+  // Draw very long copy at the normal glyph size, then scale the whole text.
+  // This avoids platform-specific rounding of tiny glyphs in the PDF filename.
+  const content = Number(size) < maximum * 0.75
+    ? `<span class="lead-card-scaled-text" style="font-size:${maximum}cqw;transform:scale(${(Number(size) / maximum).toFixed(6)})">${escapeHtml(text)}</span>`
+    : escapeHtml(text);
+  return `<div class="${className}" style="font-size:${size}cqw">${content}</div>`;
 }
 
 export function createLeadCardHtml(publicationName: string, guide: string, qrDataUrl: string, details: PublicationCopy = DEFAULT_PUBLICATION_COPY) {
@@ -54,13 +60,13 @@ export function createLeadCardHtml(publicationName: string, guide: string, qrDat
     <div class="lead-card-file">
       <div class="lead-card-file-heading">
         <div class="lead-card-pdf-icon" aria-hidden="true"><img src="/publication-pdf-icon.png" alt=""></div>
-        ${copy("lead-card-file-name", name ? `${name.replace(/\n/g, " ")}.pdf` : "", 37, 1.94, 2.5)}
+        ${copy("lead-card-file-name", name ? `${name.replace(/\n/g, " ")}.pdf` : "", 36, 1.94, 2.5)}
         ${copy("lead-card-file-label", details.fileLabel, 37, 1.6, 2.15)}
       </div>
       <div class="lead-card-cover">
         <img class="lead-card-cover-image" src="/publication-battery.png" alt="蓝色固态电池科技配图">
         <div class="lead-card-cover-copy">
-          ${copy("lead-card-cover-title", coverTitle, 41, 2.43, 5.8)}
+          ${copy("lead-card-cover-title", coverTitle, 39.5, 2.43, 5.8)}
           ${copy("lead-card-cover-subtitle", details.coverSubtitle, 31.5, 1.49, 1.95)}
           ${copy("lead-card-edition", details.editionLabel, 9.4, 1.62, 2.25)}
         </div>
