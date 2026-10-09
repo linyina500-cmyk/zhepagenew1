@@ -62,7 +62,7 @@ test("keeps the requested production defaults", async () => {
   assert.match(page, /useState\("A股研报局"\)/);
   assert.match(page, /useState\("A股研报局出品"\)/);
   assert.match(page, /useState\("A股研报局 · 行情早知道"\)/);
-  assert.match(page, /const \[footerText, setFooterText\] = useState\("A股研报局"\)/);
+  assert.match(page, /const \[footerText, setFooterText\] = useState\("投资有风险，入市需谨慎。"\)/);
   assert.match(page, /图片左下角文案/);
   assert.match(page, /footerText\.trim\(\) \|\| labName\.trim\(\)/);
   assert.match(page, /何智辉：资质编号A0070622060009/);
