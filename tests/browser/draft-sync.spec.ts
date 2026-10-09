@@ -345,6 +345,7 @@ test("publication card and QR survive editable last-page export and risk confirm
   const posters = page.locator(".poster-grid .content-page");
   await expect(posters).toHaveCount(1);
   await expect(posters.locator(".lead-magnet-card")).toHaveCount(1);
+  const originalPageCount = await page.locator(".poster-grid .poster-page").count();
   const bodyBottomRatio = await posters.evaluate((poster) => {
     const pageBox = poster.getBoundingClientRect(), riskBox = poster.querySelector(".risk-note")!.getBoundingClientRect();
     return (riskBox.top - pageBox.top) / pageBox.height - 0.01;
@@ -354,16 +355,17 @@ test("publication card and QR survive editable last-page export and risk confirm
     return { x: Math.round((box.left + box.width / 2 - poster.left) * 1080 / poster.width), y: Math.round((box.top + box.height / 2 - poster.top) * 1440 / poster.height) };
   });
   const dialog = await openDraftDialog(page);
-  await expect(sourceCards(dialog)).toHaveCount(1, { timeout: 110_000 });
+  await expect(sourceCards(dialog)).toHaveCount(originalPageCount, { timeout: 110_000 });
   const before = await imageManifest(dialog), bodyBefore = await lastPageBodyHash(dialog, bodyBottomRatio);
   await editRisk(dialog);
   await dialog.getByLabel("风险提示标题", { exact: true }).fill("刊物阅读提示");
   await dialog.getByLabel("风险提示内容", { exact: true }).fill("资料仅供参考，请独立判断。\n不构成投资建议。");
   await confirmRisk(dialog, "xiaohongshu");
   const after = await imageManifest(dialog);
-  expect(after).toHaveLength(1);
-  expect(after[0]).toMatchObject({ name: before[0].name, width: 1080, height: 1440 });
-  expect(after[0].hash).not.toBe(before[0].hash);
+  expect(after).toHaveLength(originalPageCount);
+  expect(after.slice(0, -1)).toEqual(before.slice(0, -1));
+  expect(after.at(-1)).toMatchObject({ name: before.at(-1)!.name, width: 1080, height: 1440 });
+  expect(after.at(-1)!.hash).not.toBe(before.at(-1)!.hash);
   expect(await lastPageBodyHash(dialog, bodyBottomRatio), "Updating the risk must retain every body, publication and QR pixel").toBe(bodyBefore);
   const qrPixel = await riskCard(dialog).locator("img").evaluate((node, point) => {
     const image = node as HTMLImageElement, canvas = document.createElement("canvas");
