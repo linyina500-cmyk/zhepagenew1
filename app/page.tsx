@@ -212,7 +212,7 @@ export default function Home() {
   const [labName, setLabName] = useState("A股研报局");
   const [coverCredit, setCoverCredit] = useState("A股研报局出品");
   const [pageBrand, setPageBrand] = useState("A股研报局 · 行情早知道");
-  const [footerText, setFooterText] = useState("A股研报局");
+  const [footerText, setFooterText] = useState("投资有风险，入市需谨慎。");
   const [layoutStyle, setLayoutStyle] = useState<LayoutStyleKey>("xiaohongshu");
   const [autoStructure, setAutoStructure] = useState(true);
   const [numberedDotStyle, setNumberedDotStyle] = useState(true);
@@ -892,7 +892,7 @@ export default function Home() {
               <div className="field-stack"><label htmlFor="cover-credit">封面署名</label><input id="cover-credit" value={coverCredit} onChange={(event) => setCoverCredit(event.target.value)} /></div>
             </div>
             <div className="field-stack"><label htmlFor="page-brand">正文页眉（图片顶部）</label><input id="page-brand" value={pageBrand} onChange={(event) => setPageBrand(event.target.value)} /></div>
-            <div className="field-stack footer-copy-field"><label htmlFor="footer-text">图片左下角文案（图片底部）</label><input id="footer-text" value={footerText} onChange={(event) => setFooterText(event.target.value)} placeholder="例如：投资有风险，入市需谨慎" maxLength={40} /><small>该文字会显示在每张正文图的左下角，与顶部页眉独立。</small></div>
+            <div className="field-stack footer-copy-field"><label htmlFor="footer-text">图片左下角文案（图片底部）</label><input id="footer-text" value={footerText} onChange={(event) => setFooterText(event.target.value)} placeholder="例如：投资有风险，入市需谨慎。" maxLength={40} /><small>该文字会显示在每张正文图的左下角，与顶部页眉独立。</small></div>
           </section>
 
           <section className="control-section">
