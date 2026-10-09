@@ -35,6 +35,14 @@ test("server-renders the Zhepage application metadata", async () => {
   assert.match(html, /og-zhepage\.png/);
 });
 
+test("built Worker no longer proxies local platform operations through the cloud", async (t) => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("local platform routes must not contact an upstream"));
+  for (const path of ["/api/wechat/connection", "/api/xiaohongshu/account"]) {
+    const response = await render(path);
+    assert.equal(response.status, 404);
+  }
+});
+
 test("keeps the requested production defaults", async () => {
   const [page, css, editor, packageJson, readme, guide, articleImporter] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),

@@ -44,6 +44,11 @@ function normalizeHex(color: string, fallback: string) {
   if (/^#[0-9a-f]{3}$/i.test(normalized)) {
     return `#${normalized.slice(1).split("").map((character) => character.repeat(2)).join("")}`.toLowerCase();
   }
+  const rgb = color.trim().match(/^rgba?\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?:\s*,\s*[\d.]+)?\s*\)$/i);
+  if (rgb) {
+    const channels = rgb.slice(1, 4).map(Number);
+    if (channels.every((channel) => channel >= 0 && channel <= 255)) return `#${channels.map((channel) => Math.round(channel).toString(16).padStart(2, "0")).join("")}`;
+  }
   return /^#[0-9a-f]{6}$/i.test(fallback) ? fallback.toLowerCase() : "#d7352f";
 }
 

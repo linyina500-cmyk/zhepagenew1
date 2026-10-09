@@ -10,6 +10,7 @@ import { Color, TextStyle } from "@tiptap/extension-text-style";
 import { TableKit } from "@tiptap/extension-table";
 import { Extension, Mark, Node, getStyleProperty, mergeAttributes } from "@tiptap/core";
 import { NodeSelection } from "@tiptap/pm/state";
+import { closeHistory } from "@tiptap/pm/history";
 import UnifiedColorPopover from "./UnifiedColorPopover";
 import { createContentLimitExtension, createPasteHandlers } from "../../lib/richText/editorPaste";
 import { IMAGE_FILE_ACCEPT, insertImageFiles } from "../../lib/richText/editorImages";
@@ -31,14 +32,82 @@ type ZhepageEditorProps = {
 
 const TOOLTIP_ID = "editor-toolbar-help";
 
+function sourceStyle(element: HTMLElement, textColor = false) {
+  const style = document.createElement("span").style;
+  style.cssText = element.getAttribute("style") || "";
+  // Bold owns font-weight. Keeping a second copy on a span or block would
+  // override toggleBold after its semantic mark has been added or removed.
+  style.removeProperty("font-weight");
+  if (textColor) style.removeProperty("color");
+  return style.cssText || null;
+}
+
+const normalWeight = (value: string) => /^(?:normal|[1-4]\d{2})$/u.test(value);
+
+const EditorStarterKit = StarterKit.extend({
+  addExtensions() {
+    return (this.parent?.() || []).map((extension) => extension.name !== "bold" ? extension : (extension as Mark).extend({
+      parseHTML() {
+        // Keep Tiptap's commands, history, keyboard shortcuts and input rules.
+        // Its default parser only clears inherited bold for the literal 400.
+        return [
+          ...["strong", "b"].map((tag) => ({ tag, getAttrs: (element: HTMLElement) => normalWeight(element.style.fontWeight) ? false : null })),
+          { style: "font-weight", getAttrs: (value) => normalWeight(value) ? null : false, clearMark: (mark) => mark.type.name === "bold" },
+          ...(this.parent?.() || []).filter((rule) => !rule.tag && !("clearMark" in rule)),
+        ];
+      },
+    }));
+  },
+});
+
+const EditorTextStyle = TextStyle.extend({
+  parseHTML() {
+    return [
+      ...(this.parent?.() || []),
+      // Source colors/backgrounds on bold tags must outlive toggling the bold
+      // mark; Color also needs to own their color after a later color edit.
+      ...["strong[style]", "b[style]"].map((tag) => ({
+        tag, consuming: false,
+        getAttrs: (element: HTMLElement) => {
+          // Match TextStyle's nested-span inheritance when a bold tag carries
+          // its own background but gets its text color from an outer span.
+          const parent = element.parentElement?.closest<HTMLElement>("span[style],strong[style],b[style]");
+          const inherited = parent ? sourceStyle(parent) : null;
+          if (inherited) element.setAttribute("style", `${inherited}${element.getAttribute("style") || ""}`);
+          return null;
+        },
+      })),
+    ];
+  },
+});
+
 const PreservedAttributes = Extension.create({
   name: "preservedSourceAttributes",
   addGlobalAttributes() {
     return [{
-      types: ["paragraph", "heading", "blockquote", "bulletList", "orderedList", "listItem", "table", "tableRow", "tableCell", "tableHeader", "image", "bold", "italic", "underline", "strike", "highlight", "textStyle"],
+      types: ["paragraph", "heading", "blockquote", "bulletList", "orderedList", "listItem", "table", "tableRow", "tableCell", "tableHeader", "image", "bold", "italic", "underline", "strike", "highlight"],
       attributes: {
         class: { default: null, parseHTML: (element) => element.getAttribute("class") },
-        style: { default: null, parseHTML: (element) => element.getAttribute("style") },
+        // Bold-tag source styles live on TextStyle, so removing bold does not
+        // discard independent colors or introduce competing nested styles.
+        style: { default: null, parseHTML: (element) => /^(STRONG|B)$/u.test(element.tagName) ? null : sourceStyle(element) },
+        autoIndex: {
+          default: null,
+          parseHTML: (element) => element.getAttribute("data-auto-index"),
+          renderHTML: (attributes) => attributes.autoIndex ? { "data-auto-index": attributes.autoIndex } : {},
+        },
+        autoLabel: {
+          default: null,
+          parseHTML: (element) => element.getAttribute("data-auto-label"),
+          renderHTML: (attributes) => attributes.autoLabel ? { "data-auto-label": attributes.autoLabel } : {},
+        },
+      },
+    }, {
+      types: ["textStyle"],
+      attributes: {
+        class: { default: null, parseHTML: (element) => element.getAttribute("class") },
+        // Color owns this property so source CSS cannot override a later edit.
+        style: { default: null, parseHTML: (element) => sourceStyle(element, true) },
         autoIndex: {
           default: null,
           parseHTML: (element) => element.getAttribute("data-auto-index"),
@@ -63,7 +132,7 @@ const GenericBlock = Node.create({
     return {
       tag: { default: "div" },
       class: { default: null },
-      style: { default: null },
+      style: { default: null, parseHTML: (element) => sourceStyle(element) },
     };
   },
   parseHTML() {
@@ -80,10 +149,13 @@ const GenericBlock = Node.create({
 const SourceStyle = Mark.create({
   name: "sourceStyle",
   addAttributes() {
-    return { style: { default: null } };
+    return { style: { default: null, parseHTML: (element) => sourceStyle(element, true) } };
   },
   parseHTML() {
-    return [{ tag: "span[style]", getAttrs: (element) => ({ style: (element as HTMLElement).getAttribute("style") }) }];
+    return [{ tag: "span[style]", getAttrs: (element) => {
+      const style = sourceStyle(element as HTMLElement, true);
+      return style ? { style } : false;
+    } }];
   },
   renderHTML({ HTMLAttributes }) {
     return ["span", HTMLAttributes, 0];
@@ -232,13 +304,13 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
-      StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: false, code: false, codeBlock: false }),
+      EditorStarterKit.configure({ heading: { levels: [1, 2, 3] }, link: false, code: false, codeBlock: false }),
       createContentLimitExtension(onNotice),
       GenericBlock,
       SourceStyle,
       PreservedAttributes,
       StyledHighlight.configure({ multicolor: true }),
-      TextStyle,
+      EditorTextStyle,
       Color,
       Image.configure({ allowBase64: true, resize: { enabled: false } }),
       TextAlign.configure({ types: ["heading", "paragraph"] }),
@@ -298,7 +370,11 @@ export default function ZhepageEditor({ html, revision, accentColor, highlightCo
     if (!editor || revision === lastRevision.current) return;
     lastRevision.current = revision;
     applyingExternalContent.current = true;
-    editor.chain().setMeta("richTextExternalContent", true).setContent(html, { emitUpdate: false }).run();
+    // Importing or typesetting is one undo step, independent of typing on
+    // either side, even when all actions happen within the history delay.
+    editor.chain().command(({ tr }) => { closeHistory(tr); return true; })
+      .setMeta("richTextExternalContent", true).setContent(html, { emitUpdate: false }).run();
+    editor.view.dispatch(closeHistory(editor.state.tr));
     applyingExternalContent.current = false;
   }, [editor, html, revision]);
 

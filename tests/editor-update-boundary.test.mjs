@@ -145,6 +145,8 @@ async function importRichDraft({ click, waitFor, act }, html) {
 test("real editor changes immediately block old exports and the next export contains the new text", { timeout: 15_000 }, async (context) => {
   const workspace = await mountWorkspace(context, "<p>旧正文。</p>");
   const { editor, insertText, click, waitFor, bulkExport, singleExport, downloads, captures } = workspace;
+  // Keep this phase pending even if React's async act yields beyond the debounce.
+  const releasePagination = holdPaginationTimers(context, workspace.act);
   insertText("刚输入的新增文字。");
   assert.match(editor.getText(), /刚输入的新增文字/);
   assert.equal(bulkExport().disabled, true, "bulk export must become unavailable in the same edit turn");
@@ -154,6 +156,7 @@ test("real editor changes immediately block old exports and the next export cont
   assert.equal(downloads.length, 0, "clicking the retained old preview must not download stale content");
   assert.equal(captures.length, 0);
 
+  await releasePagination();
   await waitFor(() => !bulkExport().disabled, "the changed document finishes paginating");
   await click(singleExport());
   await waitFor(() => downloads.length === 1, "the latest preview can still export a PNG");
@@ -439,4 +442,107 @@ test("temporary HTML image replacement holds the same import gate until its comp
   assert.equal(editor.view.dom.querySelector("strong").textContent, "强调");
   assert.equal(editor.view.dom.querySelector("img").getAttribute("src"), `data:image/png;base64,${png.toString("base64")}`);
   assert.equal(editor.view.dom.querySelector("img").alt, "保留图注");
+});
+
+test("imported inline color has one owner so changing or clearing it preserves other source styles", { timeout: 15_000 }, async (context) => {
+  const { editor, act, waitFor, bulkExport } = await mountWorkspace(context,
+    '<p>前文<span style="color:rgb(204, 34, 68);background-color:#f7e8b3;letter-spacing:1px">重点文字</span>后文。</p>');
+  editor.view.setProps({ handleScrollToSelection: () => true });
+  await act(async () => { editor.commands.setTextSelection({ from: 3, to: 7 }); });
+  for (const type of ["sourceStyle", "textStyle"]) {
+    assert.doesNotMatch(editor.getAttributes(type).style || "", /(?:^|;)\s*color\s*:/i, `${type} must not duplicate the editable color`);
+  }
+  assert.equal(editor.getAttributes("textStyle").color, "rgb(204, 34, 68)");
+  await act(async () => { editor.commands.setColor("#2457a7"); });
+  assert.equal(editor.getAttributes("textStyle").color, "#2457a7");
+  assert.doesNotMatch(editor.getHTML(), /204, 34, 68/);
+  await act(async () => { editor.commands.unsetColor(); });
+  assert.equal(editor.getAttributes("textStyle").color ?? null, null);
+  assert.doesNotMatch(editor.getHTML(), /204, 34, 68|36, 87, 167|2457a7/);
+  assert.match(editor.getHTML(), /background-color:/);
+  assert.match(editor.getHTML(), /letter-spacing: 1px/);
+  assert.equal(editor.getText(), "前文重点文字后文。");
+  await waitFor(() => !bulkExport().disabled, "the updated color reaches the preview");
+});
+
+test("automatic typesetting has its own undo step between rapid manual edits", { timeout: 15_000 }, async (context) => {
+  const { editor, insertText, click, act, waitFor, bulkExport } = await mountWorkspace(context,
+    "<p>导语内容。</p><p>一、市场变化</p><p>这是完整正文。</p>");
+  editor.view.setProps({ handleScrollToSelection: () => true });
+  const original = editor.getHTML();
+  // Keep every transaction inside ProseMirror's grouping interval regardless
+  // of machine speed. Explicit action boundaries, not elapsed time, must split it.
+  const transactionTime = Date.now();
+  const clock = context.mock.method(Date, "now", () => transactionTime);
+  let latest;
+  try {
+    insertText("排版前补充。");
+    const beforeTypeset = editor.getHTML();
+    await click(document.querySelector(".editor-auto-typeset"));
+    const typeset = editor.getHTML();
+    assert.notEqual(typeset, beforeTypeset, "the fixture must produce actual formatting changes");
+    assert.match(typeset, /auto-inferred-heading/);
+    insertText("排版后补充。");
+    latest = editor.getHTML();
+
+    for (const [expected, description] of [
+      [typeset, "undoing the later edit must retain the typesetting"],
+      [beforeTypeset, "undoing typesetting must retain the earlier edit"],
+      [original, "the earlier edit remains independently undoable"],
+    ]) {
+      await act(async () => { assert.equal(editor.commands.undo(), true); });
+      assert.equal(editor.getHTML(), expected, description);
+    }
+    for (const expected of [beforeTypeset, typeset, latest]) {
+      await act(async () => { assert.equal(editor.commands.redo(), true); });
+      assert.equal(editor.getHTML(), expected, "redo must restore each action separately");
+    }
+  } finally {
+    clock.mock.restore();
+  }
+  await waitFor(() => !bulkExport().disabled, "redo reaches the parent preview");
+  assert.equal(editor.getHTML(), latest);
+  assert.equal(document.querySelector(".content-page .article-flow").textContent, editor.state.doc.textContent);
+});
+
+test("pasting immediately after import undoes only the paste and preserves the imported article", { timeout: 15_000 }, async (context) => {
+  const { editor, click, act, waitFor, bulkExport } = await mountWorkspace(context, "<p>导入前旧正文。</p>");
+  await click(document.querySelector(".import-trigger"));
+  await click([...document.querySelectorAll(".import-source-tabs button")].find((button) => button.textContent === "富文本"));
+  await waitFor(() => document.querySelector(".import-modal .tiptap-surface")?.editor, "the compact editor is ready");
+  await act(async () => {
+    document.querySelector(".import-modal .tiptap-surface").editor.commands.setContent("<h1>新文章标题</h1><p>导入后的新正文。</p>");
+  });
+  editor.view.setProps({ handleScrollToSelection: () => true });
+  const transactionTime = Date.now();
+  const clock = context.mock.method(Date, "now", () => transactionTime);
+  let imported;
+  let pasted;
+  try {
+    await click(document.querySelector(".import-modal-actions .primary"));
+    assert.equal(document.querySelector(".import-modal"), null);
+    imported = editor.getHTML();
+    assert.equal(editor.state.doc.textContent, "导入后的新正文。");
+    await act(async () => {
+      editor.commands.selectAll();
+      const event = new window.Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: {
+        getData: (type) => type === "text/plain" ? "立即粘贴的替换文字。" : "",
+        files: [], items: [], types: ["text/plain"],
+      } });
+      editor.view.dom.dispatchEvent(event);
+    });
+    pasted = editor.getHTML();
+    assert.equal(editor.state.doc.textContent, "立即粘贴的替换文字。");
+    await act(async () => { assert.equal(editor.commands.undo(), true); });
+    assert.equal(editor.getHTML(), imported, "undo must not roll the import back to the previous article");
+    await act(async () => { assert.equal(editor.commands.redo(), true); });
+    assert.equal(editor.getHTML(), pasted, "the paste remains redoable after restoring the imported article");
+    await act(async () => { assert.equal(editor.commands.undo(), true); });
+    assert.equal(editor.getHTML(), imported);
+  } finally {
+    clock.mock.restore();
+  }
+  await waitFor(() => !bulkExport().disabled, "the restored imported article reaches the parent preview");
+  assert.equal(document.querySelector(".content-page .article-flow").textContent, "导入后的新正文。");
 });

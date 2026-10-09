@@ -1,4 +1,5 @@
 import { RICH_LAYOUT_CLASS, markRichLayoutGroups } from "../richText/normalizeRichHtml";
+import { normalizeContentSpacing } from "../richText/contentNodes";
 
 const NUMBERED_HEADING = /^(?:第[一二三四五六七八九十百\d]+(?:[章节部分句点条项问](?=[:：、.．\s]|$)|(?=[:：、.．\s]))|[一二三四五六七八九十]+[、.．]|0?\d{1,2}[、.．\s])/;
 const SECTION_HEADING = /^(?:实话|真相|观点|理由|问题|提醒|要点|关键)[一二三四五六七八九十\d]+[:：、]/;
@@ -12,7 +13,6 @@ export type AutoTypesetResult = {
   changes: number;
   promotedHeadings: number;
   formattedParagraphs: number;
-  removedEmptyParagraphs: number;
 };
 
 export type AutoTypesetOptions = {
@@ -75,23 +75,18 @@ function emphasisRatio(paragraph: HTMLParagraphElement, textLength: number) {
 
 export function beautifyArticle(html: string, options: AutoTypesetOptions = {}): AutoTypesetResult {
   const parsed = new DOMParser().parseFromString(html, "text/html");
+  normalizeContentSpacing(parsed.body);
   markRichLayoutGroups(parsed.body);
   const numberedDotStyle = options.numberedDotStyle !== false;
   let changes = 0;
   let promotedHeadings = 0;
   let formattedParagraphs = 0;
-  let removedEmptyParagraphs = 0;
 
   parsed.body.querySelectorAll<HTMLParagraphElement>("p").forEach((paragraph) => {
     if (isInsideImportedLayout(paragraph)) return;
     const text = paragraph.textContent?.trim() || "";
     const hasMedia = Boolean(paragraph.querySelector("img,video,iframe,table"));
-    if (!text && !hasMedia && !paragraph.classList.contains("manual-empty-line")) {
-      paragraph.remove();
-      changes += 1;
-      removedEmptyParagraphs += 1;
-      return;
-    }
+    if (!text && !hasMedia) return;
     if (text.length > 52) return;
     const isConclusion = CONCLUSION_HEADING.test(text);
     if (!isConclusion && !NUMBERED_HEADING.test(text) && !SECTION_HEADING.test(text)) return;
@@ -211,5 +206,5 @@ export function beautifyArticle(html: string, options: AutoTypesetOptions = {}):
     });
   });
 
-  return { html: parsed.body.innerHTML, changes, promotedHeadings, formattedParagraphs, removedEmptyParagraphs };
+  return { html: parsed.body.innerHTML, changes, promotedHeadings, formattedParagraphs };
 }

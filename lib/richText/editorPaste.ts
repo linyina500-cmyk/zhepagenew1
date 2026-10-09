@@ -1,5 +1,6 @@
 import { Extension } from "@tiptap/core";
 import { Plugin } from "@tiptap/pm/state";
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from "@tiptap/pm/model";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { Mark } from "@tiptap/pm/model";
 import type { EditorProps } from "@tiptap/pm/view";
@@ -46,6 +47,19 @@ export function createPasteHandlers(onNotice: Notice, insertImages: typeof inser
       .filter((file): file is File => Boolean(file));
   };
   return {
+    clipboardTextParser: (text, context, _plainText, view) => {
+      const container = view.dom.ownerDocument.createElement("div");
+      const { schema } = view.state;
+      const serializer = DOMSerializer.fromSchema(schema);
+      // ProseMirror's default parser merges consecutive newlines. Preserve
+      // each authored line, including empty ones, as a separate paragraph.
+      for (const line of text.split(/\r\n?|\n/)) {
+        const paragraph = container.appendChild(container.ownerDocument.createElement("p"));
+        if (line) paragraph.append(serializer.serializeNode(schema.text(line, context.marks())));
+      }
+      const parser = view.someProp("clipboardParser") || view.someProp("domParser") || ProseMirrorDOMParser.fromSchema(schema);
+      return parser.parseSlice(container, { preserveWhitespace: true, context });
+    },
     // ProseMirror's handlePaste runs AFTER HTML parsing. Guard the native event
     // first so excessive markup never enters its schema parser.
     handleDOMEvents: {

@@ -1,5 +1,5 @@
 import { RICH_LAYOUT_CLASS, isRichLayoutGroup } from "../richText/normalizeRichHtml";
-import { meaningfulContentNode as meaningfulNode } from "../richText/contentNodes";
+import { meaningfulContentNode as meaningfulNode, normalizeContentSpacing } from "../richText/contentNodes";
 import { ATOMIC_SELECTOR, hasVisualContainerStyle, preserveWrapperShell, wrapperFragment } from "./blockStructure";
 import { TABLE_REPEAT_ATTRIBUTE, TABLE_SOURCE_ATTRIBUTE } from "./splitTable";
 
@@ -31,6 +31,7 @@ function exposeManualPageBreaks(element: Element): Node[] {
 export function articleBlocks(html: string) {
   const parsed = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
   const root = parsed.querySelector("main")!;
+  normalizeContentSpacing(root);
   // These identifiers belong to this pagination run, never to imported HTML.
   root.querySelectorAll(`[${TABLE_REPEAT_ATTRIBUTE}]`).forEach((element) => element.removeAttribute(TABLE_REPEAT_ATTRIBUTE));
   root.querySelectorAll("table").forEach((table, index) => table.setAttribute(TABLE_SOURCE_ATTRIBUTE, String(index)));

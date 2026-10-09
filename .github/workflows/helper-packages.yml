@@ -1,0 +1,59 @@
+name: Local helper packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helper-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Native helper (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            package: windows-x64
+            filename: zhepage-sync-windows-x64.zip
+          - os: macos-15
+            package: macos
+            filename: zhepage-sync-macos.zip
+          - os: macos-15-intel
+            package: macos
+            filename: zhepage-sync-macos.zip
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.21.0
+          cache: npm
+      - run: npm ci
+      - name: Check packaging and controller regression tests
+        run: node --test tests/local-sync-package.test.mjs tests/local-control.test.mjs tests/local-pairing.test.mjs tests/local-setup.test.mjs tests/local-windows.test.mjs
+      - name: Check macOS supervisor signals
+        if: runner.os == 'macOS'
+        run: node --test tests/local-supervisor.test.mjs
+      - name: Build complete package with pinned official runtime
+        run: node build/pack-local-sync.mjs ${{ matrix.package }}
+      - name: Verify fresh installation from the actual ZIP
+        run: node build/test-local-sync-package.mjs dist-wechat/${{ matrix.filename }}
+      - name: Retain verified distribution and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-helper-${{ matrix.os }}
+          path: |
+            dist-wechat/${{ matrix.filename }}
+            dist-wechat/${{ matrix.filename }}.sha256
+            dist-wechat/SHA256SUMS.txt
+          retention-days: 14
+          if-no-files-found: error

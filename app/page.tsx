@@ -11,9 +11,11 @@ import { LAYOUT_PRESETS, LAYOUT_STYLE_KEYS } from "../lib/layouts/layoutPresets"
 import { resolveThemeTokens } from "../lib/layouts/resolveThemeTokens";
 import type { LayoutStyleKey, PreviewPresentation } from "../lib/layouts/layoutTypes";
 import { paginateArticle } from "../lib/pagination/paginateArticle";
+import { createLeadCardHtml, DEFAULT_PUBLICATION_NAME, DEFAULT_LEAD_GUIDE, DEFAULT_PUBLICATION_COPY, type PublicationCopy } from "../lib/publication/leadCard";
 import { extractArticle, extractRichTextFragment } from "../lib/richText/importArticle";
 
 const ZhepageEditor = lazy(() => import("./components/ZhepageEditor"));
+const DraftSyncDialog = lazy(() => import("./components/DraftSyncDialog"));
 
 type InputMode = "url" | "html" | "editor" | "markdown";
 type FormatKey = "xiaohongshu" | "portrait" | "story";
@@ -70,6 +72,7 @@ type SavedWorkspace = {
   riskTitle: string;
   riskText: string;
   publicationName: string;
+  publicationCopy: PublicationCopy;
   leadGuide: string;
   qrDataUrl: string;
   customThemePresets: CustomThemePreset[];
@@ -131,9 +134,6 @@ const DEFAULT_TITLE = "长鑫科技来了！\n全网都在算中一签赚多少�
 const DEFAULT_SUBTITLE = "";
 const DEFAULT_RISK_TITLE = "【版权与免责声明】";
 const DEFAULT_RISK_TEXT = "以上观点仅供参考学习，所依据的指标和计算模型存在局限性，不构成投资建议，据此操作风险自担。您应自主作出投资决策，自行承担投资风险和损失，投资有风险，入市需谨慎！（汇正财经投顾团队编辑，何智辉：资质编号A0070622060009；曹宇峰：资质编号A0070617060002）";
-const DEFAULT_PUBLICATION_NAME = "《热点研报合集》";
-const DEFAULT_LEAD_GUIDE = "长按识别二维码，添加助理领取 PDF 资料";
-const LEAD_CARD_DISCLAIMER = "观点及过往案例仅供参考学习，不构成投资建议，操作风险自担。";
 const WORKSPACE_STORAGE_KEY = "zhepage-workspace-v2";
 const LEGACY_WORKSPACE_STORAGE_KEY = "zhepage-workspace-v1";
 const POSTER_FONT_FAMILIES: Record<FontKey, string> = {
@@ -184,34 +184,6 @@ async function waitForPosterFonts(fonts: FontKey[]) {
   }
 }
 
-function createLeadCardHtml(publicationName: string, guide: string, qrDataUrl: string) {
-  const qrMarkup = qrDataUrl
-    ? `<img class="lead-card-qr" src="${escapeHtml(qrDataUrl)}" alt="刊物领取二维码">`
-    : '<div class="lead-card-qr-placeholder">请上传<br>二维码</div>';
-  const titleLength = Array.from(publicationName.trim()).length;
-  const titleSizeClass = titleLength > 24 ? " is-extra-long" : titleLength > 14 ? " is-long" : "";
-  return `<aside class="lead-magnet-card">
-    <div class="lead-card-pdf">
-      <div class="lead-card-pdf-sheet">
-        <span class="lead-card-pdf-badge">PDF</span>
-        <img class="lead-card-cover-image" src="/hotspot-report-cover.webp" alt="热点刊物 PDF 封面">
-      </div>
-    </div>
-    <div class="lead-card-body">
-      <strong class="lead-card-title${titleSizeClass}">${escapeHtml(publicationName)}</strong>
-      <div class="lead-card-lower">
-        <div class="lead-card-copy">
-          <p class="lead-card-guide">${escapeHtml(guide)}</p>
-          <div class="lead-card-cta"><b>扫码领取</b><span>长按识别二维码</span></div>
-        </div>
-        <div class="lead-card-qr-zone">
-          <div class="lead-card-qr-wrap">${qrMarkup}</div>
-        </div>
-      </div>
-    </div>
-    <small class="lead-card-disclaimer">${LEAD_CARD_DISCLAIMER}</small>
-  </aside>`;
-}
 
 function replaceLeadCardPlaceholders(html: string, cardHtml: string) {
   return html.replace(/<div[^>]*class=["'][^"']*lead-card-placeholder[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, cardHtml);
@@ -267,6 +239,7 @@ export default function Home() {
   const [riskPresets, setRiskPresets] = useState<RiskPreset[]>([]);
   const [riskPresetName, setRiskPresetName] = useState("");
   const [publicationName, setPublicationName] = useState(DEFAULT_PUBLICATION_NAME);
+  const [publicationCopy, setPublicationCopy] = useState<PublicationCopy>(DEFAULT_PUBLICATION_COPY);
   const [leadGuide, setLeadGuide] = useState(DEFAULT_LEAD_GUIDE);
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [contentPages, setContentPages] = useState<string[]>([]);
@@ -311,6 +284,9 @@ export default function Home() {
   const [editorModuleReady, setEditorModuleReady] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [draftSyncMounted, setDraftSyncMounted] = useState(false);
+  const [draftSyncOpen, setDraftSyncOpen] = useState(false);
+  const draftSyncTriggerRef = useRef<HTMLButtonElement>(null);
   const [posterFontsReady, setPosterFontsReady] = useState(false);
   const measureRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Array<HTMLElement | null>>([]);
@@ -331,7 +307,7 @@ export default function Home() {
   const riskNoteHtml = showRiskNote
     ? `<aside class="risk-note"><strong>${escapeHtml(riskTitle)}</strong><p>${escapeHtml(riskText).replace(/\n/g, "<br>")}</p></aside>`
     : "";
-  const leadCardHtml = createLeadCardHtml(publicationName, leadGuide, qrDataUrl);
+  const leadCardHtml = createLeadCardHtml(publicationName, leadGuide, qrDataUrl, publicationCopy);
   const presentationArticleHtml = useMemo(() => {
     const shouldBeautify = layoutStyle === "xiaohongshu" ? manualTypesetPreview : autoStructure;
     if (!shouldBeautify || previewPresentation === "base" || typeof DOMParser === "undefined") return articleHtml;
@@ -353,7 +329,7 @@ export default function Home() {
   const exportInputKey = useMemo(() => JSON.stringify([
     paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor,
   ]), [paginationInputKey, formatKey, title, subtitle, pageBrand, footerText, labName, coverCredit, paperColor, accentColor, textColor, highlightColor]);
-  const { exporting, exportOne, exportAll } = usePosterExport({
+  const { exporting, exportOne, exportAll, collectAssets } = usePosterExport({
     exportVersionRef, pageRefs, contentPages, pageOffset, totalPages,
     format, formatKey, title, paperColor, fontKey: `${titleFont}:${bodyFont}`,
     waitForFonts: () => waitForPosterFonts([titleFont, bodyFont]),
@@ -551,6 +527,7 @@ export default function Home() {
       if (typeof saved.riskTitle === "string") setRiskTitle(saved.riskTitle);
       if (typeof saved.riskText === "string") setRiskText(saved.riskText);
       if (typeof saved.publicationName === "string") setPublicationName(saved.publicationName);
+      if (saved.publicationCopy && Object.keys(DEFAULT_PUBLICATION_COPY).every((key) => typeof saved.publicationCopy?.[key as keyof PublicationCopy] === "string")) setPublicationCopy(saved.publicationCopy);
       if (typeof saved.leadGuide === "string") setLeadGuide(saved.leadGuide);
       if (typeof saved.qrDataUrl === "string") setQrDataUrl(saved.qrDataUrl);
       if (Array.isArray(saved.customThemePresets)) setCustomThemePresets(saved.customThemePresets);
@@ -571,7 +548,7 @@ export default function Home() {
         version: 2, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText,
         layoutStyle, autoStructure, numberedDotStyle, previewPresentation, articleHtml,
         firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor,
-        textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, leadGuide, qrDataUrl,
+        textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, publicationCopy, leadGuide, qrDataUrl,
         customThemePresets, riskPresets,
       };
       try {
@@ -586,7 +563,7 @@ export default function Home() {
       }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [workspaceReady, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText, layoutStyle, autoStructure, numberedDotStyle, previewPresentation, articleHtml, firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor, textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, leadGuide, qrDataUrl, customThemePresets, riskPresets, setNotice]);
+  }, [workspaceReady, mode, formatKey, url, rawHtml, markdownInput, title, subtitle, labName, coverCredit, pageBrand, footerText, layoutStyle, autoStructure, numberedDotStyle, previewPresentation, articleHtml, firstPageContent, preserveStyles, typeScale, lineHeight, bottomReserve, themeKey, paperColor, accentColor, textColor, highlightColor, titleFont, bodyFont, showRiskNote, riskTitle, riskText, publicationName, publicationCopy, leadGuide, qrDataUrl, customThemePresets, riskPresets, setNotice]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setEditorModuleReady(true), 900);
@@ -790,7 +767,7 @@ export default function Home() {
   function handleQrUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
       setNotice({ tone: "error", text: "请选择 PNG、JPG 或 WebP 二维码图片" });
       return;
     }
@@ -884,6 +861,12 @@ export default function Home() {
             closeImportDialog();
             setHelpOpen(true);
           }}><i aria-hidden="true">?</i><span>使用说明</span></button>
+          <button ref={draftSyncTriggerRef} className="draft-sync-trigger" type="button" onClick={() => {
+            closeImportDialog();
+            setHelpOpen(false);
+            setDraftSyncMounted(true);
+            setDraftSyncOpen(true);
+          }}>同步草稿</button>
           <button className="primary compact" onClick={exportAll} disabled={exporting || !paginationReady}>{exporting ? "处理中…" : !posterFontsReady ? "字体加载中…" : paginationError ? "排版失败" : paginationReady ? `批量导出 ${totalPages} 张` : "正在排版…"}</button>
         </div>
       </header>
@@ -902,7 +885,7 @@ export default function Home() {
               const normalized = normalizePosterTitle(event.target.value);
               setTitle(normalized);
               if (normalized !== event.target.value) setNotice({ tone: "error", text: `标题最多 ${MAX_TITLE_LENGTH} 字、${MAX_TITLE_LINES} 行` });
-            }} /><small>{Array.from(title.replace(/\n/g, "")).length} / {MAX_TITLE_LENGTH} 字 · 最多 {MAX_TITLE_LINES} 行</small></div>
+            }} /><small>{Array.from(title.replace(/\n/g, "")).length} / {MAX_TITLE_LENGTH} 字 · 最多 {MAX_TITLE_LINES} 行</small>{Array.from(title.replace(/\s*\n\s*/g, " ").trim()).length > 20 && <small className="draft-sync-field-error">同步标题最多 20 字；当前超过 {Array.from(title.replace(/\s*\n\s*/g, " ").trim()).length - 20} 字，请在同步弹窗中填写短标题。海报标题会保留。</small>}</div>
             <div className="field-stack"><label htmlFor="poster-subtitle">导语 / 副标题（可留空）</label><input id="poster-subtitle" value={subtitle} onChange={(event) => setSubtitle(event.target.value)} placeholder="留空时，标题后直接展示正文" /></div>
             <div className="microcopy-grid">
               <div className="field-stack"><label htmlFor="lab-name">底部栏目名</label><input id="lab-name" value={labName} onChange={(event) => setLabName(event.target.value)} /></div>
@@ -914,12 +897,20 @@ export default function Home() {
 
           <section className="control-section">
             <span className="eyebrow">02 · PDF 刊物领取卡</span>
-            <div className="field-stack"><label htmlFor="publication-name">刊物名称（可编辑）</label><textarea id="publication-name" className="publication-input" value={publicationName} onChange={(event) => setPublicationName(event.target.value)} /></div>
-            <div className="field-stack"><label htmlFor="lead-guide">领取引导语</label><input id="lead-guide" value={leadGuide} onChange={(event) => setLeadGuide(event.target.value)} /></div>
+            <div className="field-stack"><label htmlFor="publication-name">刊物名称（可编辑）</label><textarea id="publication-name" aria-describedby="publication-name-help" className="publication-input" value={publicationName} onChange={(event) => setPublicationName(event.target.value)} /></div>
+            <small id="publication-name-help" className="module-tip">修改这一个标题，会同步更新顶部大标题、PDF 文件名和蓝色封面标题。支持手动换行，长标题会自动缩小字号。</small>
+            <div className="field-stack"><label htmlFor="publication-summary">刊物介绍</label><textarea id="publication-summary" value={publicationCopy.summary} onChange={(event) => setPublicationCopy((copy) => ({ ...copy, summary: event.target.value }))} /></div>
+            <div className="field-stack"><label htmlFor="lead-guide">底部领取引导语</label><textarea id="lead-guide" value={leadGuide} onChange={(event) => setLeadGuide(event.target.value)} /></div>
+            <details className="publication-more-copy"><summary>修改其他文案</summary>
+              {([
+                ["intro", "顶部说明"], ["offer", "领取横条"], ["fileLabel", "文件说明"],
+                ["coverSubtitle", "封面小字"], ["editionLabel", "封面角标"],
+              ] as const).map(([key, label]) => <div className="field-stack" key={key}><label htmlFor={`publication-${key}`}>{label}</label><textarea id={`publication-${key}`} value={publicationCopy[key]} onChange={(event) => setPublicationCopy((copy) => ({ ...copy, [key]: event.target.value }))} /></div>)}
+            </details>
             <div className="qr-upload-row">
               <input id="qr-upload" className="qr-file-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleQrUpload} />
               <label className="qr-upload-button" htmlFor="qr-upload">{qrDataUrl ? "更换二维码" : "上传二维码"}</label>
-              {qrDataUrl ? <img src={qrDataUrl} alt="已上传的二维码预览" /> : <span>支持 PNG / JPG / WebP</span>}
+              {qrDataUrl ? <><img src={qrDataUrl} alt="已上传的二维码预览" /><button type="button" className="qr-remove" onClick={() => setQrDataUrl("")}>移除</button></> : <span>支持 PNG / JPG / WebP，完整保留二维码</span>}
             </div>
             <div className="lead-card-actions">
               <button className="primary" onMouseDown={(event) => event.preventDefault()} onClick={insertLeadCard}>在光标处插入领取卡</button>
@@ -1202,6 +1193,25 @@ export default function Home() {
           </div>
         </section>
       </div>
+
+      {draftSyncMounted && <Suspense fallback={draftSyncOpen ? <div className="draft-sync-loading" role="status">正在打开草稿同步…</div> : null}><DraftSyncDialog
+        open={draftSyncOpen}
+        openerRef={draftSyncTriggerRef}
+        title={title}
+        sourceFormat={formatKey}
+        canCollect={paginationReady && !exporting}
+        collectAssets={collectAssets}
+        riskNote={{ enabled: showRiskNote, title: riskTitle, text: riskText }}
+        onClose={() => setDraftSyncOpen(false)}
+        onReturnToEditor={() => {
+          setDraftSyncOpen(false);
+          window.requestAnimationFrame(() => {
+            const target = document.querySelector<HTMLButtonElement>(".format-grid button.selected");
+            target?.scrollIntoView({ behavior: "smooth", block: "center" });
+            target?.focus({ preventScroll: true });
+          });
+        }}
+      /></Suspense>}
 
       {importOpen && <div className="import-modal-backdrop" role="presentation" onMouseDown={(event) => {
         if (event.target === event.currentTarget) closeImportDialog();
