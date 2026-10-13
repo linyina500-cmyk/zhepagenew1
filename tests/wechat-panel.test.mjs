@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import ts from "typescript";
 import { installDom, loadDomModule } from "./helpers/load-dom-module.mjs";
+const { WechatSubmissionRejectedError } = loadDomModule("lib/wechat/client.ts");
 
 Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
 const ids = ["a".repeat(20), "b".repeat(20)];
@@ -18,12 +19,12 @@ async function fixture(context, options = {}) {
   const nativeRequire = createRequire(filename), React = nativeRequire("react"), { createRoot } = nativeRequire("react-dom/client"), { act } = React;
   const binding = { deviceId: "local-test-device", connectionToken: "test-token" };
   let saved = { schemaVersion: 1, id: "local-draft", updatedAt: new Date().toISOString(), sourceFormat: "wechat", images: [1, 2].map((id) => ({ id: String(id), name: `${id}.png`, blob: new Blob([`original-${id}`], { type: "image/png" }), width: 1080, height: 1440 })), content: { wechat: { title: "测试标题", body: "测试配文" }, xiaohongshu: { title: "", body: "" } }, selectedAccountIds: [], receipts: options.receipts ?? [] };
-  let busy = false, active, renderDraft, renderReady, mounted = true, persistFailure = false, createOverride, publicationOverride, connectionOverride, verifyOverride, failAccount;
-  const creates = [], publications = [], publicationReads = [], connects = [], verifies = [], jobs = new Map(), published = new Map(options.previousPublications ?? []);
+  let busy = false, active, renderDraft, renderReady, mounted = true, persistFailure = false, createOverride, publicationOverride, connectionOverride, verifyOverride, resolveOverride, readOverride, failAccount;
+  const creates = [], publications = [], publicationReads = [], connects = [], verifies = [], resolutions = [], jobs = new Map(), published = new Map(options.previousPublications ?? []);
   const client = {
     getConnection: async () => connectionOverride ? connectionOverride() : ({ deviceId: binding.deviceId }),
     connectAccount: async (input) => { connects.push(input); const account = accounts.find((item) => item.appId === input.appId); if (account.id === failAccount) throw new Error("此账号连接失败"); return account; },
-    getJob: async (id) => { const job = jobs.get(id); if (!job) throw new Error("任务不存在，请核对后台"); return job; },
+    getJob: async (id) => { if (readOverride) return readOverride(id); const job = jobs.get(id); if (!job) throw new Error("任务不存在，请核对后台"); return job; },
     async createJob(input, signal) {
       const receipt = saved.receipts.find((item) => item.accountId === input.accountId);
       assert.equal(receipt.jobId, input.id, "pending task must persist before upload");
@@ -36,6 +37,7 @@ async function fixture(context, options = {}) {
     },
     waitForJob: async (job) => job,
     verifyJob: async (id) => { verifies.push(id); return verifyOverride ? verifyOverride(id) : jobs.get(id); },
+    resolveJob: async (id, accountId, signal) => { resolutions.push({ id, accountId }); return resolveOverride ? resolveOverride(id, accountId, signal) : { jobId: id, accountId, confirmedNoDraft: true }; },
     getPublication: async (id) => {
       publicationReads.push(id);
       assert.equal(options.publicationEnabled, true, "draft-only extension does not expose publication endpoints");
@@ -53,7 +55,7 @@ async function fixture(context, options = {}) {
     const output = ts.transpileModule(readFileSync(path, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
     const loaded = { exports: {} };
     new Function("require", "module", "exports", output)((specifier) => {
-      if (specifier === "../../lib/wechat/client") return { createWechatClient: () => client };
+      if (specifier === "../../lib/wechat/client") return { createWechatClient: () => client, WechatSubmissionRejectedError };
       if (specifier === "../../lib/wechat/contentIdentity") return { wechatContentHash: async (draft) => fingerprint(draft) };
       if (specifier === "../../lib/wechat/features") return options.publicationEnabled === undefined
         ? loadDomModule("lib/wechat/features.ts") : { WECHAT_PUBLICATION_ENABLED: options.publicationEnabled };
@@ -89,10 +91,18 @@ async function fixture(context, options = {}) {
     assert.ok(summary, "more actions disclosure");
     await act(async () => { summary.click(); });
   }
+  async function confirmNoDraft(checked = true) {
+    const label = [...container.querySelectorAll("label")].find(node => node.textContent === "我已在该公众号后台草稿箱确认没有这份内容");
+    assert.ok(label, "explicit absence confirmation");
+    const checkbox = label.querySelector("input");
+    assert.equal(checkbox.disabled, false);
+    if (checkbox.checked !== checked) await act(async () => { checkbox.click(); });
+  }
   context.after(async () => { active?.abort(); mounted = false; await act(async () => root.unmount()); dom.window.close(); globalThis.IS_REACT_ACT_ENVIRONMENT = false; });
-  return { container, creates, publications, publicationReads, connects, verifies, jobs, published, click, select, openMore, settle, act, get saved() { return saved; },
+  return { container, creates, publications, publicationReads, connects, verifies, resolutions, jobs, published, click, select, openMore, confirmNoDraft, settle, act, get saved() { return saved; },
     set persistFailure(value) { persistFailure = value; }, set createOverride(value) { createOverride = value; }, set publicationOverride(value) { publicationOverride = value; }, set failAccount(value) { failAccount = value; },
     set connectionOverride(value) { connectionOverride = value; }, set verifyOverride(value) { verifyOverride = value; },
+    set resolveOverride(value) { resolveOverride = value; }, set readOverride(value) { readOverride = value; },
     close: async () => { active?.abort(); mounted = false; await act(async () => root.render(null)); },
     changeContent: async () => { saved = { ...saved, content: { ...saved.content, wechat: { title: "新标题", body: "新内容" } } }; await act(async () => renderDraft(saved)); },
     changeImages: async () => { saved = { ...saved, images: [...saved.images, { ...saved.images[0], id: "risk-wechat", name: "新风险提示.png" }] }; await act(async () => renderDraft(saved)); },
@@ -324,6 +334,122 @@ test("storage failure prevents uploads, while uncertain tasks stay blocked witho
   assert.equal(f.saved.receipts[0].status, "needs_confirmation"); await f.click("同步到草稿箱");
   assert.equal(f.creates.length, 1); assert.equal(f.saved.receipts[0].jobId, pendingId);
   assert.match(f.container.textContent, /任务不存在/);
+});
+
+const recoveryReceipt = (change = {}) => ({ platform: "wechat", accountId: ids[0], jobId: "76f6dbe5-a12d-4fe2-8ee7-35e6e988ab8e", status: "needs_confirmation", message: "请核对后台草稿箱", ...change });
+const recoveryButton = (fixture) => [...fixture.container.querySelectorAll("button")].find(button => button.textContent === "确认未创建并允许重试");
+
+test("definite submission rejection releases only the new identity and the next sync creates a fresh one", async (context) => {
+  const f = await fixture(context); await f.select(0);
+  f.createOverride = async () => { throw new WechatSubmissionRejectedError("请添加公众号 IP 白名单", 424); };
+  await f.click("同步到草稿箱");
+  const rejected = f.creates[0].id;
+  assert.equal(f.saved.receipts[0].status, "failed");
+  assert.equal(f.saved.receipts[0].jobId, undefined); assert.equal(f.saved.receipts[0].draftId, undefined);
+  assert.match(f.saved.receipts[0].message, /IP 白名单/);
+  assert.equal(recoveryButton(f), undefined);
+  f.createOverride = undefined; await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 2); assert.notEqual(f.creates[1].id, rejected);
+  assert.equal(f.saved.receipts[0].status, "saved");
+});
+
+test("a rejection while reading an older task never releases that task", async (context) => {
+  const receipt = recoveryReceipt(), f = await fixture(context, { receipts: [receipt] });
+  f.readOverride = async () => { throw new WechatSubmissionRejectedError("旧任务暂不可读", 400); };
+  await f.select(0); await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 0); assert.deepEqual(f.saved.receipts, [receipt]);
+});
+
+test("a missing old task requires explicit absence confirmation and cancellation sends nothing", async (context) => {
+  const receipt = recoveryReceipt(), f = await fixture(context, { receipts: [receipt] });
+  await f.select(0); await f.click("刷新状态");
+  assert.match(f.container.textContent, /任务不存在/);
+  assert.equal(recoveryButton(f).disabled, true);
+  await f.confirmNoDraft(); assert.equal(recoveryButton(f).disabled, false);
+  await f.confirmNoDraft(false); assert.equal(recoveryButton(f).disabled, true);
+  await f.act(async () => recoveryButton(f).click());
+  assert.equal(f.resolutions.length, 0); assert.deepEqual(f.saved.receipts, [receipt]);
+  await f.confirmNoDraft(); await f.click("确认未创建并允许重试");
+  assert.deepEqual(f.resolutions, [{ id: receipt.jobId, accountId: ids[0] }]);
+  assert.equal(f.creates.length, 0, "acknowledging absence must not automatically create a draft");
+  assert.equal(f.saved.receipts[0].status, "failed"); assert.equal(f.saved.receipts[0].jobId, undefined);
+  assert.equal(recoveryButton(f), undefined);
+  await f.click("同步到草稿箱");
+  assert.equal(f.creates.length, 1); assert.notEqual(f.creates[0].id, receipt.jobId);
+});
+
+test("a lost resolution acknowledgement keeps the same receipt and can be explicitly retried", async (context) => {
+  const receipt = recoveryReceipt(), f = await fixture(context, { receipts: [receipt] });
+  f.resolveOverride = async () => { throw new Error("恢复确认响应丢失"); };
+  await f.confirmNoDraft(); await f.click("确认未创建并允许重试");
+  assert.deepEqual(f.saved.receipts, [receipt]); assert.equal(f.creates.length, 0);
+  assert.match(f.container.textContent, /恢复确认响应丢失/);
+  f.resolveOverride = undefined; await f.click("确认未创建并允许重试");
+  assert.deepEqual(f.resolutions, Array.from({ length: 2 }, () => ({ id: receipt.jobId, accountId: ids[0] })));
+  assert.equal(f.saved.receipts[0].status, "failed"); assert.equal(f.saved.receipts[0].jobId, undefined);
+  assert.equal(f.creates.length, 0);
+});
+
+test("double clicking recovery sends one request and retains the identity until its acknowledgement", async (context) => {
+  const receipt = recoveryReceipt(), f = await fixture(context, { receipts: [receipt] });
+  const gate = Promise.withResolvers(); f.resolveOverride = () => gate.promise;
+  await f.confirmNoDraft();
+  const button = recoveryButton(f);
+  await f.act(async () => { button.click(); button.click(); }); await f.settle();
+  assert.equal(f.resolutions.length, 1); assert.deepEqual(f.saved.receipts, [receipt]);
+  assert.equal(recoveryButton(f).disabled, true); assert.equal(f.connects.length, 1);
+  await f.act(async () => gate.resolve({ jobId: receipt.jobId, accountId: ids[0], confirmedNoDraft: true })); await f.settle();
+  assert.equal(f.saved.receipts[0].status, "failed"); assert.equal(f.creates.length, 0);
+});
+
+test("recovery checks the original device and account before resolving", async (context) => {
+  const receipt = recoveryReceipt(), f = await fixture(context, { receipts: [receipt] });
+  await f.confirmNoDraft();
+  f.connectionOverride = async () => ({ deviceId: "other-device" });
+  await f.click("确认未创建并允许重试");
+  assert.equal(f.resolutions.length, 0); assert.deepEqual(f.saved.receipts, [receipt]);
+  f.connectionOverride = undefined; f.failAccount = ids[0];
+  await f.click("确认未创建并允许重试");
+  assert.equal(f.resolutions.length, 0); assert.deepEqual(f.saved.receipts, [receipt]);
+  f.failAccount = undefined; await f.click("确认未创建并允许重试");
+  assert.equal(f.resolutions.length, 1); assert.equal(f.saved.receipts[0].jobId, undefined);
+});
+
+test("saving the recovery receipt must succeed before the original identity can be released", async (context) => {
+  const receipt = recoveryReceipt(), f = await fixture(context, { receipts: [receipt] });
+  await f.confirmNoDraft(); f.persistFailure = true;
+  await f.click("确认未创建并允许重试");
+  assert.equal(f.resolutions.length, 1); assert.deepEqual(f.saved.receipts, [receipt]);
+  assert.equal(f.creates.length, 0); assert.match(f.container.textContent, /存档空间不足/);
+  f.persistFailure = false; await f.click("确认未创建并允许重试");
+  assert.equal(f.resolutions.length, 2); assert.equal(f.saved.receipts[0].jobId, undefined);
+});
+
+test("known draft IDs, publication attempts, and definite failures never offer absence recovery", async (context) => {
+  for (const change of [{ draftId: "known-draft" }, { publicationAttempted: true }, { status: "saved", draftId: "known-draft" }, { status: "failed" }]) {
+    await context.test(JSON.stringify(change), async (subtest) => {
+      const receipt = recoveryReceipt(change), f = await fixture(subtest, { receipts: [receipt] });
+      assert.equal(recoveryButton(f), undefined);
+      assert.doesNotMatch(f.container.textContent, /我已在该公众号后台草稿箱确认没有这份内容/);
+      assert.equal(f.resolutions.length, 0);
+    });
+  }
+});
+
+test("a confirmed failed job can be synced again without manual absence confirmation", async (context) => {
+  const receipt = recoveryReceipt({ status: "failed" }), f = await fixture(context, { receipts: [receipt] });
+  f.jobs.set(receipt.jobId, { id: receipt.jobId, accountId: ids[0], status: "failed", message: "微信明确拒绝，未创建草稿" });
+  await f.select(0); await f.click("同步到草稿箱");
+  assert.equal(f.resolutions.length, 0); assert.equal(f.creates.length, 1);
+  assert.notEqual(f.creates[0].id, receipt.jobId); assert.equal(f.saved.receipts[0].status, "saved");
+});
+
+test("closing recovery discards a late acknowledgement and retains the original task", async (context) => {
+  const receipt = recoveryReceipt(), f = await fixture(context, { receipts: [receipt] });
+  const gate = Promise.withResolvers(); f.resolveOverride = () => gate.promise;
+  await f.confirmNoDraft(); await f.click("确认未创建并允许重试");
+  await f.close(); await f.act(async () => gate.resolve({ jobId: receipt.jobId, accountId: ids[0], confirmedNoDraft: true }));
+  assert.deepEqual(f.saved.receipts, [receipt]); assert.equal(f.creates.length, 0);
 });
 
 test("closing an active request preserves pending identity and discards late results", async (context) => {

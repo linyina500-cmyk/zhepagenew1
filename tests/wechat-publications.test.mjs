@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { WechatApiError } from "../lib/wechat/api.mjs";
+import { createWechatApi, WechatApiError } from "../lib/wechat/api.mjs";
 import { createPublicationService } from "../server/wechat/publications.mjs";
 
 const accountId = "0123456789abcdef0123";
@@ -14,7 +14,7 @@ const published = { status: "published", articleId: "article-1", urls: ["https:/
 async function fixture(t, overrides = {}, jobPatch = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), "zhepage-publication-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  const jobId = randomUUID(), directory = join(dataDir, accountId, jobId), calls = [];
+  const jobId = randomUUID(), directory = join(dataDir, accountId, jobId), calls = [], publicationAttempts = new Map();
   await mkdir(directory, { recursive: true });
   const job = { id: jobId, accountId, status: "saved", draftId: "draft-1", imageCount: 2, uploadedCount: 2, ...jobPatch };
   const api = {
@@ -22,8 +22,20 @@ async function fixture(t, overrides = {}, jobPatch = {}) {
     async getPublication(value) { calls.push(["get", value]); return published; },
     ...overrides,
   };
-  const options = { dataDir, accountId, api, jobs: { async get() { return job; }, async verify() { return job; } } };
-  return { dataDir, directory, path: join(directory, "publication.json"), jobId, job, calls, api, options, service: createPublicationService(options) };
+  const options = { dataDir, accountId, api, jobs: {
+    beginPublication(id) {
+      publicationAttempts.set(id, (publicationAttempts.get(id) ?? 0) + 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const count = publicationAttempts.get(id) - 1;
+        if (count) publicationAttempts.set(id, count); else publicationAttempts.delete(id);
+      };
+    },
+    async get() { return job; }, async verify() { return job; },
+  } };
+  return { dataDir, directory, path: join(directory, "publication.json"), jobId, job, calls, api, options, publicationAttempts, service: createPublicationService(options) };
 }
 function diskFailure(t, fail) {
   const original = fs.promises.open;
@@ -59,8 +71,45 @@ test("incomplete, unverified or other-account jobs cannot reserve or publish", a
     const f = await fixture(t, {}, patch);
     await assert.rejects(f.service.submit(f.jobId), (error) => error.status === 409);
     assert.equal(f.calls.length, 0);
+    assert.equal(f.publicationAttempts.size, 0);
     await assert.rejects(readFile(f.path), { code: "ENOENT" });
   }
+});
+
+test("publication attempts cover queued reservations until the durable record exists", async (t) => {
+  const f = await fixture(t);
+  let releaseRead, enteredRead;
+  const gate = new Promise((resolve) => { releaseRead = resolve; });
+  const entered = new Promise((resolve) => { enteredRead = resolve; });
+  const releases = [], begin = f.options.jobs.beginPublication;
+  f.options.jobs.beginPublication = (id) => {
+    const release = begin(id);
+    return () => { releases.push(fs.existsSync(f.path)); release(); };
+  };
+  f.options.jobs.get = async () => { enteredRead(); await gate; return f.job; };
+  const first = f.service.submit(f.jobId);
+  assert.equal(f.publicationAttempts.get(f.jobId), 1);
+  const second = f.service.submit(f.jobId);
+  assert.equal(f.publicationAttempts.get(f.jobId), 2);
+  await entered;
+  assert.equal(fs.existsSync(f.path), false);
+  assert.equal(f.calls.length, 0);
+  releaseRead();
+  await Promise.all([first, second]);
+  await f.service.idle();
+  assert.deepEqual(releases, [true, true]);
+  assert.equal(f.publicationAttempts.size, 0);
+  assert.equal(f.calls.filter(([kind]) => kind === "submit").length, 1);
+});
+
+test("a resolving job rejects publication before any reservation or external call", async (t) => {
+  const f = await fixture(t);
+  f.options.jobs.beginPublication = () => { throw Object.assign(new Error("草稿正在人工核对"), { status: 409 }); };
+  f.options.jobs.get = async () => { assert.fail("a rejected publication attempt must not read the job"); };
+  await assert.rejects(f.service.submit(f.jobId), (error) => error.status === 409);
+  assert.equal(f.service.busy(), false);
+  assert.equal(f.calls.length, 0);
+  await assert.rejects(readFile(f.path), { code: "ENOENT" });
 });
 
 test("a fresh official draft readback must pass after reservation and before publication", async (t) => {
@@ -129,24 +178,53 @@ test("interrupted submitting records and malformed reservations never replay or 
   await writeFile(f.path, "partial record");
   await assert.rejects(f.service.submit(f.jobId), (error) => error.status === 503);
   assert.equal(f.calls.length, 0);
+  assert.equal(f.publicationAttempts.size, 0);
 });
 
-test("clear rejection and unknown outcome remain terminal for submission and never expose raw errors", async (t) => {
-  for (const rejected of [true, false]) {
+test("clear rejection, unsubmitted requests and unknown outcomes stay terminal without exposing raw errors", async (t) => {
+  for (const outcome of ["rejected", "not_submitted", "uncertain", "spoofed"]) {
     let count = 0;
+    const message = outcome === "not_submitted" ? "尚未取得公众号调用凭据，发表请求尚未发出。" : "请到公众号后台保存（错误码 53505）。";
     const f = await fixture(t, { async submitPublication() {
       count++;
-      if (rejected) throw new WechatApiError("请到公众号后台保存（错误码 53505）。", { outcome: "rejected", errcode: 53505 });
-      throw new Error("private-secret https://api.weixin.qq.com/?access_token=token");
+      if (outcome === "rejected" || outcome === "not_submitted") throw new WechatApiError(message, { outcome, errcode: outcome === "rejected" ? 53505 : undefined });
+      const error = new Error("private-secret https://api.weixin.qq.com/?access_token=token");
+      if (outcome === "spoofed") { error.name = "WechatApiError"; error.outcome = "not_submitted"; }
+      throw error;
     } });
     await f.service.submit(f.jobId); await f.service.idle();
     const result = await f.service.get(f.jobId);
-    assert.equal(result.status, rejected ? "failed" : "needs_confirmation");
-    if (rejected) assert.match(result.message, /53505/u);
+    const failed = outcome === "rejected" || outcome === "not_submitted";
+    assert.equal(result.status, failed ? "failed" : "needs_confirmation");
+    if (failed) assert.equal(result.message, message);
+    assert.equal(result.publishId, undefined);
     assert.doesNotMatch(JSON.stringify(result), /private-secret|access_token|api.weixin/);
-    await createPublicationService(f.options).submit(f.jobId);
+    const restarted = createPublicationService(f.options);
+    assert.equal((await restarted.submit(f.jobId)).status, result.status);
     await f.service.refresh(f.jobId);
     assert.equal(count, 1);
+  }
+});
+
+test("token failure before publication is definitive while a lost submission receipt remains uncertain", async (t) => {
+  for (const stage of ["token", "submit"]) {
+    const paths = [];
+    const api = createWechatApi({ appId: "wx-fixture", appSecret: "fixture-secret", fetchImpl: async (url) => {
+      const path = new URL(url).pathname;
+      paths.push(path);
+      if (stage === "submit" && path === "/cgi-bin/stable_token") return Response.json({ access_token: "fixture-token", expires_in: 7200 });
+      throw new Error("private-secret https://api.weixin.qq.com/?access_token=fixture-token");
+    } });
+    const f = await fixture(t, { submitPublication: api.submitPublication });
+    await f.service.submit(f.jobId); await f.service.idle();
+    const result = await f.service.get(f.jobId);
+    assert.equal(result.status, stage === "token" ? "failed" : "needs_confirmation");
+    assert.equal(result.publishId, undefined);
+    assert.doesNotMatch(JSON.stringify(result), /private-secret|fixture-token|access_token|api.weixin/);
+    const restarted = createPublicationService(f.options);
+    assert.equal((await restarted.submit(f.jobId)).status, result.status);
+    assert.equal((await restarted.refresh(f.jobId)).status, result.status);
+    assert.deepEqual(paths, stage === "token" ? ["/cgi-bin/stable_token"] : ["/cgi-bin/stable_token", "/cgi-bin/freepublish/submit"]);
   }
 });
 

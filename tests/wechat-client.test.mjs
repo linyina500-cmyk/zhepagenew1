@@ -4,7 +4,7 @@ import { createHash, webcrypto } from "node:crypto";
 Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
 import { loadDomModule } from "./helpers/load-dom-module.mjs";
 
-const { createWechatClient, WechatUnconfirmedError, WechatRequestError } = loadDomModule("lib/wechat/client.ts");
+const { createWechatClient, WechatUnconfirmedError, WechatRequestError, WechatSubmissionRejectedError } = loadDomModule("lib/wechat/client.ts");
 const { LocalSyncBrowserError } = loadDomModule("lib/localSync/transport.ts");
 const id = "76f6dbe5-a12d-4fe2-8ee7-35e6e988ab8e";
 const appId = "wx-test-account";
@@ -115,6 +115,83 @@ test("missing or different-account readback never turns an uncertain create into
     await assert.rejects(client.createJob(input, signal()), WechatUnconfirmedError);
     assert.equal(posts, 1); assert.equal(reads, 1);
   }
+});
+
+test("a definite submission rejection is retryable only after the original identity is confirmed missing", async () => {
+  for (const status of [400, 401, 403, 404, 405, 409, 413, 415, 422, 424]) {
+    for (const missing of [404, 410]) {
+      const calls = [];
+      const client = createWechatClient("pass", async (url, options) => {
+        calls.push([options.method, url]);
+        return options.method === "POST" ? reply({ error: "请把当前 IP 加入公众号白名单" }, status) : reply({ error: "任务不存在" }, missing);
+      });
+      await assert.rejects(client.createJob(input, signal()), error => error instanceof WechatSubmissionRejectedError && error.status === status && error.message === "请把当前 IP 加入公众号白名单");
+      assert.deepEqual(calls, [["POST", `${scope}/jobs`], ["GET", `${scope}/jobs/${id}`]]);
+    }
+  }
+});
+
+test("an existing valid account task wins over an HTTP submission rejection", async () => {
+  const existing = job({ status: "saved", draftId: "already-created", uploadedCount: 2 });
+  const calls = [];
+  const client = createWechatClient("pass", async (_url, options) => {
+    calls.push(options.method);
+    return options.method === "POST" ? reply({ error: "提交被拒绝" }, 409) : reply({ job: existing });
+  });
+  assert.deepEqual(await client.createJob(input, signal()), existing);
+  assert.deepEqual(calls, ["POST", "GET"]);
+});
+
+test("failed, malformed, or foreign readback cannot release a rejected submission identity", async () => {
+  const readbacks = [
+    async () => reply({ error: "暂时不可读" }, 503),
+    async () => { throw new TypeError("network lost"); },
+    async () => reply({ job: job({ accountId: "b".repeat(20) }) }),
+    async () => reply({ job: null }),
+    async () => new Response("malformed"),
+  ];
+  for (const readback of readbacks) {
+    let posts = 0, reads = 0;
+    const client = createWechatClient("pass", async (_url, options) => {
+      if (options.method === "POST") { posts++; return reply({ error: "原始安全拒绝原因" }, 400); }
+      reads++; return readback();
+    });
+    await assert.rejects(client.createJob(input, signal()), error => error instanceof WechatUnconfirmedError && /原始安全拒绝原因/.test(error.message));
+    assert.equal(posts, 1); assert.equal(reads, 1);
+  }
+});
+
+test("network, server, and malformed submission responses remain unknown even when readback is missing", async () => {
+  const submissions = [
+    async () => { throw new TypeError("network lost"); },
+    ...[408, 429, 500, 502, 503, 504].map(status => async () => reply({ error: "服务响应未确认" }, status)),
+    async () => new Response("invalid JSON"),
+    async () => reply({ job: job({ accountId: "b".repeat(20) }) }),
+  ];
+  for (const submission of submissions) {
+    let calls = 0;
+    const client = createWechatClient("pass", async (_url, options) => { calls++; return options.method === "POST" ? submission() : reply({ error: "任务不存在" }, 404); });
+    await assert.rejects(client.createJob(input, signal()), WechatUnconfirmedError);
+    assert.equal(calls, 2);
+  }
+});
+
+test("resolve sends explicit absence confirmation and requires the exact account and job acknowledgement", async () => {
+  const resolution = { jobId: id, accountId, confirmedNoDraft: true }, calls = [];
+  const client = createWechatClient("pass", async (url, options) => { calls.push([url, options.method, JSON.parse(options.body)]); return reply({ resolution }); });
+  assert.deepEqual(await client.resolveJob(id, accountId, signal()), resolution);
+  assert.deepEqual(calls, [[`${scope}/jobs/${id}/resolve`, "POST", { confirmNoDraft: true }]]);
+  for (const invalid of [null, {}, { ...resolution, jobId: "other" }, { ...resolution, accountId: "b".repeat(20) }, { ...resolution, confirmedNoDraft: false }, { ...resolution, confirmedNoDraft: "true" }]) {
+    await assert.rejects(createWechatClient("pass", async () => reply({ resolution: invalid })).resolveJob(id, accountId, signal()), /未收到原任务的恢复确认/);
+  }
+});
+
+test("resolve keeps a lost acknowledgement uncertain and explains how to upgrade an older extension", async () => {
+  let requests = 0;
+  const lost = createWechatClient("pass", async () => { requests++; throw new TypeError("ACK lost"); });
+  await assert.rejects(lost.resolveJob(id, accountId, signal()), /ACK lost/);
+  assert.equal(requests, 1, "resolution must not auto-repeat or create a draft");
+  await assert.rejects(createWechatClient("pass", async () => reply({ error: "没有此公众号草稿操作" }, 404)).resolveJob(id, accountId, signal()), error => error instanceof WechatRequestError && error.status === 404 && /1\.0\.3/.test(error.message) && /重新加载/.test(error.message));
 });
 
 test("aborting while sending stops waiting without an automatic status request or repeat create", async () => {

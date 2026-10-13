@@ -109,10 +109,10 @@ export function createPublicationService({ dataDir, accountId, api, jobs }) {
       record.status = "publishing";
       record.message = "微信已接收发表任务，请读取原记录核对最终结果。";
     } catch (error) {
-      const rejected = error instanceof WechatApiError && error.outcome === "rejected";
-      record.status = !submitted || rejected ? "failed" : "needs_confirmation";
+      const failed = error instanceof WechatApiError && ["rejected", "not_submitted"].includes(error.outcome);
+      record.status = !submitted || failed ? "failed" : "needs_confirmation";
       record.message = !submitted ? "发表前草稿复核未通过或未能完成，尚未提交发表。请到公众号后台检查原草稿。"
-        : rejected ? error.message : "发表提交结果尚未确认，请先在公众号后台核对；不会自动再次发表。";
+        : failed ? error.message : "发表提交结果尚未确认，请先在公众号后台核对；不会自动再次发表。";
     }
     return persist(record);
   }
@@ -135,7 +135,8 @@ export function createPublicationService({ dataDir, accountId, api, jobs }) {
   }
   return {
     busy: () => pending > 0 || active.size > 0,
-    submit(jobId) {
+    async submit(jobId) {
+      const release = jobs.beginPublication(jobId);
       return reserve(async () => {
         const previous = await read(jobId, true);
         if (previous) return publicRecord(previous);
@@ -166,7 +167,7 @@ export function createPublicationService({ dataDir, accountId, api, jobs }) {
         const task = run(record).finally(() => { active.delete(jobId); });
         active.set(jobId, { record, task });
         return first;
-      });
+      }).finally(release);
     },
     async get(jobId) { return publicRecord(await read(jobId)); },
     refresh(jobId) {

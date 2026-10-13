@@ -929,3 +929,74 @@ test("Safari and Firefox keep editing available while explaining that synchroniz
     expect(server.failure()).toBeUndefined();
   } finally { await server.close(); }
 });
+
+test("WeChat whitelist retry and explicit absence recovery keep durable receipts and create once", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "Extension flow requires Chrome.");
+  test.setTimeout(240_000);
+  const appId = "wx1234567890123456", accountId = createHash("sha256").update(appId).digest("hex").slice(0, 20);
+  const account = { id: accountId, name: "白名单恢复测试" }, deviceId = "1".repeat(32);
+  const jobs = new Map<string, Record<string, unknown>>(), attempts: string[] = [];
+  let mode: "failed" | "needs_confirmation" | "saved" = "failed", resolved = 0, created = 0;
+  const server = await startWechatTestServer(new URL(page.url()).origin, async (request, response) => {
+    const path = new URL(request.url!, "http://fixture.local").pathname;
+    const reply = (status: number, body: unknown) => { response.writeHead(status, { "Content-Type": "application/json" }); response.end(JSON.stringify(body)); };
+    if (path === "/api/wechat/connection") { reply(200, { deviceId }); return; }
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks);
+    if (path === "/api/wechat/accounts/connect") { reply(200, { account }); return; }
+    const match = new RegExp(`^/api/wechat/accounts/${accountId}/jobs(?:/([a-f0-9-]+))?(/resolve)?$`).exec(path);
+    expect(match).not.toBeNull();
+    const id = match![1];
+    if (match![2]) {
+      expect(JSON.parse(bytes.toString())).toEqual({ confirmNoDraft: true });
+      expect(jobs.get(id)?.status).toBe("needs_confirmation"); expect(jobs.get(id)?.draftId).toBeUndefined();
+      jobs.set(id, { ...jobs.get(id), status: "failed" }); resolved++;
+      reply(200, { resolution: { jobId: id, accountId, confirmedNoDraft: true } }); return;
+    }
+    if (id) { reply(jobs.has(id) ? 200 : 404, jobs.has(id) ? { job: jobs.get(id) } : { error: "未找到记录" }); return; }
+    const form = await new Response(new Uint8Array(bytes), { headers: { "content-type": request.headers["content-type"]! } }).formData();
+    const jobId = String(form.get("id")); attempts.push(jobId);
+    expect((await savedDraftSummary(page))?.receipts).toContainEqual(expect.objectContaining({ jobId, status: "needs_confirmation" }));
+    if (mode === "saved") created++;
+    const job = { id: jobId, accountId, accountName: account.name, title: String(form.get("title")), imageCount: form.getAll("images").length, uploadedCount: form.getAll("images").length, status: mode,
+      message: mode === "failed" ? "IP 203.0.113.7 未加入公众号白名单（40164），未创建草稿" : mode === "needs_confirmation" ? "旧记录结果待确认" : "已核对",
+      ...(mode === "saved" ? { draftId: "fixture-created-once" } : {}), createdAt: "2026-10-13T00:00:00Z", updatedAt: "2026-10-13T00:00:00Z" };
+    jobs.set(jobId, job); reply(202, { job });
+  }, { connectionToken: "a".repeat(64), deviceId });
+  try {
+    await server.mount(page); await page.goto(server.origin);
+    const dialog = await prepareRealImages(page); await choosePlatform(dialog, "wechat");
+    await dialog.getByLabel("公众号贴图标题", { exact: true }).fill("白名单恢复回归");
+    await detectExtension(page, dialog);
+    const settings = dialog.locator(".draft-sync-wechat-settings");
+    if (!(await settings.evaluate((node) => (node as HTMLDetailsElement).open))) await settings.locator(":scope > summary").click();
+    await dialog.getByLabel("公众号名称", { exact: true }).fill(account.name);
+    await dialog.getByLabel("AppID", { exact: true }).fill(appId);
+    await dialog.getByLabel("AppSecret", { exact: true }).fill("s".repeat(32));
+    await dialog.getByRole("button", { name: "保存并连接公众号", exact: true }).click();
+    const row = dialog.getByRole("article", { name: `${account.name} 的结果` }); await expect(row).toBeVisible();
+    await confirmPlatformImages(dialog, "wechat");
+    const sync = dialog.getByRole("button", { name: "同步到草稿箱", exact: true });
+    await sync.click(); await expect(row).toContainText("40164"); await expect(sync).toBeEnabled();
+    expect(created).toBe(0); expect(resolved).toBe(0);
+    mode = "needs_confirmation";
+    await sync.click(); await expect(row).toContainText("旧记录结果待确认"); await expect(sync).toBeEnabled();
+    expect(attempts).toHaveLength(2); expect(new Set(attempts).size).toBe(2);
+    await sync.click(); await expect(sync).toBeEnabled(); expect(attempts).toHaveLength(2);
+    const confirmation = row.getByLabel("我已在该公众号后台草稿箱确认没有这份内容", { exact: true });
+    const recover = row.getByRole("button", { name: "确认未创建并允许重试", exact: true });
+    await expect(recover).toBeDisabled(); await confirmation.check(); await confirmation.uncheck(); await expect(recover).toBeDisabled(); expect(resolved).toBe(0);
+    await page.setViewportSize({ width: 390, height: 844 }); await recover.scrollIntoViewIfNeeded();
+    expect(await dialog.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+    await page.screenshot({ path: "test-results/wechat-absence-recovery-mobile.png" });
+    await confirmation.check(); await recover.click(); await expect(row).toContainText("可以再次同步");
+    expect(resolved).toBe(1); expect(created).toBe(0);
+    const receipt = (await savedDraftSummary(page))?.receipts.find((item) => item.accountId === accountId);
+    expect(receipt).toMatchObject({ status: "failed" }); expect(receipt).not.toHaveProperty("jobId");
+    mode = "saved"; await sync.click(); await expect(row).toContainText("已同步到草稿箱");
+    expect(created).toBe(1); expect(attempts).toHaveLength(3); expect(new Set(attempts).size).toBe(3);
+    await expect(confirmation).toHaveCount(0);
+    await sync.click(); await expect(sync).toBeEnabled(); expect(created).toBe(1); expect(attempts).toHaveLength(3);
+    expect(server.failure()).toBeUndefined();
+  } finally { await server.close(); }
+});

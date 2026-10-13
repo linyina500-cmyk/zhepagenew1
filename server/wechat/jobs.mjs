@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { normalizeDraftCoverInfo, normalizeDraftCoverSource, normalizeDraftVerificationMismatches } from "../../lib/wechat/api.mjs";
+import { WechatApiError, normalizeDraftCoverInfo, normalizeDraftCoverSource, normalizeDraftVerificationMismatches } from "../../lib/wechat/api.mjs";
 
 export const JOB_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 export const MAX_REQUEST_BYTES = 60 * 1024 * 1024 + 64 * 1024;
@@ -62,10 +62,20 @@ export function createJobService({ dataDir, appId, accountName, api }) {
   const root = join(dataDir, account.id);
   const active = new Map();
   const unpersisted = new Map();
+  const publicationAttempts = new Map();
   let reservation = Promise.resolve();
+  let pending = 0;
+  let resolving = false;
+  function reserve(action) {
+    pending++;
+    const task = reservation.catch(() => {}).then(action).finally(() => { pending--; });
+    reservation = task;
+    return task;
+  }
   function retainAfterStorageFailure(record) {
-    record.status = "needs_confirmation";
-    record.message = "同步记录暂时无法写入磁盘，已知草稿编号保留在当前服务内存中。请先核对公众号草稿箱，恢复存储后重新核对；此时不要重启服务或重复创建。";
+    if (record.draftId || record.status !== "failed") record.status = "needs_confirmation";
+    const notice = "同步记录暂时无法写入磁盘，已知结果保留在当前服务内存中。请恢复存储后再操作；此时不要重启服务或重复创建。";
+    if (!record.message.includes(notice)) record.message += notice;
     unpersisted.set(record.id, record);
     return record;
   }
@@ -101,10 +111,17 @@ export function createJobService({ dataDir, appId, accountName, api }) {
       }
       throw new RequestError("同步记录无法读取，请先在公众号草稿箱核对结果", 503);
     }
-    if (value.id !== id || value.accountId !== account.id || !Array.isArray(value.imageMediaIds)) throw new RequestError("同步记录不完整，请先人工核对", 503);
+    if (!value || value.id !== id || value.accountId !== account.id) throw new RequestError("同步记录不完整，请先人工核对", 503);
+    if (value.resolution === "confirmed_absent" && !Array.isArray(value.imageMediaIds)) {
+      throw new RequestError("此同步记录已确认未创建草稿并结束，请使用新的同步记录", 410);
+    }
+    if (!Array.isArray(value.imageMediaIds)) throw new RequestError("同步记录不完整，请先人工核对", 503);
     if (["uploading", "creating"].includes(value.status) && !active.has(id)) {
-      value.status = "needs_confirmation";
-      value.message = "同步服务曾中断，结果需要核对。不会重新上传或重复创建草稿。";
+      const notCreated = value.status === "uploading" && !value.draftId;
+      value.status = notCreated ? "failed" : "needs_confirmation";
+      value.message = notCreated
+        ? "图片上传阶段的同步服务曾中断，尚未创建草稿；已上传的素材可能保留在素材库。"
+        : "同步服务曾中断，结果需要核对。不会重新上传或重复创建草稿。";
       await write(value);
     }
     return value;
@@ -124,9 +141,10 @@ export function createJobService({ dataDir, appId, accountName, api }) {
       if (verificationMismatches) record.verificationMismatches = verificationMismatches;
       record.status = result.verified ? "saved" : "needs_confirmation";
       record.message = result.verified ? "公众号接口已确认草稿的标题、配文和全部图片顺序。请打开草稿箱检查实际图片显示。" : result.message;
-    } catch {
+    } catch (error) {
       record.status = "needs_confirmation";
-      record.message = "公众号已返回草稿编号，但详情暂未核对完成。请读取核对，不要重复创建。";
+      record.message = "公众号已返回草稿编号，但详情暂未核对完成。"
+        + (error instanceof WechatApiError ? error.message : "请读取核对，不要重复创建。");
     }
     await write(record);
     return record;
@@ -151,12 +169,20 @@ export function createJobService({ dataDir, appId, accountName, api }) {
       await write(record);
       await verify(record);
     } catch (error) {
-      record.status = stage === "upload" || (stage === "create" && error.outcome === "rejected") ? "failed" : "needs_confirmation";
+      const controlled = error instanceof WechatApiError;
+      const notSubmitted = controlled && error.outcome === "not_submitted";
+      const rejected = controlled && error.outcome === "rejected";
+      record.status = !record.draftId && (stage === "upload" || (stage === "create" && (rejected || notSubmitted))) ? "failed" : "needs_confirmation";
       record.message = stage === "upload"
         ? `图片上传未完成，未创建草稿；已确认 ${record.uploadedCount} / ${record.imageCount} 张素材。可能有部分素材已进入素材库，请核对后再操作。`
-        : stage === "create" && error.outcome === "rejected"
+        : stage === "create" && notSubmitted
+          ? "公众号草稿创建请求尚未发出；已上传的图片保留在素材库。"
+        : stage === "create" && rejected
           ? "公众号拒绝创建本次草稿；已上传的图片保留在素材库。请检查内容与接口配置后再操作。"
-          : "草稿创建或核对结果尚未确认。请先查看公众号草稿箱；服务不会重复创建。";
+          : record.draftId
+            ? "公众号已返回草稿编号，但核对或记录保存尚未完成。请读取原记录核对，不要重复创建。"
+            : "草稿创建结果尚未确认。请先查看公众号草稿箱；服务不会重复创建。";
+      if (controlled) record.message += error.message;
       // If storage itself fails, the last durable stage still blocks replay.
       try { await write(record); }
       catch { retainAfterStorageFailure(record); }
@@ -164,15 +190,50 @@ export function createJobService({ dataDir, appId, accountName, api }) {
   }
   return {
     account,
-    busy: () => active.size > 0,
+    busy: () => pending > 0 || active.size > 0 || publicationAttempts.size > 0,
+    beginPublication(id) {
+      directory(id);
+      if (resolving) throw new RequestError("正在确认公众号草稿结果，请完成后再发表", 409);
+      publicationAttempts.set(id, (publicationAttempts.get(id) || 0) + 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const remaining = publicationAttempts.get(id) - 1;
+        if (remaining) publicationAttempts.set(id, remaining);
+        else publicationAttempts.delete(id);
+      };
+    },
     async checkConnection() { await api.checkConnection(); return account; },
     submit(input) {
-      const task = reservation.catch(() => {}).then(async () => {
+      return reserve(async () => {
         if (input.expectedAccountId !== account.id) throw new RequestError("公众号配置已变化，请重新连接并核对目标账号后再同步", 409);
         try { await mkdir(root, { mode: 0o700 }); }
         catch (error) { if (error.code !== "EEXIST") throw error; }
         await syncDirectory(dataDir);
         if (active.size && !active.has(input.id)) throw new RequestError("上一组公众号内容仍在处理中，请先读取同步状态", 409);
+        const entries = await readdir(root, { withFileTypes: true });
+        if (entries.some((entry) => entry.name === input.id)) {
+          const previous = await read(input.id);
+          if (previous.fingerprint !== input.fingerprint) throw new RequestError("此同步编号对应另一组内容，请先核对已有记录", 409);
+          return publicJob(previous);
+        }
+        // A same-ID request above remains read-only, even during a storage
+        // outage. Before admitting new work, persist the retained terminal
+        // result so an older durable stage cannot keep a known failure blocked.
+        for (const record of [...unpersisted.values()]) await write(record);
+        for (const entry of entries) {
+          if (!entry.isDirectory() || !JOB_ID.test(entry.name)) continue;
+          let previous;
+          try { previous = await read(entry.name); }
+          catch (error) {
+            if (error instanceof RequestError && [404, 410].includes(error.status)) continue;
+            throw error;
+          }
+          if (previous.fingerprint === input.fingerprint && ["uploading", "creating", "needs_confirmation"].includes(previous.status)) {
+            throw new RequestError("这组内容已有待核对的同步记录，请先检查原任务和公众号草稿箱，勿重复创建。", 409);
+          }
+        }
         try { await mkdir(directory(input.id), { mode: 0o700 }); await syncDirectory(root); }
         catch (error) {
           if (error.code !== "EEXIST") throw error;
@@ -192,19 +253,61 @@ export function createJobService({ dataDir, appId, accountName, api }) {
         active.set(input.id, task);
         return first;
       });
-      reservation = task;
-      return task;
     },
-    async get(id) { return publicJob(await read(id)); },
-    async verify(id) {
-      const record = await read(id);
-      if (active.has(id) || !record.draftId) return publicJob(record);
-      const task = verify(record);
-      active.set(id, task);
-      try { return publicJob(await task); }
-      catch { return publicJob(retainAfterStorageFailure(record)); }
-      finally { active.delete(id); }
+    get(id) { return reserve(async () => publicJob(await read(id))); },
+    verify(id) {
+      return reserve(async () => {
+        const record = await read(id);
+        if (active.has(id) || !record.draftId) return publicJob(record);
+        const task = verify(record);
+        active.set(id, task);
+        try { return publicJob(await task); }
+        catch { return publicJob(retainAfterStorageFailure(record)); }
+        finally { active.delete(id); }
+      });
     },
-    async idle() { await Promise.allSettled([...active.values()].filter(Boolean)); },
+    async resolve(id) {
+      const path = directory(id);
+      if (active.size || publicationAttempts.size) throw new RequestError("该公众号仍在处理任务，请完成后再确认草稿结果", 409);
+      return reserve(async () => {
+        if (active.size || publicationAttempts.size) throw new RequestError("该公众号仍在处理任务，请完成后再确认草稿结果", 409);
+        resolving = true;
+        try {
+          try {
+            await lstat(join(path, "publication.json"));
+            throw new RequestError("此草稿已有发表记录，不能确认未创建，请先核对公众号后台", 409);
+          } catch (error) {
+            if (error.code !== "ENOENT") throw error;
+          }
+          let record;
+          try { record = await read(id); }
+          catch (error) {
+            if (error instanceof RequestError && error.status === 410) return { jobId: id, accountId: account.id, confirmedNoDraft: true };
+            if (!(error instanceof RequestError && error.status === 404)) throw error;
+          }
+          if (record?.draftId || record?.status === "saved") throw new RequestError("公众号已返回草稿编号或已确认保存，不能确认未创建，请先核对原草稿", 409);
+          if (record && !["failed", "needs_confirmation"].includes(record.status)) throw new RequestError("此同步任务尚未结束，请完成后再确认草稿结果", 409);
+          if (record?.resolution !== "confirmed_absent") {
+            const now = new Date().toISOString();
+            record = record ? { ...record, status: "failed", message: "已由用户确认公众号草稿箱中没有本次草稿，此同步记录已结束。", resolution: "confirmed_absent" }
+              : { id, accountId: account.id, resolution: "confirmed_absent", createdAt: now, updatedAt: now };
+            try {
+              await mkdir(root, { recursive: true, mode: 0o700 });
+              await syncDirectory(dataDir);
+              await mkdir(path, { recursive: true, mode: 0o700 });
+              await syncDirectory(root);
+              await write(record);
+            } catch {
+              throw new RequestError("未能保存草稿确认结果，请恢复本机存储后重新确认，暂勿重新创建", 503);
+            }
+          }
+          return { jobId: id, accountId: account.id, confirmedNoDraft: true };
+        } finally { resolving = false; }
+      });
+    },
+    async idle() {
+      await reservation.catch(() => {});
+      await Promise.allSettled([...active.values()].filter(Boolean));
+    },
   };
 }

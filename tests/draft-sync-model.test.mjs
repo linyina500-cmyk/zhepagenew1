@@ -271,6 +271,14 @@ test("receipts preserve publication attempts and content identity without collap
   }
 });
 
+test("a resolved or rejected receipt stays failed after reopening without restoring the released task ID", async () => {
+  const source = makeDraft();
+  source.receipts = [{ platform: "wechat", accountId: "wechat-account", status: "failed", jobId: undefined, draftId: undefined, contentHash: "a".repeat(64), message: "已确认未创建，可以重新同步" }];
+  const archive = await encodeLocalDraft(source), receipt = decodeLocalDraft(structuredClone(archive)).receipts[0];
+  assert.equal("jobId" in archive.receipts[0], false); assert.equal("draftId" in archive.receipts[0], false);
+  assert.deepEqual(receipt, { platform: "wechat", accountId: "wechat-account", status: "failed", contentHash: "a".repeat(64), message: "已确认未创建，可以重新同步" });
+});
+
 test("archive round-trips independent risk text and the editable last page without unrelated fields", async () => {
   const draft = makeDraft();
   draft.risk = { notes: { wechat: { enabled: true, title: "提示", text: "公众号提示" }, xiaohongshu: { enabled: true, title: "提示", text: "小红书提示" } }, secret: "do-not-persist" };

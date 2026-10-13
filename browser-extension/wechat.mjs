@@ -20,7 +20,7 @@ function deferred() {
 
 // A single slow fetch must finish before the MV3 worker's 30-second fetch limit.
 // The page's job polling keeps active work alive; a stopped worker is recovered
-// as uncertain, never replayed. Credentials travel only to WeChat's fixed API.
+// from its durable phase, never replayed. Credentials travel only to WeChat's fixed API.
 export async function fetchWechatInBrowser(url, options = {}) {
   const parsed = new URL(url);
   if (parsed.origin !== "https://api.weixin.qq.com" || parsed.username || parsed.password) throw new Error("Invalid WeChat API destination");
@@ -85,8 +85,12 @@ export function createWechatHandler({ deviceId, store, apiFactory = (credentials
     unpersisted.delete(key(record.accountId, record.id));
   }
   function retain(record) {
-    record.status = "needs_confirmation";
-    record.message = "浏览器暂时无法保存同步记录，请先检查公众号草稿箱。请保留当前页面，勿重复同步。";
+    if (record.status === "failed" && !record.draftId) {
+      record.message += " 浏览器暂时无法保存这次失败记录，请保留当前页面，恢复存储后再操作。";
+    } else {
+      record.status = "needs_confirmation";
+      record.message = "浏览器暂时无法保存同步记录，请先检查公众号草稿箱。请保留当前页面，勿重复同步。";
+    }
     unpersisted.set(key(record.accountId, record.id), record);
     return record;
   }
@@ -96,10 +100,13 @@ export function createWechatHandler({ deviceId, store, apiFactory = (credentials
       if (optional) return null;
       throw new RequestError("未找到这次同步记录，请先核对公众号草稿箱，勿重复提交", 404);
     }
+    if (record.resolution === "confirmed_absent" && !Array.isArray(record.imageMediaIds)) throw new RequestError("这次旧同步已确认未创建，请重新发起同步", 410);
     if (record.id !== id || record.accountId !== accountId || !Array.isArray(record.imageMediaIds)) throw new RequestError("同步记录不完整，请先人工核对", 503);
     if (recover && ["uploading", "creating"].includes(record.status)) {
-      record.status = "needs_confirmation";
-      record.message = "浏览器同步曾中断，请先核对公众号草稿箱。不会重新上传或重复创建。";
+      const notCreated = record.status === "uploading" && !record.draftId;
+      record.status = notCreated ? "failed" : "needs_confirmation";
+      record.message = notCreated ? "图片上传期间同步中断，尚未创建草稿。可重新发起同步；已上传图片可能保留在素材库。"
+        : "浏览器同步曾中断，请先核对公众号草稿箱。不会重新上传或重复创建。";
       try { await write(record); } catch { retain(record); }
     }
     return record;
@@ -115,9 +122,10 @@ export function createWechatHandler({ deviceId, store, apiFactory = (credentials
       if (mismatches) record.verificationMismatches = mismatches;
       record.status = result.verified ? "saved" : "needs_confirmation";
       record.message = result.verified ? "标题、配文和图片顺序已核对。请到公众号草稿箱检查图片，并重新选择封面后发布。" : result.message;
-    } catch {
+    } catch (error) {
       record.status = "needs_confirmation";
       record.message = "公众号已返回草稿编号，但详情暂未核对完成。请重新核对，勿重复同步。";
+      if (error instanceof WechatApiError) record.message += ` ${error.message}`;
     }
     await write(record); return record;
   }
@@ -141,12 +149,29 @@ export function createWechatHandler({ deviceId, store, apiFactory = (credentials
       await write(record);
       await verify(record, api);
     } catch (error) {
-      record.status = stage === "upload" || (stage === "create" && error?.outcome === "rejected") ? "failed" : "needs_confirmation";
+      const notCreated = !record.draftId && (stage === "upload" || (stage === "create" && ["rejected", "not_submitted"].includes(error?.outcome)));
+      record.status = notCreated ? "failed" : "needs_confirmation";
       record.message = stage === "upload" ? "图片上传未完成，未创建草稿。可能有部分图片已进入素材库，请核对后再操作。"
         : stage === "create" && error?.outcome === "rejected" ? "公众号拒绝创建草稿，已上传图片保留在素材库。请检查内容和接口权限。"
+          : notCreated ? "创建草稿请求尚未发出，请修复连接后重新同步。已上传图片可能保留在素材库。"
           : "草稿结果尚未确认，请先查看公众号草稿箱；不会重复创建。";
+      if (error instanceof WechatApiError) record.message += ` ${error.message}`;
       try { await write(record); } catch { retain(record); }
     }
+  }
+  async function resolveAbsent(accountId, id, input) {
+    if (!plainObject(input) || input.confirmNoDraft !== true || Object.keys(input).length !== 1) throw new RequestError("请先确认公众号后台没有这份草稿");
+    if (locks.has(accountId)) throw new RequestError("该公众号仍在处理中，请完成后再确认", 409);
+    const lock = { kind: "resolve", id }; locks.set(accountId, lock);
+    try {
+      const stored = unpersisted.get(key(accountId, id)) || await store.get(key(accountId, id));
+      if (stored && (stored.id !== id || stored.accountId !== accountId)) throw new RequestError("同步记录不完整，无法解除", 409);
+      if (stored?.draftId || stored?.status === "saved" || stored?.publicationAttempted || stored?.publicationId || stored?.publicationStatus) throw new RequestError("已有草稿或发表记录，不能按未创建解除。请核对原草稿。", 409);
+      if (stored && stored.resolution !== "confirmed_absent" && !["failed", "needs_confirmation"].includes(stored.status)) throw new RequestError("请先刷新同步状态，再确认是否未创建", 409);
+      const record = { ...stored, id, accountId, status: "failed", resolution: "confirmed_absent", message: "已记录你确认后台没有这份草稿，可重新发起同步。" };
+      await write(record);
+      return { jobId: id, accountId, confirmedNoDraft: true };
+    } finally { if (locks.get(accountId) === lock) locks.delete(accountId); }
   }
   async function connect(input) {
     if (!plainObject(input) || Object.keys(input).some((name) => !["appId", "appSecret", "name", "deviceId"].includes(name))) throw new RequestError("公众号连接信息不完整");
@@ -182,6 +207,10 @@ export function createWechatHandler({ deviceId, store, apiFactory = (credentials
     locks.set(accountId, lock);
     let running = false;
     try {
+      // A storage outage may have left an older uploading/creating record on
+      // disk. Commit the retained terminal result under this account lock
+      // before considering another write or checking duplicate fingerprints.
+      for (const record of [...unpersisted.values()]) if (record.accountId === accountId) await write(record);
       const previous = await read(accountId, input.id, { optional: true });
       if (previous) {
         if (previous.fingerprint !== input.fingerprint) throw new RequestError("此同步编号对应另一组内容，请先核对已有记录", 409);
@@ -220,9 +249,10 @@ export function createWechatHandler({ deviceId, store, apiFactory = (credentials
       }
       const { api } = session(accountId);
       if (operation === "/jobs" && method === "POST") return reply(202, { job: await submit(accountId, body) });
-      const match = /^\/jobs\/([^/]+)(\/verify)?$/u.exec(operation);
+      const match = /^\/jobs\/([^/]+)(\/(?:verify|resolve))?$/u.exec(operation);
       if (!match || !JOB_ID.test(match[1])) throw new RequestError("没有此公众号草稿操作", 404);
       const id = match[1], current = locks.get(accountId);
+      if (match[2] === "/resolve" && method === "POST") return reply(200, { resolution: await resolveAbsent(accountId, id, body) });
       if (!match[2] && method === "GET") return reply(200, { job: publicJob(await read(accountId, id, { recover: current?.id !== id })) });
       if (match[2] === "/verify" && method === "POST") {
         if (current) {

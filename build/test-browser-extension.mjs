@@ -54,6 +54,45 @@ try {
   },first.identity);
   assert.deepEqual(await preview.page.evaluate(async()=>(await fixtureVault.listAccounts()).map(account=>account.name)),['预览站测试公众号'],'adding a main-site account must leave preview records unchanged');
   const worker=context.serviceWorkers()[0]??await context.waitForEvent('serviceworker');
+  const mockWechat=async(worker)=>worker.evaluate(()=>{
+    globalThis.fixtureWechat={blocked:true,writes:0,tokens:0,article:null};
+    globalThis.fetch=async(url,options)=>{
+      const parsed=new URL(url),state=globalThis.fixtureWechat;
+      if(parsed.origin!=='https://api.weixin.qq.com')throw new Error('Unexpected fixture destination');
+      if(parsed.pathname==='/cgi-bin/stable_token'){
+        state.tokens++;
+        return Response.json(state.blocked?{errcode:40164,errmsg:'invalid ip 203.0.113.7, not in whitelist'}:{access_token:'fixture-only-token',expires_in:7200});
+      }
+      if(parsed.pathname==='/cgi-bin/draft/count')return Response.json({total_count:0});
+      if(parsed.pathname==='/cgi-bin/material/add_material')return Response.json({media_id:'fixture-image'});
+      if(parsed.pathname==='/cgi-bin/draft/add'){state.writes++;state.article=JSON.parse(options.body).articles[0];return Response.json({media_id:'fixture-draft'});}
+      if(parsed.pathname==='/cgi-bin/draft/get')return Response.json({news_item:[state.article]});
+      throw new Error('Unexpected fixture API');
+    };
+  });
+  await mockWechat(worker);
+  const connectMessage={...call,path:'/api/wechat/accounts/connect',method:'POST',body:{kind:'json',value:{deviceId:first.identity.deviceId,appId:'wx1234567890123456',appSecret:'s'.repeat(32),name:'回归测试账号'}}};
+  const blocked=await request(first.page,connectMessage);
+  assert.equal(blocked.status,424);assert.match(blocked.body.error,/203\.0\.113\.7/u);
+  await worker.evaluate(()=>{fixtureWechat.blocked=false;});
+  const connected=await request(first.page,connectMessage);assert.equal(connected.status,200);
+  const accountId=connected.body.account.id,oldId='12345678-1234-4234-8234-123456789012',newId='12345678-1234-4234-8234-123456789013';
+  const oldRecord={id:oldId,accountId,accountName:'回归测试账号',title:'恢复测试',body:'正文',imageCount:1,uploadedCount:0,imageMediaIds:[],status:'needs_confirmation',message:'旧版结果待确认',createdAt:'2026-10-13',updatedAt:'2026-10-13'};
+  await worker.evaluate(`(async()=>{${storeSource};await createStore().set(${JSON.stringify(`wechat:job:${accountId}:${oldId}`)},${JSON.stringify(oldRecord)});})()`);
+  const resolveMessage={...call,path:`/api/wechat/accounts/${accountId}/jobs/${oldId}/resolve`,method:'POST',body:{kind:'json',value:{confirmNoDraft:true}}};
+  assert.deepEqual(await request(first.page,resolveMessage),{status:200,body:{resolution:{jobId:oldId,accountId,confirmedNoDraft:true}}});
+  assert.equal((await request(first.page,resolveMessage)).status,200);
+  const bytes=Buffer.alloc(32);Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);Buffer.from('IHDR').copy(bytes,12);bytes.writeUInt32BE(1080,16);bytes.writeUInt32BE(1350,20);
+  const submitMessage={...call,path:`/api/wechat/accounts/${accountId}/jobs`,method:'POST',body:{kind:'form',entries:[...Object.entries({id:newId,expectedAccountId:accountId,title:'恢复测试',body:'正文'}).map(([key,value])=>({key,value})),{key:'images',file:{name:'fixture.png',type:'image/png',data:bytes.toString('base64')}}]}};
+  assert.equal((await request(first.page,submitMessage)).status,202);
+  let saved;
+  for(let attempt=0;attempt<100;attempt++){
+    saved=await request(first.page,{...call,path:`/api/wechat/accounts/${accountId}/jobs/${newId}`});
+    if(!['uploading','creating'].includes(saved.body.job?.status))break;
+  }
+  assert.equal(saved.body.job.status,'saved');assert.equal(saved.body.job.draftId,'fixture-draft');
+  assert.equal(await worker.evaluate(()=>fixtureWechat.writes),1);
+  assert.equal((await request(first.page,{...resolveMessage,path:`/api/wechat/accounts/${accountId}/jobs/${newId}/resolve`})).status,409);
   const value=await worker.evaluate(`(async()=>{${storeSource};const s=createStore();await s.set('test:blob',{blob:new Blob(['complete bytes']),status:'saved'});return(await s.get('test:blob')).blob.text();})()`);
   assert.equal(value,'complete bytes');
   await context.close();context=await launch(path.join(temporary,'profile'));
@@ -61,11 +100,17 @@ try {
   await loadVault(second.page);
   assert.deepEqual(await second.page.evaluate(async()=>(await fixtureVault.listAccounts()).map(account=>account.name)),['主站测试公众号']);
   const restarted=context.serviceWorkers()[0]??await context.waitForEvent('serviceworker');
+  await mockWechat(restarted);await restarted.evaluate(()=>{fixtureWechat.blocked=false;});
+  assert.equal((await request(second.page,connectMessage)).status,200);
+  assert.equal((await request(second.page,resolveMessage)).status,200,'resolution survives extension restart');
+  assert.equal((await request(second.page,{...call,path:`/api/wechat/accounts/${accountId}/jobs/${oldId}`})).body.job.status,'failed');
+  assert.equal((await request(second.page,submitMessage)).body.job.status,'saved');
+  assert.equal(await restarted.evaluate(()=>fixtureWechat.writes),0,'restarted extension must not replay an existing task');
   assert.equal(await restarted.evaluate(`(async()=>{${storeSource};return(await createStore().get('test:blob')).blob.text();})()`),'complete bytes');
   await context.close();context=await launch(path.join(temporary,'another-profile'));
   const separate=await pair(context);assert.notEqual(separate.identity.deviceId,first.identity.deviceId);assert.notEqual(separate.identity.connectionToken,first.identity.connectionToken);
   await loadVault(separate.page);
   assert.deepEqual(await separate.page.evaluate(async()=>({binding:await fixtureVault.loadBinding(),accounts:await fixtureVault.listAccounts()})),{binding:null,accounts:[]});
   assert.deepEqual(errors,[]);
-  console.log('PASS: real unpacked extension, main and preview origin handshakes, site-local credential isolation without migration, authentication, publish denied, IndexedDB Blob persistence, restart, and isolated new browser profile.');
+  console.log('PASS: real unpacked extension, origin handshakes, credential isolation, whitelist rejection and recovery, durable absence resolution, single draft creation, known-ID protection, authentication, publish denied, IndexedDB persistence, restart, and isolated new browser profile.');
 } finally {await context?.close();await rm(temporary,{recursive:true,force:true});}
