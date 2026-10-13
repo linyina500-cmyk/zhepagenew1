@@ -111,9 +111,54 @@ test("concurrent callers share one stable token request and cache it until 60 se
 
 test("failed token acquisition is not cached and never sends a draft creation request", async () => {
   const { api, calls } = fixture([jsonResponse({ errcode: 40125, errmsg: `raw-error-detail ${appSecret}` }), tokenResponse(), jsonResponse({ media_id: "draft-1" })]);
-  await assert.rejects(api.createDraft(draft), (error) => assertControlledError(error, "rejected", 40125));
+  await assert.rejects(api.createDraft(draft), (error) => assertControlledError(error, "not_submitted", 40125));
   assert.deepEqual(calls.map((call) => call.url.pathname), ["/cgi-bin/stable_token"]);
   assert.equal(await api.createDraft(draft), "draft-1");
+});
+
+test("token failures before draft or publication submission never become uncertain writes", async () => {
+  for (const operation of ["createDraft", "submitPublication"]) {
+    const input = operation === "createDraft" ? draft : { draftId: "draft-1" };
+    for (const response of [
+      () => { throw new Error(`raw-error-detail ${appSecret} ${accessToken}`); },
+      jsonResponse({ errcode: 500 }, 503), new Response("invalid JSON"),
+      jsonResponse(null), jsonResponse({}), jsonResponse({ access_token: "valid", expires_in: 0 }),
+    ]) {
+      const { api, calls } = fixture([response]);
+      await assert.rejects(api[operation](input), (error) => {
+        assertControlledError(error, "not_submitted");
+        assert.match(error.message, /调用凭据/u);
+        assert.doesNotMatch(error.message, /检查草稿箱|发表结果/u);
+        return true;
+      });
+      assert.deepEqual(calls.map(({ url }) => url.pathname), ["/cgi-bin/stable_token"]);
+    }
+    const { api, calls } = fixture([
+      jsonResponse({ errcode: 40164, errmsg: `invalid ip 203.0.113.27, secret=${appSecret}` }),
+      tokenResponse(), jsonResponse(operation === "createDraft" ? { media_id: "draft-1" } : { publish_id: "publish-1" }),
+    ]);
+    await assert.rejects(api[operation](input), (error) => {
+      assertControlledError(error, "not_submitted", 40164);
+      assert.match(error.message, /203\.0\.113\.27.*IP 白名单/u);
+      return true;
+    });
+    assert.equal(calls.length, 1);
+    await api[operation](input);
+    assert.deepEqual(calls.map(({ url }) => url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/stable_token",
+      operation === "createDraft" ? "/cgi-bin/draft/add" : "/cgi-bin/freepublish/submit"]);
+  }
+});
+
+test("invalidated tokens are discarded only for the next explicit attempt without replaying writes", async () => {
+  for (const errcode of [40001, 42001]) {
+    const { api, calls } = fixture([tokenResponse(), jsonResponse({ errcode }),
+      jsonResponse({ access_token: "fresh-token", expires_in: 7200 }), jsonResponse({ media_id: "draft-1" })]);
+    await assert.rejects(api.createDraft(draft), (error) => assertControlledError(error, "rejected", errcode));
+    assert.equal(calls.length, 2);
+    assert.equal(await api.createDraft(draft), "draft-1");
+    assert.deepEqual(calls.map(({ url }) => url.pathname), ["/cgi-bin/stable_token", "/cgi-bin/draft/add", "/cgi-bin/stable_token", "/cgi-bin/draft/add"]);
+    assert.equal(calls[3].url.searchParams.get("access_token"), "fresh-token");
+  }
 });
 
 test("a clear WeChat refusal is rejected without exposing errmsg or retrying the write", async () => {
@@ -175,18 +220,36 @@ test("network, HTTP, invalid JSON, malformed responses and missing IDs leave cre
   }
 });
 
-test("a hung request is aborted after 30 seconds and is not retried", async (t) => {
+test("a hung token request is aborted before submission and is not retried", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let signal;
   const { api, calls } = fixture([(_url, options) => { signal = options.signal; return new Promise(() => {}); }]);
   const request = api.createDraft(draft);
-  const rejected = assert.rejects(request, (error) => assertControlledError(error, "uncertain"));
+  const rejected = assert.rejects(request, (error) => assertControlledError(error, "not_submitted"));
   t.mock.timers.tick(29_999);
   assert.equal(signal.aborted, false);
   t.mock.timers.tick(1);
   await rejected;
   assert.equal(signal.aborted, true);
   assert.equal(calls.length, 1);
+});
+
+test("timeouts after draft or publication submission remain uncertain and are never retried", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const operation of ["createDraft", "submitPublication"]) {
+    let signal, entered;
+    const ready = new Promise((resolve) => { entered = resolve; });
+    const { api, calls } = fixture([tokenResponse(), (_url, options) => {
+      signal = options.signal; entered(); return new Promise(() => {});
+    }]);
+    const request = api[operation](operation === "createDraft" ? draft : { draftId: "draft-1" });
+    const rejected = assert.rejects(request, (error) => assertControlledError(error, "uncertain"));
+    await ready;
+    t.mock.timers.tick(30_000);
+    await rejected;
+    assert.equal(signal.aborted, true);
+    assert.equal(calls.length, 2);
+  }
 });
 
 test("draft readback requires the exact newspic title, plain text and image order", async () => {

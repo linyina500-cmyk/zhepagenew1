@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { createWechatApi } from "../lib/wechat/api.mjs";
+import { createWechatApi, WechatApiError } from "../lib/wechat/api.mjs";
 import { createJobService, readSubmission } from "../server/wechat/jobs.mjs";
 import { createWechatServer } from "../server/wechat/http.mjs";
 
@@ -376,10 +376,264 @@ test("HTTP preserves controlled WeChat errors as 424 without leaking secrets or 
     if (scenario === "whitelist") {
       assert.match(error, /203\.0\.113\.27.*IP 白名单/u);
       assert.match(error, /40164/u);
-    } else if (scenario === "network") assert.match(error, /不会自动重试/u);
+    } else if (scenario === "network") assert.match(error, /调用凭据.*检查连接/u);
     else assert.equal(error, "公众号同步暂未完成，请读取状态并核对草稿箱");
     for (const unsafe of [secret, syncToken, "https://", "access_token="]) assert.equal(response.body.includes(unsafe), false, scenario);
     assert.equal(connectionCalls, 1, scenario);
     assert.equal(apiCalls, controlled ? 1 : 0, scenario);
   }
+});
+
+test("controlled upload and creation refusals preserve whitelist guidance and allow a new job after repair", async (t) => {
+  for (const stage of ["upload", "create", "token"]) {
+    const f = await fixture(t);
+    const method = stage === "upload" ? "uploadImage" : "createDraft";
+    const original = f.api[method];
+    let blocked = true;
+    f.api[method] = async (...args) => {
+      if (blocked) throw new WechatApiError("请将出口 IPv4 203.0.113.27 加入公众号 IP 白名单（错误码 40164）。",
+        { outcome: stage === "token" ? "not_submitted" : "rejected", errcode: 40164 });
+      return original(...args);
+    };
+    const input = await readSubmission(form());
+    await f.jobs.submit(input); await f.jobs.idle();
+    const rejected = await f.jobs.get(input.id);
+    assert.equal(rejected.status, "failed", stage);
+    assert.equal(rejected.draftId, undefined);
+    assert.match(rejected.message, /203\.0\.113\.27.*40164/u);
+    if (stage === "token") assert.match(rejected.message, /请求尚未发出/u);
+    assert.equal(f.calls.filter(([kind]) => kind === "create").length, 0);
+    blocked = false;
+    assert.equal((await f.jobs.submit(input)).status, "failed");
+    const retry = await readSubmission(form());
+    await f.jobs.submit(retry); await f.jobs.idle();
+    assert.equal((await f.jobs.get(retry.id)).status, "saved");
+    assert.equal(f.calls.filter(([kind]) => kind === "create").length, 1);
+  }
+});
+
+test("restarting during uploads confirms no draft exists without replaying any platform write", async (t) => {
+  for (const uploadedCount of [0, 1, 2]) {
+    const f = await fixture(t), input = await readSubmission(form());
+    await f.jobs.submit(input); await f.jobs.idle();
+    const path = join(f.dataDir, f.jobs.account.id, input.id, "job.json");
+    const record = JSON.parse(await readFile(path, "utf8"));
+    Object.assign(record, { status: "uploading", uploadedCount, imageMediaIds: record.imageMediaIds.slice(0, uploadedCount) });
+    delete record.draftId;
+    await writeFile(path, JSON.stringify(record));
+    const before = f.calls.length, restarted = createJobService(f.options);
+    for (const result of [await restarted.get(input.id), await restarted.submit(input), await restarted.verify(input.id)]) {
+      assert.equal(result.status, "failed");
+      assert.equal(result.draftId, undefined);
+      assert.equal(result.uploadedCount, uploadedCount);
+      assert.match(result.message, /尚未创建草稿/u);
+    }
+    assert.equal(f.calls.length, before);
+  }
+});
+
+test("controlled readback failures retain the known draft and useful reason across restart", async (t) => {
+  for (const outcome of ["rejected", "not_submitted", "uncertain"]) {
+    let blocked = true;
+    const f = await fixture(t, { async verifyDraft() {
+      if (blocked) throw new WechatApiError("请将 203.0.113.27 加入白名单（错误码 40164）。", { outcome, errcode: 40164 });
+      return { verified: true };
+    } });
+    const input = await readSubmission(form());
+    await f.jobs.submit(input); await f.jobs.idle();
+    const restarted = createJobService(f.options);
+    for (const result of [await f.jobs.get(input.id), await restarted.verify(input.id)]) {
+      assert.equal(result.status, "needs_confirmation");
+      assert.equal(result.draftId, "wechat-draft-id");
+      assert.match(result.message, /已返回草稿编号.*203\.0\.113\.27.*40164/u);
+      assert.doesNotMatch(result.message, /未创建|拒绝创建/u);
+    }
+    await assert.rejects(restarted.resolve(input.id), (error) => error.status === 409);
+    blocked = false;
+    assert.equal((await restarted.verify(input.id)).status, "saved");
+    assert.equal(f.calls.filter(([kind]) => kind === "create").length, 1);
+  }
+});
+
+test("confirming an absent draft ends the original record durably without replaying its ID", async (t) => {
+  let creates = 0;
+  const f = await fixture(t, { async createDraft() { creates++; throw new Error("lost response"); } });
+  const input = await readSubmission(form());
+  await f.jobs.submit(input); await f.jobs.idle();
+  const path = join(f.dataDir, f.jobs.account.id, input.id, "job.json");
+  const previous = JSON.parse(await readFile(path, "utf8"));
+  const retry = await readSubmission(form());
+  await assert.rejects(f.jobs.submit(retry), (error) => error.status === 409);
+  await assert.rejects(readFile(join(f.dataDir, f.jobs.account.id, retry.id, "job.json")), (error) => error.code === "ENOENT");
+  assert.equal(creates, 1);
+  const expected = { jobId: input.id, accountId: f.jobs.account.id, confirmedNoDraft: true };
+  assert.deepEqual(await f.jobs.resolve(input.id), expected);
+  const resolved = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(resolved.resolution, "confirmed_absent");
+  assert.equal(resolved.status, "failed");
+  for (const field of ["body", "title", "fingerprint", "imageMediaIds", "createdAt"]) assert.deepEqual(resolved[field], previous[field]);
+  const restarted = createJobService(f.options);
+  assert.deepEqual(await restarted.resolve(input.id), expected);
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")), resolved);
+  assert.equal((await restarted.submit(input)).status, "failed");
+  assert.equal((await restarted.verify(input.id)).status, "failed");
+  assert.equal(creates, 1);
+  f.api.createDraft = async () => { creates++; return "new-draft"; };
+  await restarted.submit(retry); await restarted.idle();
+  assert.equal((await restarted.get(retry.id)).status, "saved");
+  assert.equal(creates, 2);
+});
+
+test("recovering storage persists a retained whitelist failure before admitting the same content again", async (t) => {
+  let diskFull = false, blocked = true;
+  const f = await fixture(t, { async createDraft() {
+    if (blocked) {
+      diskFull = true;
+      throw new WechatApiError("请将 203.0.113.27 加入白名单（错误码 40164）。", { outcome: "rejected", errcode: 40164 });
+    }
+    return "recovered-draft";
+  } });
+  const original = fs.promises.open;
+  fs.promises.open = async (path, ...args) => {
+    if (diskFull && String(path).startsWith(f.dataDir) && String(path).endsWith(".tmp")) throw Object.assign(new Error("simulated full disk"), { code: "ENOSPC" });
+    return original(path, ...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    const input = await readSubmission(form());
+    await f.jobs.submit(input); await f.jobs.idle();
+    const retained = await f.jobs.get(input.id);
+    assert.equal(retained.status, "failed");
+    assert.match(retained.message, /203\.0\.113\.27.*40164.*磁盘/u);
+    const path = join(f.dataDir, f.jobs.account.id, input.id, "job.json");
+    assert.equal(JSON.parse(await readFile(path, "utf8")).status, "creating");
+    diskFull = false; blocked = false;
+    const retry = await readSubmission(form());
+    await f.jobs.submit(retry); await f.jobs.idle();
+    assert.equal((await f.jobs.get(retry.id)).status, "saved");
+    assert.equal(JSON.parse(await readFile(path, "utf8")).status, "failed");
+    assert.equal((await createJobService(f.options).get(input.id)).status, "failed");
+  } finally {
+    fs.promises.open = original;
+    syncBuiltinESMExports();
+  }
+});
+
+test("missing or interrupted records get a tombstone that rejects late submission after restart", async (t) => {
+  for (const reservedDirectory of [false, true]) {
+    const f = await fixture(t), input = await readSubmission(form());
+    const path = join(f.dataDir, f.jobs.account.id, input.id);
+    if (reservedDirectory) await mkdir(path, { recursive: true });
+    const ack = await f.jobs.resolve(input.id);
+    assert.deepEqual(ack, { jobId: input.id, accountId: f.jobs.account.id, confirmedNoDraft: true });
+    const tombstone = JSON.parse(await readFile(join(path, "job.json"), "utf8"));
+    assert.equal(tombstone.resolution, "confirmed_absent");
+    assert.equal(tombstone.imageMediaIds, undefined);
+    const restarted = createJobService(f.options);
+    assert.deepEqual(await restarted.resolve(input.id), ack);
+    for (const service of [f.jobs, restarted]) {
+      await assert.rejects(service.get(input.id), (error) => error.status === 410);
+      await assert.rejects(service.verify(input.id), (error) => error.status === 410);
+      await assert.rejects(service.submit(input), (error) => error.status === 410);
+    }
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("resolve rejects known drafts, every publication record and an in-flight publication attempt", async (t) => {
+  const saved = await fixture(t), input = await readSubmission(form());
+  await saved.jobs.submit(input); await saved.jobs.idle();
+  await assert.rejects(saved.jobs.resolve(input.id), (error) => error.status === 409);
+  for (const publication of ["", "broken publication record", JSON.stringify({ status: "failed" })]) {
+    const f = await fixture(t), id = randomUUID();
+    const path = join(f.dataDir, f.jobs.account.id, id);
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, "publication.json"), publication);
+    await assert.rejects(f.jobs.resolve(id), (error) => error.status === 409);
+    await assert.rejects(readFile(join(path, "job.json")), (error) => error.code === "ENOENT");
+    assert.equal(f.calls.length, 0);
+  }
+  const f = await fixture(t), id = randomUUID();
+  const release = f.jobs.beginPublication(id);
+  assert.equal(f.jobs.busy(), true);
+  await assert.rejects(f.jobs.resolve(id), (error) => error.status === 409);
+  release(); release();
+  assert.equal(f.jobs.busy(), false);
+  assert.equal((await f.jobs.resolve(id)).confirmedNoDraft, true);
+});
+
+test("resolve and late submission serialize while an active upload rejects resolution", async (t) => {
+  const f = await fixture(t), input = await readSubmission(form());
+  const results = await Promise.allSettled([f.jobs.resolve(input.id), f.jobs.submit(input), f.jobs.resolve(input.id)]);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1].status, "rejected");
+  assert.equal(results[1].reason.status, 410);
+  assert.deepEqual(results[2].value, results[0].value);
+  assert.equal(f.calls.length, 0);
+
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const uploading = await fixture(t, { async uploadImage() { await gate; return "image"; } });
+  const activeInput = await readSubmission(form());
+  await uploading.jobs.submit(activeInput);
+  try {
+    await assert.rejects(uploading.jobs.resolve(activeInput.id), (error) => error.status === 409);
+    await assert.rejects(uploading.jobs.resolve(randomUUID()), (error) => error.status === 409);
+  } finally { release(); await uploading.jobs.idle(); }
+  assert.equal((await uploading.jobs.get(activeInput.id)).status, "saved");
+});
+
+test("the resolution lock prevents publication before its first filesystem await", async (t) => {
+  const f = await fixture(t), id = randomUUID();
+  const original = fs.promises.lstat;
+  let entered, release;
+  const ready = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  fs.promises.lstat = async (...args) => {
+    if (String(args[0]).startsWith(f.dataDir)) { entered(); await gate; }
+    return original(...args);
+  };
+  syncBuiltinESMExports();
+  let resolving;
+  try {
+    resolving = f.jobs.resolve(id);
+    await ready;
+    assert.equal(f.jobs.busy(), true);
+    assert.throws(() => f.jobs.beginPublication(id), (error) => error.status === 409);
+  } finally {
+    release();
+    await resolving;
+    fs.promises.lstat = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(f.jobs.busy(), false);
+  assert.equal(f.calls.length, 0);
+});
+
+test("HTTP resolve requires exact confirmation and returns durable account-scoped acknowledgement", async (t) => {
+  const f = await fixture(t), id = randomUUID(), syncToken = "test-only-connection-token-of-32-characters";
+  let publicationBusy = false;
+  const server = createWechatServer({ syncToken, accounts: { get(accountId) {
+    assert.equal(accountId, f.jobs.account.id);
+    return { jobs: f.jobs, publications: { busy: () => publicationBusy } };
+  } } });
+  async function call(body, method = "POST") {
+    const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+    Object.assign(request, { url: `/api/wechat/accounts/${f.jobs.account.id}/jobs/${id}${method === "POST" ? "/resolve" : ""}`,
+      method, socket: { localPort: 8788 }, headers: { host: "127.0.0.1:8788", authorization: `Bearer ${syncToken}`, "content-type": "application/json" } });
+    const response = { headersSent: false, writeHead(status) { this.status = status; this.headersSent = true; }, end(value) { this.body = JSON.parse(value); } };
+    await server.listeners("request")[0](request, response);
+    return response;
+  }
+  for (const body of [undefined, null, {}, { confirmNoDraft: false }, { confirmNoDraft: true, extra: true }]) assert.equal((await call(body)).status, 400);
+  publicationBusy = true;
+  assert.equal((await call({ confirmNoDraft: true })).status, 409);
+  publicationBusy = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await call({ confirmNoDraft: true });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body, { resolution: { jobId: id, accountId: f.jobs.account.id, confirmedNoDraft: true } });
+  }
+  assert.equal((await call(undefined, "GET")).status, 410);
+  assert.equal(f.calls.length, 0);
 });

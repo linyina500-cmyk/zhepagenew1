@@ -72,10 +72,16 @@ export function createWechatServer({ accounts, syncToken, handleXhs, xhsBusy = (
         accounts.disconnect(scoped[1]); send(200, { disconnected: true }); return;
       }
       const { jobs, publications } = accounts.get(scoped[1]);
-      const match = /^\/jobs\/([^/]+)(\/verify|\/publication(?:\/refresh)?)?$/.exec(path);
+      const match = /^\/jobs\/([^/]+)(\/verify|\/resolve|\/publication(?:\/refresh)?)?$/.exec(path);
       if (match && JOB_ID.test(match[1])) {
         if (!match[2] && request.method === "GET") { send(200, { job: await jobs.get(match[1]) }); return; }
         if (match[2] === "/verify" && request.method === "POST") { send(200, { job: await jobs.verify(match[1]) }); return; }
+        if (match[2] === "/resolve" && request.method === "POST") {
+          const confirmation = await readJson(request);
+          if (!confirmation || confirmation.confirmNoDraft !== true || Object.keys(confirmation).length !== 1) throw new RequestError("请先确认公众号草稿箱中没有本次草稿");
+          if (readingUpload || publications.busy()) throw new RequestError("该公众号仍在处理任务，请完成后再确认草稿结果", 409);
+          send(200, { resolution: await jobs.resolve(match[1]) }); return;
+        }
         if (match[2] === "/publication" && request.method === "GET") {
           let publication;
           try { publication = await publications.get(match[1]); }

@@ -23,6 +23,7 @@ export class WechatUnconfirmedError extends Error {}
 export class WechatRequestError extends Error {
   constructor(message: string, public readonly status: number) { super(message); }
 }
+export class WechatSubmissionRejectedError extends WechatRequestError {}
 
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
 const nonempty = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
@@ -142,20 +143,37 @@ export function createWechatClient(password: string, fetcher: typeof fetch = loc
       try {
         const data = await request(`${accountPath(input.accountId)}/jobs`, signal, form, "POST", 90_000);
         return parseJob(data.job, input.id, input.accountId);
-      } catch {
+      } catch (submissionError) {
         signal.throwIfAborted();
         // A lost response never authorizes a second create. Read the identity
         // persisted before this POST once; otherwise leave it unconfirmed.
         try { return await getJob(input.id, input.accountId, signal); }
         catch (error) {
           signal.throwIfAborted();
-          throw new WechatUnconfirmedError(`尚未确认这次同步结果。请保留本机记录，读取状态或到公众号草稿箱核对；不要重复提交。${error instanceof Error ? error.message : ""}`);
+          if (submissionError instanceof WechatRequestError && [400, 401, 403, 404, 405, 409, 413, 415, 422, 424].includes(submissionError.status)
+            && error instanceof WechatRequestError && [404, 410].includes(error.status)) {
+            throw new WechatSubmissionRejectedError(submissionError.message, submissionError.status);
+          }
+          const reason = submissionError instanceof WechatRequestError ? `原请求：${submissionError.message}。` : "";
+          throw new WechatUnconfirmedError(`尚未确认这次同步结果。请保留本机记录，读取状态或到公众号草稿箱核对；不要重复提交。${reason}${error instanceof Error ? error.message : ""}`);
         }
       }
     },
     async verifyJob(id: string, accountId: string, signal: AbortSignal) {
       const data = await request(`${jobPath(id, accountId)}/verify`, signal, undefined, "POST", 70_000);
       return parseJob(data.job, id, accountId);
+    },
+    async resolveJob(id: string, accountId: string, signal: AbortSignal) {
+      const data = await request(`${jobPath(id, accountId)}/resolve`, signal, { confirmNoDraft: true }, "POST").catch((error: unknown) => {
+        if (error instanceof WechatRequestError && error.status === 404) {
+          throw new WechatRequestError("请下载并更新草稿同步插件至 1.0.3，在扩展管理页重新加载，再刷新折页页面。原任务记录已保留。", 404);
+        }
+        throw error;
+      });
+      if (!record(data.resolution) || data.resolution.jobId !== id || data.resolution.accountId !== accountId || data.resolution.confirmedNoDraft !== true) {
+        throw new Error("未收到原任务的恢复确认，记录已保留，请刷新状态后重试。");
+      }
+      return { jobId: id, accountId, confirmedNoDraft: true as const };
     },
     async submitPublication(id: string, accountId: string, signal: AbortSignal) {
       try {

@@ -10,7 +10,7 @@ test('portable ZIP loads directly from its extracted root and contains no native
   try {
     const packed=await packBrowserExtension(temp),zip=await JSZip.loadAsync(await readFile(packed.archive));
     const manifest=JSON.parse(await zip.file('manifest.json').async('string'));
-    assert.equal(manifest.manifest_version,3);assert.equal(manifest.version,'1.0.2');assert.ok(zip.file(manifest.background.service_worker));
+    assert.equal(manifest.manifest_version,3);assert.equal(manifest.version,'1.0.3');assert.ok(zip.file(manifest.background.service_worker));
     assert.deepEqual(manifest.permissions,['scripting','storage']);
     assert.ok(!manifest.permissions.includes('nativeMessaging'));assert.ok(!manifest.permissions.includes('proxy'));
     const allowed=/^(?:manifest\.json|开始使用\.txt|browser-extension\/[a-z-]+\.mjs|lib\/wechat\/api\.mjs)$/;

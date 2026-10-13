@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { LocalDraft, SyncReceipt } from "../../lib/draftSync/types";
-import { createWechatClient, type WechatJob, type WechatPublication } from "../../lib/wechat/client";
+import { createWechatClient, WechatSubmissionRejectedError, type WechatJob, type WechatPublication } from "../../lib/wechat/client";
 import { readAccountSecret, type Binding, type LocalWechatAccount } from "../../lib/wechat/deviceVault";
 import { wechatContentHash } from "../../lib/wechat/contentIdentity";
 import { WECHAT_PUBLICATION_ENABLED } from "../../lib/wechat/features";
@@ -28,6 +28,29 @@ const historicPublicationText = "这份内容曾提交发表，请到公众号�
 function receiptFor(job: WechatJob, previous: SyncReceipt): SyncReceipt {
   const confirmed = previous.status === "confirmed_by_user" && job.status === "saved";
   return { ...previous, draftId: job.draftId, status: confirmed ? "confirmed_by_user" : job.status === "saved" ? "saved" : job.status === "failed" ? "failed" : "needs_confirmation", message: confirmed ? previous.message : job.message };
+}
+async function recordSubmissionFailure(error: unknown, submitted: SyncReceipt | undefined, draft: LocalDraft, persist: Props["persistReceipt"], signal: AbortSignal) {
+  const text = message(error);
+  if (!(error instanceof WechatSubmissionRejectedError) || !submitted) return { draft, text };
+  try {
+    const next = await persist(draft, { ...submitted, status: "failed", jobId: undefined, draftId: undefined, message: text }, signal);
+    signal.throwIfAborted();
+    return { draft: next, text };
+  } catch (storageError) {
+    signal.throwIfAborted();
+    return { draft, text: `${text}。${message(storageError)}；原任务记录已保留，请刷新状态后重试。` };
+  }
+}
+function canResolveReceipt(receipt: SyncReceipt | undefined, publication?: WechatPublication | null): receipt is SyncReceipt & { jobId: string } {
+  if (!receipt?.jobId || publication) return false;
+  return receipt.status === "needs_confirmation" && !receipt.draftId && !receipt.publicationAttempted;
+}
+function MissingDraftRecovery({ busy, onResolve }: { busy: boolean; onResolve: () => void }) {
+  const [checked, setChecked] = useState(false);
+  return <div className="draft-sync-confirm-actions">
+    <label><input type="checkbox" checked={checked} disabled={busy} onChange={(event) => setChecked(event.target.checked)} />我已在该公众号后台草稿箱确认没有这份内容</label>
+    <button type="button" disabled={busy || !checked} onClick={() => { if (checked && !busy) onResolve(); }}>确认未创建并允许重试</button>
+  </div>;
 }
 
 export default function WechatDraftPanel({ draft, contentReady, contentChanged, busy, runOperation, persistReceipt, onSubmitted, contentCheck, binding, accounts, onAccountsChange }: Props) {
@@ -62,7 +85,7 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
   const contentCheckId = useId();
   const actionHint = busy ? "正在处理，请稍候。" : !targets.length ? "请先勾选至少一个公众号。" : !contentReady && !contentCheck ? "请先完成图片和文案检查，再继续。" : "";
   const actionDescription = actionHint ? actionHintId : !contentReady ? contentCheckId : undefined;
-  const receiptForAccount = (accountId: string, snapshot = draft) => snapshot.receipts.find((receipt) => receipt.platform === "wechat" && receipt.accountId === accountId && receipt.jobId);
+  const receiptForAccount = (accountId: string, snapshot = draft) => snapshot.receipts.find((receipt) => receipt.platform === "wechat" && receipt.accountId === accountId);
   function result(accountId: string, next: Partial<Result>) { setResults((current) => ({ ...current, [accountId]: { ...current[accountId], text: "", ...next } })); }
   function changedAccounts(nextBinding: Binding | null, nextAccounts: LocalWechatAccount[], addedId?: string) {
     onAccountsChange(nextBinding, nextAccounts, addedId);
@@ -97,7 +120,8 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
         signal.throwIfAborted();
         let previous = receiptForAccount(account.id, staged);
         let activeJob: WechatJob | undefined;
-        result(account.id, { text: "正在连接…", error: false, publication: undefined });
+        let submittedReceipt: SyncReceipt | undefined;
+        result(account.id, { job: undefined, text: "正在连接…", error: false, publication: undefined });
         try {
           if (!WECHAT_PUBLICATION_ENABLED && previous?.publicationAttempted) throw new Error(historicPublicationText);
           await connectAccount(client, targetBinding, account, signal);
@@ -129,6 +153,7 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
             previous = { platform: "wechat", accountId: account.id, jobId: crypto.randomUUID(), contentHash, status: "needs_confirmation", message: "任务已记录，结果待确认。请读取原任务状态，不要重复提交。" };
             staged = await persistReceipt(staged, previous, signal);
             signal.throwIfAborted(); onSubmitted();
+            submittedReceipt = previous;
             activeJob = await client.createJob({ id: previous.jobId!, accountId: account.id, content: staged.content.wechat, images: staged.images }, signal);
             signal.throwIfAborted();
             activeJob = await client.waitForJob(activeJob, signal, (job) => { result(account.id, { job, text: `图片 ${job.uploadedCount}/${job.imageCount} · ${job.message}` }); });
@@ -153,10 +178,12 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
           signal.throwIfAborted(); result(account.id, { publication, text: publicationText(publication), error: !["published", "submitting", "publishing"].includes(publication.status) });
         } catch (error) {
           if (signal.aborted) return;
-          const text = message(error);
-          // The pending ID was persisted before any create. Keep it on errors;
-          // a failed account must not prevent later selected accounts running.
-          result(account.id, { ...(activeJob ? { job: activeJob } : {}), text, error: true });
+          // Only a rejected submission made in this batch may release its ID.
+          // Unknown outcomes and failures while reading an older task retain it.
+          const failure = await recordSubmissionFailure(error, submittedReceipt, staged, persistReceipt, signal);
+          signal.throwIfAborted();
+          staged = failure.draft;
+          result(account.id, { ...(activeJob ? { job: activeJob } : {}), text: failure.text, error: true });
         }
       }
     }).finally(() => { requestRef.current = false; });
@@ -198,6 +225,29 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
       await persistReceipt(draft, { ...previous, status: "confirmed_by_user", message: "你已在目标公众号草稿箱核对标题、文案、全部图片及顺序，并确认图片显示正常。" }, signal);
     });
   }
+  function resolveMissingDraft(account: LocalWechatAccount) {
+    const previous = receiptForAccount(account.id);
+    if (busy || requestRef.current) return;
+    if (!canResolveReceipt(previous, results[account.id]?.publication)) return;
+    requestRef.current = true;
+    void runOperation("正在确认未创建的公众号草稿…", async (signal) => {
+      result(account.id, { text: "正在确认原任务，收到确认后才能重试…", error: false });
+      try {
+        const { client, binding: target } = await clientForDevice(signal);
+        await connectAccount(client, target, account, signal);
+        await client.resolveJob(previous.jobId!, account.id, signal);
+        signal.throwIfAborted();
+        const text = "已记录你确认后台没有这份内容，可以再次同步到草稿箱。";
+        await persistReceipt(draft, { ...previous, status: "failed", jobId: undefined, draftId: undefined, message: text }, signal);
+        signal.throwIfAborted();
+        result(account.id, { job: undefined, publication: null, text, error: false });
+      } catch (error) {
+        if (signal.aborted) return;
+        result(account.id, { text: message(error), error: true });
+        throw error;
+      }
+    }).finally(() => { requestRef.current = false; });
+  }
   return <div className="draft-sync-wechat">
     <WechatAccountManager binding={binding} accounts={accounts} busy={busy} runOperation={runOperation} onChange={changedAccounts} />
     <section className="draft-sync-wechat-targets" aria-label="选择公众号">
@@ -205,15 +255,17 @@ export default function WechatDraftPanel({ draft, contentReady, contentChanged, 
       {accounts.length === 0 ? <p>添加公众号后，即可选择要同步的账号。</p> : <div className="draft-sync-wechat-account-list">{accounts.map((account) => {
         const receipt = receiptForAccount(account.id), current = results[account.id];
         const canVerify = Boolean(receipt?.draftId && !receipt.publicationAttempted && !current?.publication);
+        const canResolve = canResolveReceipt(receipt, current?.publication);
         const needsRecovery = Boolean(receipt && (current?.error || ["failed", "needs_confirmation"].includes(receipt.status)));
         const label = current?.publication ? publicationLabels[current.publication.status] : receipt?.publicationAttempted ? "发布结果待确认" : receipt?.status === "confirmed_by_user" ? "图片已核对" : receipt?.status === "saved" ? "草稿已保存" : receipt?.status === "failed" ? "同步未完成" : receipt ? "结果待核对" : "尚未同步";
         return <article key={account.id} className="draft-sync-wechat-account-row" data-selected={selected.includes(account.id)} aria-label={`${account.name} 的结果`}>
           <label className="draft-sync-wechat-account-choice"><input type="checkbox" checked={selected.includes(account.id)} disabled={busy} onChange={(event) => setSelected((ids) => event.target.checked ? [...ids, account.id] : ids.filter((id) => id !== account.id))} /><span><strong>{account.name}</strong><small>{account.appId}</small></span><b>{label}</b></label>
           {(current?.text || receipt) && <p className={current?.error ? "draft-sync-message error" : "draft-sync-small"} role="status">{current?.text || (receipt?.status === "saved" && !receipt.publicationAttempted ? savedDraftText : receipt?.message)}</p>}
-          {receipt && <>
+          {receipt?.jobId && <>
             <div className="draft-sync-confirm-actions"><button type="button" disabled={busy || !binding} onClick={() => read(account)} aria-label={`刷新 ${account.name} 状态`}>刷新状态</button>{needsRecovery && canVerify && <button type="button" disabled={busy || !binding} onClick={() => read(account, true)}>重新核对草稿</button>}</div>
             {canVerify && <details className="draft-sync-more-actions"><summary>更多操作</summary><div className="draft-sync-confirm-actions">{!needsRecovery && <button type="button" disabled={busy || !binding} onClick={() => read(account, true)}>重新核对草稿</button>}{receipt.status !== "confirmed_by_user" && <button type="button" disabled={busy} onClick={() => confirmVisual(account)}>图片显示正常</button>}</div></details>}
           </>}
+          {canResolve && <MissingDraftRecovery key={`${draft.id}:${receipt.jobId}`} busy={busy || !binding} onResolve={() => resolveMissingDraft(account)} />}
           {current?.publication?.urls.map((url, index) => <a key={url} href={url} target="_blank" rel="noopener noreferrer">查看已发表内容{current.publication!.urls.length > 1 ? ` ${index + 1}` : ""}</a>)}
         </article>;
       })}</div>}

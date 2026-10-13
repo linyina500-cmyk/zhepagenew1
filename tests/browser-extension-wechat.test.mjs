@@ -97,12 +97,14 @@ test("restarted worker requires browser credentials again and recovers interrupt
     assert.equal((await f.handle({ path: `${base}/jobs/${id}` })).status, 409);
     await f.connect();
     const repeated = await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) });
-    assert.equal(repeated.body.job.status, "needs_confirmation");
-    assert.match(repeated.body.job.message, /不会重新上传/u);
+    assert.equal(repeated.body.job.status, stage === "uploading" ? "failed" : "needs_confirmation");
+    assert.match(repeated.body.job.message, stage === "uploading" ? /尚未创建草稿/u : /不会重新上传/u);
     assert.deepEqual(f.calls, ["connect"]);
     assert.equal(f.handle.busy(), false, "old incomplete records do not make a restarted worker active");
-    assert.equal((await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(randomUUID()) })).status, 409, "a different task ID must not duplicate the same uncertain content");
-    assert.deepEqual(f.calls, ["connect"]);
+    const nextId = randomUUID(), next = await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(nextId) });
+    assert.equal(next.status, stage === "uploading" ? 202 : 409);
+    if (stage === "uploading") { await store.terminal(nextId); await waitIdle(f.handle); }
+    else assert.deepEqual(f.calls, ["connect"]);
   }
 });
 
@@ -231,4 +233,101 @@ test("browser fetch aborts at 25 seconds without retrying or losing the parent's
   const parentRejected = assert.rejects(canceled, /aborted/u);
   parent.abort(); await parentRejected;
   assert.equal(signal.aborted, true); assert.equal(calls, 2);
+});
+
+test("whitelist and token failures before creation stay failed and permit one explicit retry", { timeout: 5000 }, async (t) => {
+  for (const stage of ["upload", "create-rejected", "create-not-submitted"]) await t.test(stage, async () => {
+    let blocked = true, creates = 0;
+    const f = await fixture({ api: {
+      async uploadImage() { if (blocked && stage === "upload") throw new WechatApiError("IP 203.0.113.7 未加入白名单（40164）", { outcome: "rejected", errcode: 40164 }); return "media"; },
+      async createDraft() {
+        if (blocked) throw new WechatApiError("IP 203.0.113.7 未加入白名单（40164）", { outcome: stage === "create-rejected" ? "rejected" : "not_submitted", errcode: 40164 });
+        creates++; return "recovered-draft";
+      },
+    } });
+    const id = randomUUID();
+    await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) });
+    const failed = await f.store.terminal(id); await waitIdle(f.handle);
+    assert.equal(failed.status, "failed"); assert.equal(failed.draftId, undefined); assert.match(failed.message, /203\.0\.113\.7.*40164/u);
+    blocked = false;
+    assert.equal((await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) })).body.job.status, "failed");
+    const retry = randomUUID(); await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(retry) });
+    assert.equal((await f.store.terminal(retry)).status, "saved"); assert.equal(creates, 1);
+  });
+});
+
+test("whitelist failure verifying a known draft preserves its ID and blocks absent resolution", { timeout: 5000 }, async () => {
+  const f = await fixture({ api: { async verifyDraft() { throw new WechatApiError("IP 203.0.113.7 未加入白名单（40164）", { outcome: "rejected", errcode: 40164 }); } } });
+  const id = randomUUID(); await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) });
+  const pending = await f.store.terminal(id); await waitIdle(f.handle);
+  assert.equal(pending.status, "needs_confirmation"); assert.equal(pending.draftId, "draft-synthetic"); assert.match(pending.message, /40164/u);
+  assert.equal((await f.handle({ path: `${base}/jobs/${id}/resolve`, method: "POST", body: { confirmNoDraft: true } })).status, 409);
+  f.api.verifyDraft = async () => ({ verified: true });
+  assert.equal((await f.handle({ path: `${base}/jobs/${id}/verify`, method: "POST" })).body.job.status, "saved");
+  assert.equal(f.calls.filter((call) => call.create).length, 1);
+});
+
+test("confirmed absence persists, survives restart, and never replays the old task ID", { timeout: 5000 }, async () => {
+  const f = await fixture({ api: { async createDraft() { throw new Error("lost reply"); } } });
+  const id = randomUUID(); await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) });
+  await f.store.terminal(id); await waitIdle(f.handle);
+  const resolve = () => f.handle({ path: `${base}/jobs/${id}/resolve`, method: "POST", body: { confirmNoDraft: true } });
+  assert.equal((await f.handle({ path: `${base}/jobs/${id}/resolve`, method: "POST", body: { confirmNoDraft: false } })).status, 400);
+  assert.equal((await f.store.get(jobKey(id))).status, "needs_confirmation");
+  assert.deepEqual(await resolve(), { status: 200, body: { resolution: { jobId: id, accountId, confirmedNoDraft: true } } });
+  assert.equal((await resolve()).status, 200);
+  const restarted = await fixture({ store: f.store });
+  assert.equal((await restarted.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) })).body.job.status, "failed");
+  assert.deepEqual(restarted.calls, ["connect"]);
+  const retry = randomUUID(); assert.equal((await restarted.handle({ path: `${base}/jobs`, method: "POST", body: submission(retry) })).status, 202);
+  assert.equal((await f.store.terminal(retry)).status, "saved"); assert.equal(restarted.calls.filter((call) => call.create).length, 1);
+});
+
+test("missing records get a durable tombstone; failed storage never acknowledges resolution", async () => {
+  const f = await fixture(), id = randomUUID();
+  const request = { path: `${base}/jobs/${id}/resolve`, method: "POST", body: { confirmNoDraft: true } };
+  const set = f.store.set; f.store.set = async () => { throw new Error("storage failure"); };
+  assert.equal((await f.handle(request)).status, 502); assert.equal(await f.store.get(jobKey(id)), undefined);
+  f.store.set = set;
+  assert.equal((await f.handle(request)).status, 200);
+  const restarted = await fixture({ store: f.store });
+  assert.equal((await restarted.handle(request)).status, 200);
+  assert.equal((await restarted.handle({ path: `${base}/jobs/${id}` })).status, 410);
+  assert.equal((await restarted.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) })).status, 410);
+  assert.deepEqual(restarted.calls, ["connect"]);
+});
+
+test("absence resolution holds the account lock and rejects running or protected records", { timeout: 5000 }, async () => {
+  const f = await fixture(), id = randomUUID(), started = deferred(), release = deferred();
+  const set = f.store.set;
+  f.store.set = async (key, record) => { if (record.resolution) { started.resolve(); await release.promise; } return set(key, record); };
+  const request = { path: `${base}/jobs/${id}/resolve`, method: "POST", body: { confirmNoDraft: true } };
+  const resolving = f.handle(request); await started.promise;
+  assert.equal((await f.handle(request)).status, 409);
+  assert.equal((await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(randomUUID()) })).status, 409);
+  assert.equal((await f.connect()).status, 409);
+  release.resolve(); assert.equal((await resolving).status, 200); f.store.set = set;
+  for (const extra of [{ status: "uploading" }, { status: "creating" }, { status: "saved" }, { draftId: "known" }, { publicationAttempted: true }, { publicationStatus: "failed" }, { publicationId: "known" }]) {
+    await f.store.set(jobKey(id), { id, accountId, status: "needs_confirmation", imageMediaIds: [], ...extra });
+    assert.equal((await f.handle(request)).status, 409);
+  }
+  assert.deepEqual(f.calls, ["connect"]);
+});
+
+test("known pre-create failure is not changed to uncertain by a storage outage", { timeout: 5000 }, async () => {
+  const store = memoryStore(), set = store.set;
+  const f = await fixture({ store, api: { async uploadImage() {
+    store.set = async () => { throw new Error("full"); };
+    throw new WechatApiError("IP 203.0.113.7 未加入白名单", { outcome: "rejected", errcode: 40164 });
+  } } });
+  const id = randomUUID(); await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(id) }); await waitIdle(f.handle);
+  const result = await f.handle({ path: `${base}/jobs/${id}` });
+  assert.equal(result.body.job.status, "failed"); assert.match(result.body.job.message, /白名单/u);
+  store.set = set;
+  f.api.uploadImage = async () => "media";
+  const retry = randomUUID();
+  assert.equal((await f.handle({ path: `${base}/jobs`, method: "POST", body: submission(retry) })).status, 202);
+  assert.equal((await store.terminal(retry)).status, "saved");
+  assert.equal((await store.get(jobKey(id))).status, "failed");
+  assert.equal(f.calls.filter((call) => call.create).length, 1);
 });
